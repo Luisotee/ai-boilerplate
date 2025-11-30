@@ -12,7 +12,8 @@ A cross-platform AI agent system that allows users to interact with an AI assist
 - **Communication**: HTTP + Server-Sent Events (SSE)
 - **Approach**: Minimal MVP - no premature abstractions
 
-## **Note:** Remember to use your context7 tool to get the latest libraries and best practices for all implementations.
+**Note:** Remember to use your context7 tool to get the latest libraries and best practices for all implementations.
+**Note:** The code snippets below are illustrative. Adjust as needed during actual implementation.
 
 ## Project Structure
 
@@ -56,7 +57,7 @@ ai-boilerplate/
 
 ### Phase 1: Project Initialization (30 minutes)
 
-#### 1.1 Initialize Git Repository
+#### 1.1 Initialize Git Repository (Done)
 
 ```bash
 cd /home/luis/projects/ai-boilerplate
