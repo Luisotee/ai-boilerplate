@@ -5,7 +5,8 @@
       "mcp__context7__resolve-library-id",
       "mcp__context7__get-library-docs",
       "Bash(docker:*)",
-      "Bash(node --version:*)"
+      "Bash(node --version:*)",
+      "Bash(uv add:*)"
     ],
     "deny": [],
     "ask": []
