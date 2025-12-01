@@ -90,7 +90,7 @@ ai-boilerplate/
 - Runs in Docker container (`aiagent-postgres`)
 - Health checks ensure ready state before API starts
 - Persistent volume: `postgres-data`
-- Table: `conversation_messages` (id, phone, role, content, timestamp)
+- Tables: `users` (UUID id, phone, name, created_at) and `conversation_messages` (UUID id, UUID user_id, role, content, timestamp)
 
 **Monorepo Management:**
 
@@ -173,13 +173,69 @@ docker exec -it aiagent-postgres psql -U aiagent -d aiagent
 
 # Inside psql:
 \dt                        # List tables
-\d conversation_messages   # Describe table schema
-SELECT * FROM conversation_messages ORDER BY timestamp DESC LIMIT 10;
+\d users                   # Describe users table schema
+\d conversation_messages   # Describe conversation_messages table schema
+
+# View all users
+SELECT * FROM users ORDER BY created_at DESC;
+
+# View messages with user info (JOIN)
+SELECT u.phone, u.name, m.role, m.content, m.timestamp
+FROM conversation_messages m
+JOIN users u ON m.user_id = u.id
+ORDER BY m.timestamp DESC LIMIT 10;
 
 # Reset database (DESTRUCTIVE)
 docker-compose down -v     # Removes containers and volumes
 docker-compose up -d       # Fresh start
 ```
+
+### Database Schema
+
+**users table:**
+- `id`: UUID (v4), Primary Key, Indexed, Auto-generated - Unique identifier
+- `phone`: String, Unique, Indexed, Not Null - Phone number (e.g., "1234567890@s.whatsapp.net")
+- `name`: String, Nullable - Optional user name
+- `created_at`: DateTime, Not Null, Default: UTC now - When user first interacted
+
+**conversation_messages table:**
+- `id`: UUID (v4), Primary Key, Indexed, Auto-generated - Unique identifier
+- `user_id`: UUID, Foreign Key to users.id, Indexed, Not Null - References user
+- `role`: String, Not Null - Either 'user' or 'assistant'
+- `content`: Text, Not Null - Message text
+- `timestamp`: DateTime, Not Null, Default: UTC now - When message was sent
+
+**Relationship:** One user has many messages (one-to-many). Deleting a user cascades to delete all their messages.
+
+**Auto-creation:** Users are automatically created when they send their first message. The `get_or_create_user()` helper function handles this transparently.
+
+**UUIDs:** The system uses UUID4 (random) for all primary keys. Example: `a7f3e4b2-1c9d-4a3f-8e2b-5d6c7f8a9b0c`. Benefits include security (no record count leakage), distributed system support, and URL safety.
+
+### Adminer (Database GUI)
+
+Adminer provides a web-based interface for managing the PostgreSQL database, similar to Prisma Studio.
+
+```bash
+# Start Adminer (included in docker-compose)
+docker-compose up -d
+
+# Access Adminer web interface
+# Open browser: http://localhost:8080
+
+# Login credentials:
+# System: PostgreSQL
+# Server: postgres
+# Username: aiagent
+# Password: changeme (or your POSTGRES_PASSWORD)
+# Database: aiagent
+```
+
+**Features:**
+- Browse tables and view data
+- Run SQL queries
+- Edit records directly
+- Export data (CSV, SQL, etc.)
+- View table structure and indexes
 
 ### Testing and Verification
 
@@ -329,15 +385,20 @@ async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)):
 **SQLAlchemy ORM:**
 
 ```python
-# ✅ CORRECT: Use ORM methods
+# ✅ CORRECT: Use ORM methods with JOIN
 messages = db.query(ConversationMessage)\
-    .filter(ConversationMessage.phone == phone)\
+    .join(User)\
+    .filter(User.phone == phone)\
     .order_by(ConversationMessage.timestamp.desc())\
     .limit(10)\
     .all()
 
+# ✅ CORRECT: Use relationship (even better)
+user = db.query(User).filter(User.phone == phone).first()
+messages = user.messages[-10:]  # Last 10 messages
+
 # ❌ WRONG: Raw SQL (avoid unless absolutely necessary)
-db.execute(f"SELECT * FROM conversation_messages WHERE phone = '{phone}'")
+db.execute(f"SELECT * FROM conversation_messages WHERE user_id = {user_id}")
 ```
 
 **UTC Timestamps:**

@@ -7,7 +7,9 @@
       "Bash(docker:*)",
       "Bash(node --version:*)",
       "Bash(uv add:*)",
-      "WebFetch(domain:github.com)"
+      "WebFetch(domain:github.com)",
+      "WebSearch",
+      "WebFetch(domain:hub.docker.com)"
     ],
     "deny": [],
     "ask": []

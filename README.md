@@ -132,10 +132,37 @@ Connect to PostgreSQL:
 docker exec -it aiagent-postgres psql -U aiagent -d aiagent
 ```
 
-View messages:
+View users:
 ```sql
-SELECT * FROM conversation_messages ORDER BY timestamp DESC LIMIT 10;
+SELECT * FROM users ORDER BY created_at DESC;
 ```
+
+View messages with user info:
+```sql
+SELECT u.phone, u.name, m.role, m.content, m.timestamp
+FROM conversation_messages m
+JOIN users u ON m.user_id = u.id
+ORDER BY m.timestamp DESC LIMIT 10;
+```
+
+### Database GUI (Adminer)
+
+Adminer provides a web-based interface for managing your database, similar to Prisma Studio:
+
+**Access:** http://localhost:8080
+
+**Login credentials:**
+- System: **PostgreSQL**
+- Server: **postgres**
+- Username: **aiagent**
+- Password: **changeme**
+- Database: **aiagent**
+
+With Adminer you can:
+- Browse tables and view data
+- Run SQL queries
+- Edit records directly
+- Export data (CSV, SQL, etc.)
 
 ### API Documentation
 
