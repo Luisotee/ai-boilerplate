@@ -4,6 +4,7 @@ import makeWASocket, {
   WAMessage,
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
+import qrcode from 'qrcode-terminal';
 import { logger } from './logger.js';
 import { sendMessageToAI } from './api-client.js';
 
@@ -12,12 +13,17 @@ export async function startWhatsAppClient() {
 
   const sock = makeWASocket({
     auth: state,
-    printQRInTerminal: true,
     browser: ['AI Agent', 'Chrome', '1.0.0'],
   });
 
   sock.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect } = update;
+    const { connection, lastDisconnect, qr } = update;
+
+    // Handle QR code display
+    if (qr) {
+      qrcode.generate(qr, { small: true });
+      logger.info('QR Code displayed above. Scan with WhatsApp mobile app.');
+    }
 
     if (connection === 'close') {
       const shouldReconnect =

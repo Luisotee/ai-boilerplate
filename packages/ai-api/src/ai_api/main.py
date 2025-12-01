@@ -5,18 +5,29 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from dotenv import load_dotenv
 
+# Load environment variables BEFORE importing local modules
+load_dotenv()
+
 from .logger import logger
 from .database import init_db, get_db, get_conversation_history, save_message
 from .schemas import ChatRequest, ChatResponse
 from .agent import get_ai_response, format_message_history
-
-load_dotenv()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize database on startup"""
     logger.info('Starting AI API service...')
     init_db()
+    logger.info('=' * 60)
+    logger.info('AI API is ready!')
+    logger.info('=' * 60)
+    logger.info('📚 API Documentation:')
+    logger.info('   Swagger UI: http://localhost:8000/docs')
+    logger.info('   ReDoc:      http://localhost:8000/redoc')
+    logger.info('   OpenAPI:    http://localhost:8000/openapi.json')
+    logger.info('=' * 60)
+    logger.info('🏥 Health Check: http://localhost:8000/health')
+    logger.info('=' * 60)
     yield
     logger.info('Shutting down AI API service...')
 

@@ -25,6 +25,9 @@ importers:
       pino-pretty:
         specifier: ^13.1.2
         version: 13.1.2
+      qrcode-terminal:
+        specifier: ^0.12.0
+        version: 0.12.0
     devDependencies:
       '@types/node':
         specifier: ^24.10.1
@@ -603,6 +606,10 @@ packages:
   qified@0.5.2:
     resolution: {integrity: sha512-7gJ6mxcQb9vUBOtbKm5mDevbe2uRcOEVp1g4gb/Q+oLntB3HY8eBhOYRxFI2mlDFlY1e4DOSCptzxarXRvzxCA==}
     engines: {node: '>=20'}
+
+  qrcode-terminal@0.12.0:
+    resolution: {integrity: sha512-EXtzRZmC+YGmGlDFbXKxQiMZNwCLEO6BANKXG4iCtSIM0yqc/pappSx3RIKr4r0uh5JsBckOXeKrB3Iz7mdQpQ==}
+    hasBin: true
 
   quick-format-unescaped@4.0.4:
     resolution: {integrity: sha512-tYC1Q1hgyRuHgloV/YXs2w15unPVh8qfu/qCTfhTYamaw7fyhumKa2yGpdSo87vY32rIclj+4fWYQXUMs9EHvg==}
@@ -1206,6 +1213,8 @@ snapshots:
   qified@0.5.2:
     dependencies:
       hookified: 1.13.0
+
+  qrcode-terminal@0.12.0: {}
 
   quick-format-unescaped@4.0.4: {}
 
