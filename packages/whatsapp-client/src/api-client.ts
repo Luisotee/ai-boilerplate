@@ -2,18 +2,44 @@ import { logger } from './logger.js';
 
 const AI_API_URL = process.env.AI_API_URL || 'http://localhost:8000';
 
-export async function sendMessageToAI(phone: string, message: string): Promise<AsyncIterable<string>> {
-  const response = await fetch(`${AI_API_URL}/chat/stream`, {
+interface MessageOptions {
+  senderJid?: string;
+  senderName?: string;
+  saveOnly?: boolean;  // Only save, don't get AI response
+}
+
+export async function sendMessageToAI(
+  whatsappJid: string,
+  message: string,
+  options: MessageOptions = {}
+): Promise<AsyncIterable<string>> {
+
+  const { senderJid, senderName, saveOnly } = options;
+
+  // Use save-only endpoint if requested
+  const endpoint = saveOnly ? '/chat/save' : '/chat/stream';
+
+  const response = await fetch(`${AI_API_URL}${endpoint}`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Accept': 'text/event-stream',
+      'Accept': saveOnly ? 'application/json' : 'text/event-stream',
     },
-    body: JSON.stringify({ phone, message }),
+    body: JSON.stringify({
+      whatsapp_jid: whatsappJid,
+      message,
+      sender_jid: senderJid,
+      sender_name: senderName,
+    }),
   });
 
   if (!response.ok) {
     throw new Error(`AI API error: ${response.status} ${response.statusText}`);
+  }
+
+  if (saveOnly) {
+    // Return empty iterator for save-only requests
+    return (async function*() {})();
   }
 
   if (!response.body) {

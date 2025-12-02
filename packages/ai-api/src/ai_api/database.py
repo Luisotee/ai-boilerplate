@@ -17,7 +17,8 @@ class User(Base):
     __tablename__ = 'users'
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
-    phone = Column(String, unique=True, index=True, nullable=False)
+    whatsapp_jid = Column(String, unique=True, index=True, nullable=False)
+    phone = Column(String, nullable=True)
     name = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
@@ -31,6 +32,11 @@ class ConversationMessage(Base):
     user_id = Column(UUID(as_uuid=True), ForeignKey('users.id'), nullable=False, index=True)
     role = Column(String, nullable=False)  # 'user' or 'assistant'
     content = Column(Text, nullable=False)
+
+    # Group context (nullable for backward compatibility)
+    sender_jid = Column(String, nullable=True, index=True)  # Participant JID in groups
+    sender_name = Column(String, nullable=True)  # Participant name in groups
+
     timestamp = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     # Relationship
@@ -50,20 +56,20 @@ def get_db():
     finally:
         db.close()
 
-def get_or_create_user(db, phone: str, name: str = None):
-    """Get existing user or create new one"""
-    user = db.query(User).filter(User.phone == phone).first()
+def get_or_create_user(db, whatsapp_jid: str, name: str = None):
+    """Get existing user or create new one by WhatsApp JID"""
+    user = db.query(User).filter(User.whatsapp_jid == whatsapp_jid).first()
     if not user:
-        user = User(phone=phone, name=name)
+        user = User(whatsapp_jid=whatsapp_jid, name=name)
         db.add(user)
         db.commit()
         db.refresh(user)
-        logger.info(f'Created new user: {phone}')
+        logger.info(f'Created new user: {whatsapp_jid}')
     return user
 
-def get_conversation_history(db, phone: str, limit: int = 10):
-    """Retrieve recent conversation history for a user"""
-    user = get_or_create_user(db, phone)
+def get_conversation_history(db, whatsapp_jid: str, limit: int = 10):
+    """Retrieve recent conversation history for a user by WhatsApp JID"""
+    user = get_or_create_user(db, whatsapp_jid)
     messages = db.query(ConversationMessage)\
         .filter(ConversationMessage.user_id == user.id)\
         .order_by(ConversationMessage.timestamp.desc())\
@@ -72,13 +78,16 @@ def get_conversation_history(db, phone: str, limit: int = 10):
 
     return list(reversed(messages))
 
-def save_message(db, phone: str, role: str, content: str):
-    """Save a message to the database"""
-    user = get_or_create_user(db, phone)
+def save_message(db, whatsapp_jid: str, role: str, content: str,
+                 sender_jid: str = None, sender_name: str = None):
+    """Save a message to the database with optional group context"""
+    user = get_or_create_user(db, whatsapp_jid)
     message = ConversationMessage(
         user_id=user.id,
         role=role,
-        content=content
+        content=content,
+        sender_jid=sender_jid,
+        sender_name=sender_name
     )
     db.add(message)
     db.commit()

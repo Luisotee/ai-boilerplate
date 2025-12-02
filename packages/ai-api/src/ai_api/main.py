@@ -10,7 +10,7 @@ load_dotenv()
 
 from .logger import logger
 from .database import init_db, get_db, get_conversation_history, save_message
-from .schemas import ChatRequest, ChatResponse
+from .schemas import ChatRequest, ChatResponse, SaveMessageRequest
 from .agent import get_ai_response, format_message_history
 
 @asynccontextmanager
@@ -67,6 +67,44 @@ async def health_check():
     """
     return {'status': 'healthy'}
 
+@app.post('/chat/save', tags=['Chat'])
+async def save_message_only(request: SaveMessageRequest, db: Session = Depends(get_db)):
+    """
+    Save a message without generating AI response
+
+    Used for group messages where bot shouldn't respond but needs to maintain context.
+
+    **Request Body:**
+    - `whatsapp_jid`: WhatsApp JID (group or private)
+    - `message`: Message text
+    - `sender_jid`: Optional sender JID (for group messages)
+    - `sender_name`: Optional sender name (for group messages)
+
+    **Response:**
+    - `success`: Boolean indicating if save was successful
+    """
+    logger.info(f'Saving message from {request.whatsapp_jid} (no response)')
+
+    try:
+        # Format message with sender name if group message
+        content = f"{request.sender_name}: {request.message}" if request.sender_name else request.message
+
+        # Save user message only
+        save_message(
+            db,
+            request.whatsapp_jid,
+            'user',
+            content,
+            sender_jid=request.sender_jid,
+            sender_name=request.sender_name
+        )
+
+        return {'success': True}
+
+    except Exception as e:
+        logger.error(f'Error saving message: {str(e)}', exc_info=True)
+        raise HTTPException(status_code=500, detail='Internal server error')
+
 @app.post('/chat/stream', tags=['Chat'])
 async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)):
     """
@@ -75,7 +113,7 @@ async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)):
     This endpoint accepts a message and streams the AI response using Server-Sent Events (SSE).
 
     **Request Body:**
-    - `phone`: User's phone number (e.g., "1234567890@s.whatsapp.net")
+    - `whatsapp_jid`: WhatsApp JID (e.g., "70253400879283@lid" or "1234567890@s.whatsapp.net")
     - `message`: User's message text
 
     **Response:**
@@ -83,21 +121,31 @@ async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)):
     - Format: `data: <content>\\n\\n`
     - End signal: `data: [DONE]\\n\\n`
     """
-    logger.info(f'Received chat request from {request.phone}')
+    logger.info(f'Received chat request from {request.whatsapp_jid}')
 
     try:
         # Get conversation history
-        history = get_conversation_history(db, request.phone, limit=10)
+        history = get_conversation_history(db, request.whatsapp_jid, limit=10)
         message_history = format_message_history(history) if history else None
 
-        # Save user message
-        save_message(db, request.phone, 'user', request.message)
+        # Format message with sender name if provided (group message)
+        content = f"{request.sender_name}: {request.message}" if request.sender_name else request.message
 
-        # Get AI response
-        ai_response = await get_ai_response(request.message, message_history)
+        # Save user message with group context
+        save_message(
+            db,
+            request.whatsapp_jid,
+            'user',
+            content,
+            sender_jid=request.sender_jid,
+            sender_name=request.sender_name
+        )
 
-        # Save assistant response
-        save_message(db, request.phone, 'assistant', ai_response)
+        # Get AI response (using formatted content)
+        ai_response = await get_ai_response(content, message_history)
+
+        # Save assistant response (no sender info for bot)
+        save_message(db, request.whatsapp_jid, 'assistant', ai_response)
 
         # Stream response
         async def generate():
@@ -123,27 +171,37 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
     Alternative to `/chat/stream` that returns the complete response in a single JSON payload.
 
     **Request Body:**
-    - `phone`: User's phone number (e.g., "1234567890@s.whatsapp.net")
+    - `whatsapp_jid`: WhatsApp JID (e.g., "70253400879283@lid" or "1234567890@s.whatsapp.net")
     - `message`: User's message text
 
     **Response:**
     - `response`: Complete AI-generated response text
     """
-    logger.info(f'Received chat request from {request.phone}')
+    logger.info(f'Received chat request from {request.whatsapp_jid}')
 
     try:
         # Get conversation history
-        history = get_conversation_history(db, request.phone, limit=10)
+        history = get_conversation_history(db, request.whatsapp_jid, limit=10)
         message_history = format_message_history(history) if history else None
 
-        # Save user message
-        save_message(db, request.phone, 'user', request.message)
+        # Format message with sender name if provided (group message)
+        content = f"{request.sender_name}: {request.message}" if request.sender_name else request.message
 
-        # Get AI response
-        ai_response = await get_ai_response(request.message, message_history)
+        # Save user message with group context
+        save_message(
+            db,
+            request.whatsapp_jid,
+            'user',
+            content,
+            sender_jid=request.sender_jid,
+            sender_name=request.sender_name
+        )
 
-        # Save assistant response
-        save_message(db, request.phone, 'assistant', ai_response)
+        # Get AI response (using formatted content)
+        ai_response = await get_ai_response(content, message_history)
+
+        # Save assistant response (no sender info for bot)
+        save_message(db, request.whatsapp_jid, 'assistant', ai_response)
 
         return ChatResponse(response=ai_response)
 
