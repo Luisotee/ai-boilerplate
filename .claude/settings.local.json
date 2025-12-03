@@ -9,7 +9,8 @@
       "Bash(uv add:*)",
       "WebFetch(domain:github.com)",
       "WebSearch",
-      "WebFetch(domain:hub.docker.com)"
+      "WebFetch(domain:hub.docker.com)",
+      "WebFetch(domain:baileys.wiki)"
     ],
     "deny": [],
     "ask": []

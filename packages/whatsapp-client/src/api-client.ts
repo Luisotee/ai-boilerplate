@@ -67,6 +67,10 @@ async function* parseSSE(body: ReadableStream<Uint8Array>): AsyncIterable<string
         if (line.startsWith('data: ')) {
           const data = line.slice(6);
           if (data === '[DONE]') return;
+          if (data === '[ERROR]') {
+            logger.error('Stream error received from API');
+            return;
+          }
           yield data;
         }
       }

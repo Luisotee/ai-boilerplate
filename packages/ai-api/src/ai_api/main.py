@@ -141,22 +141,37 @@ async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)):
             sender_name=request.sender_name
         )
 
-        # Get AI response (using formatted content)
-        ai_response = await get_ai_response(content, message_history)
-
-        # Save assistant response (no sender info for bot)
-        save_message(db, request.whatsapp_jid, 'assistant', ai_response)
-
         # Stream response
         async def generate():
-            # For MVP, send complete response in one chunk
-            # Future: implement actual streaming with agent.run_stream()
-            yield f'data: {ai_response}\n\n'
-            yield 'data: [DONE]\n\n'
+            full_response = ""
+            try:
+                # Stream tokens from AI as they arrive
+                async for token in get_ai_response(content, message_history):
+                    full_response += token
+                    yield f'data: {token}\n\n'
+
+                # Save complete assistant response after streaming completes
+                save_message(db, request.whatsapp_jid, 'assistant', full_response)
+
+                yield 'data: [DONE]\n\n'
+
+            except Exception as e:
+                logger.error(f'Error streaming response: {str(e)}', exc_info=True)
+
+                # Save partial response if any
+                if full_response:
+                    save_message(db, request.whatsapp_jid, 'assistant', full_response)
+
+                yield 'data: [ERROR]\n\n'
 
         return StreamingResponse(
             generate(),
-            media_type='text/event-stream'
+            media_type='text/event-stream',
+            headers={
+                'Cache-Control': 'no-cache',
+                'Connection': 'keep-alive',
+                'X-Accel-Buffering': 'no'  # Disable nginx buffering
+            }
         )
 
     except Exception as e:
@@ -197,8 +212,10 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
             sender_name=request.sender_name
         )
 
-        # Get AI response (using formatted content)
-        ai_response = await get_ai_response(content, message_history)
+        # Get AI response (using formatted content) - consume stream into complete response
+        ai_response = ""
+        async for token in get_ai_response(content, message_history):
+            ai_response += token
 
         # Save assistant response (no sender info for bot)
         save_message(db, request.whatsapp_jid, 'assistant', ai_response)

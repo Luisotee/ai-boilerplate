@@ -60,6 +60,98 @@ function shouldRespondInGroup(msg: WAMessage, botJid: string): boolean {
   return isBotMentioned(msg, botJid) || isReplyToBotMessage(msg, botJid);
 }
 
+/**
+ * Sends message with progressive updates as content streams in
+ * @param sock - Baileys socket instance
+ * @param jid - WhatsApp JID to send to
+ * @param stream - Async iterable of response chunks
+ * @returns Complete final response text
+ */
+async function sendProgressiveMessage(
+  sock: any,
+  jid: string,
+  stream: AsyncIterable<string>
+): Promise<string> {
+  let fullResponse = "";
+  let sentMessage: any = null;
+  let editingEnabled = true;
+  let lastUpdateLength = 0;
+  const UPDATE_THRESHOLD_CHARS = 50;  // Update every 50 characters
+  const EDIT_DELAY_MS = 500;          // Rate limit protection
+
+  try {
+    for await (const chunk of stream) {
+      fullResponse += chunk;
+
+      // Update when we've accumulated enough new characters
+      const newCharsAccumulated = fullResponse.length - lastUpdateLength;
+      if (newCharsAccumulated >= UPDATE_THRESHOLD_CHARS && editingEnabled) {
+        if (!sentMessage) {
+          // Send initial message
+          try {
+            sentMessage = await sock.sendMessage(jid, {
+              text: fullResponse
+            });
+            logger.debug({ jid, length: fullResponse.length }, "Initial message sent");
+            lastUpdateLength = fullResponse.length;
+          } catch (error) {
+            logger.error({ error, jid }, "Failed to send initial message");
+            editingEnabled = false;
+          }
+        } else {
+          // Edit existing message
+          try {
+            await sock.sendMessage(jid, {
+              text: fullResponse,
+              edit: sentMessage.key
+            });
+            logger.debug({ jid, length: fullResponse.length }, "Message updated");
+            lastUpdateLength = fullResponse.length;
+
+            // Rate limit protection: delay before next edit
+            await new Promise(resolve => setTimeout(resolve, EDIT_DELAY_MS));
+          } catch (error) {
+            logger.warn({ error, jid }, "Failed to edit message, disabling progressive updates");
+            editingEnabled = false; // Disable further edits but continue streaming
+          }
+        }
+      }
+    }
+
+    // Send final complete message
+    if (sentMessage && editingEnabled) {
+      // Final edit with complete response
+      try {
+        await sock.sendMessage(jid, {
+          text: fullResponse,
+          edit: sentMessage.key
+        });
+        logger.info({ jid, length: fullResponse.length }, "Final message sent (edited)");
+      } catch (error) {
+        logger.error({ error, jid }, "Failed to send final edit");
+        // Fallback: send as new message
+        await sock.sendMessage(jid, { text: fullResponse });
+        logger.info({ jid }, "Final message sent as fallback");
+      }
+    } else if (!sentMessage) {
+      // No message sent yet, send complete response now
+      await sock.sendMessage(jid, { text: fullResponse });
+      logger.info({ jid, length: fullResponse.length }, "Final message sent (no edits)");
+    }
+
+    return fullResponse;
+  } catch (error) {
+    logger.error({ error, jid }, "Error in progressive message sending");
+
+    // Ensure message is sent even if streaming fails
+    if (fullResponse && !sentMessage) {
+      await sock.sendMessage(jid, { text: fullResponse });
+    }
+
+    throw error;
+  }
+}
+
 export async function startWhatsAppClient() {
   const { state, saveCreds } = await useMultiFileAuthState("auth_info_baileys");
 
@@ -169,12 +261,8 @@ async function handleIncomingMessage(sock: any, msg: WAMessage) {
         senderName,
       });
 
-      let fullResponse = "";
-      for await (const chunk of stream) {
-        fullResponse += chunk;
-      }
-
-      await sock.sendMessage(whatsappJid, { text: fullResponse });
+      // Use progressive message updates
+      await sendProgressiveMessage(sock, whatsappJid, stream);
       logger.info({ whatsappJid, senderName }, "Sent AI response to group");
     } catch (error) {
       logger.error({ error }, "Error processing group message");
@@ -187,13 +275,9 @@ async function handleIncomingMessage(sock: any, msg: WAMessage) {
   else {
     try {
       const stream = await sendMessageToAI(whatsappJid, messageText);
-      let fullResponse = "";
 
-      for await (const chunk of stream) {
-        fullResponse += chunk;
-      }
-
-      await sock.sendMessage(whatsappJid, { text: fullResponse });
+      // Use progressive message updates
+      await sendProgressiveMessage(sock, whatsappJid, stream);
       logger.info({ whatsappJid }, "Sent AI response");
     } catch (error) {
       logger.error({ error }, "Error processing message");

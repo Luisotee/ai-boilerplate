@@ -19,21 +19,24 @@ agent = Agent(
 
 async def get_ai_response(user_message: str, message_history=None):
     """
-    Get AI response for a user message with optional history
+    Stream AI response token by token for a user message with optional history
 
     Args:
         user_message: The user's message
         message_history: Optional list of previous messages
 
-    Returns:
-        AI response text
+    Yields:
+        str: Text chunks as they arrive from Gemini
     """
     logger.info(f"Getting AI response for message: {user_message[:50]}...")
 
-    result = await agent.run(user_message, message_history=message_history)
+    # Use async context manager to enter streaming context
+    async with agent.run_stream(user_message, message_history=message_history) as result:
+        # Call .stream_text(delta=True) to get incremental deltas (NOT cumulative text)
+        async for text_chunk in result.stream_text(delta=True):
+            yield text_chunk
 
-    logger.info(f"AI response generated: {result.output[:50]}...")
-    return result.output
+    logger.info("AI response streaming completed")
 
 
 def format_message_history(db_messages):
