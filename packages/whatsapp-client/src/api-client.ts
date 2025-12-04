@@ -3,6 +3,7 @@ import { logger } from './logger.js';
 const AI_API_URL = process.env.AI_API_URL || 'http://localhost:8000';
 
 interface MessageOptions {
+  conversationType: 'private' | 'group';  // Conversation type (required)
   senderJid?: string;
   senderName?: string;
   saveOnly?: boolean;  // Only save, don't get AI response
@@ -11,13 +12,15 @@ interface MessageOptions {
 export async function sendMessageToAI(
   whatsappJid: string,
   message: string,
-  options: MessageOptions = {}
+  options: MessageOptions
 ): Promise<AsyncIterable<string>> {
 
-  const { senderJid, senderName, saveOnly } = options;
+  const { conversationType, senderJid, senderName, saveOnly } = options;
 
   // Use save-only endpoint if requested
   const endpoint = saveOnly ? '/chat/save' : '/chat/stream';
+
+  logger.info({ whatsappJid, saveOnly, conversationType }, 'Sending message to AI API');
 
   const response = await fetch(`${AI_API_URL}${endpoint}`, {
     method: 'POST',
@@ -30,6 +33,7 @@ export async function sendMessageToAI(
       message,
       sender_jid: senderJid,
       sender_name: senderName,
+      conversation_type: conversationType,
     }),
   });
 

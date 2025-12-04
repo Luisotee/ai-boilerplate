@@ -95,6 +95,7 @@ async def save_message_only(request: SaveMessageRequest, db: Session = Depends(g
             request.whatsapp_jid,
             'user',
             content,
+            request.conversation_type,
             sender_jid=request.sender_jid,
             sender_name=request.sender_name
         )
@@ -124,8 +125,12 @@ async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)):
     logger.info(f'Received chat request from {request.whatsapp_jid}')
 
     try:
-        # Get conversation history
-        history = get_conversation_history(db, request.whatsapp_jid, limit=10)
+        # Get conversation history with type-specific limit
+        history = get_conversation_history(
+            db,
+            request.whatsapp_jid,
+            request.conversation_type
+        )
         message_history = format_message_history(history) if history else None
 
         # Format message with sender name if provided (group message)
@@ -137,6 +142,7 @@ async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)):
             request.whatsapp_jid,
             'user',
             content,
+            request.conversation_type,
             sender_jid=request.sender_jid,
             sender_name=request.sender_name
         )
@@ -151,7 +157,13 @@ async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)):
                     yield f'data: {token}\n\n'
 
                 # Save complete assistant response after streaming completes
-                save_message(db, request.whatsapp_jid, 'assistant', full_response)
+                save_message(
+                    db,
+                    request.whatsapp_jid,
+                    'assistant',
+                    full_response,
+                    request.conversation_type
+                )
 
                 yield 'data: [DONE]\n\n'
 
@@ -160,7 +172,13 @@ async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)):
 
                 # Save partial response if any
                 if full_response:
-                    save_message(db, request.whatsapp_jid, 'assistant', full_response)
+                    save_message(
+                        db,
+                        request.whatsapp_jid,
+                        'assistant',
+                        full_response,
+                        request.conversation_type
+                    )
 
                 yield 'data: [ERROR]\n\n'
 
@@ -195,8 +213,12 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
     logger.info(f'Received chat request from {request.whatsapp_jid}')
 
     try:
-        # Get conversation history
-        history = get_conversation_history(db, request.whatsapp_jid, limit=10)
+        # Get conversation history with type-specific limit
+        history = get_conversation_history(
+            db,
+            request.whatsapp_jid,
+            request.conversation_type
+        )
         message_history = format_message_history(history) if history else None
 
         # Format message with sender name if provided (group message)
@@ -208,6 +230,7 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
             request.whatsapp_jid,
             'user',
             content,
+            request.conversation_type,
             sender_jid=request.sender_jid,
             sender_name=request.sender_name
         )
@@ -218,7 +241,13 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
             ai_response += token
 
         # Save assistant response (no sender info for bot)
-        save_message(db, request.whatsapp_jid, 'assistant', ai_response)
+        save_message(
+            db,
+            request.whatsapp_jid,
+            'assistant',
+            ai_response,
+            request.conversation_type
+        )
 
         return ChatResponse(response=ai_response)
 

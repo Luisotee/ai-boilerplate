@@ -1,11 +1,16 @@
 import os
 import uuid
 from datetime import datetime
+from enum import Enum
 from sqlalchemy import create_engine, Column, String, Text, DateTime, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from .logger import logger
+
+class ConversationType(str, Enum):
+    PRIVATE = 'private'
+    GROUP = 'group'
 
 DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://aiagent:changeme@localhost:5432/aiagent')
 
@@ -20,6 +25,7 @@ class User(Base):
     whatsapp_jid = Column(String, unique=True, index=True, nullable=False)
     phone = Column(String, nullable=True)
     name = Column(String, nullable=True)
+    conversation_type = Column(String, nullable=False, index=True)  # 'private' or 'group'
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     # Relationship
@@ -56,20 +62,39 @@ def get_db():
     finally:
         db.close()
 
-def get_or_create_user(db, whatsapp_jid: str, name: str = None):
+def get_or_create_user(db, whatsapp_jid: str, conversation_type: str, name: str = None):
     """Get existing user or create new one by WhatsApp JID"""
     user = db.query(User).filter(User.whatsapp_jid == whatsapp_jid).first()
     if not user:
-        user = User(whatsapp_jid=whatsapp_jid, name=name)
+        user = User(
+            whatsapp_jid=whatsapp_jid,
+            name=name,
+            conversation_type=conversation_type
+        )
         db.add(user)
         db.commit()
         db.refresh(user)
-        logger.info(f'Created new user: {whatsapp_jid}')
+        logger.info(f'Created new user: {whatsapp_jid} (type: {conversation_type})')
+    elif name and user.name != name:
+        # Update name if provided and changed
+        user.name = name
+        db.commit()
+        logger.info(f'Updated user name: {whatsapp_jid} -> {name}')
     return user
 
-def get_conversation_history(db, whatsapp_jid: str, limit: int = 10):
+def get_conversation_history(db, whatsapp_jid: str, conversation_type: str, limit: int = None):
     """Retrieve recent conversation history for a user by WhatsApp JID"""
-    user = get_or_create_user(db, whatsapp_jid)
+    user = get_or_create_user(db, whatsapp_jid, conversation_type)
+
+    # Load limit from environment if not explicitly provided
+    if limit is None:
+        if user.conversation_type == ConversationType.GROUP:
+            limit = int(os.getenv('HISTORY_LIMIT_GROUP', '10'))
+        else:  # private
+            limit = int(os.getenv('HISTORY_LIMIT_PRIVATE', '10'))
+
+        logger.info(f'Using history limit {limit} for {user.conversation_type} conversation')
+
     messages = db.query(ConversationMessage)\
         .filter(ConversationMessage.user_id == user.id)\
         .order_by(ConversationMessage.timestamp.desc())\
@@ -78,10 +103,10 @@ def get_conversation_history(db, whatsapp_jid: str, limit: int = 10):
 
     return list(reversed(messages))
 
-def save_message(db, whatsapp_jid: str, role: str, content: str,
+def save_message(db, whatsapp_jid: str, role: str, content: str, conversation_type: str,
                  sender_jid: str = None, sender_name: str = None):
     """Save a message to the database with optional group context"""
-    user = get_or_create_user(db, whatsapp_jid)
+    user = get_or_create_user(db, whatsapp_jid, conversation_type)
     message = ConversationMessage(
         user_id=user.id,
         role=role,
@@ -91,3 +116,5 @@ def save_message(db, whatsapp_jid: str, role: str, content: str,
     )
     db.add(message)
     db.commit()
+    logger.info(f'Saved {role} message for user {whatsapp_jid}')
+    return message

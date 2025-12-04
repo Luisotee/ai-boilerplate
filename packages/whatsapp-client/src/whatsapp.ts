@@ -209,6 +209,9 @@ async function processQueue(sock: any, whatsappJid: string): Promise<void> {
 async function processMessage(sock: any, queuedMessage: QueuedMessage): Promise<void> {
   const { msg, messageText, whatsappJid, isGroup } = queuedMessage;
 
+  // Determine conversation type
+  const conversationType: 'private' | 'group' = isGroup ? 'group' : 'private';
+
   if (isGroup) {
     if (!botJid) {
       logger.warn("Bot JID not yet available, skipping group message");
@@ -225,6 +228,7 @@ async function processMessage(sock: any, queuedMessage: QueuedMessage): Promise<
         senderJid,
         senderName,
         saveOnly: true,
+        conversationType,
       });
       logger.info({ whatsappJid, senderJid, senderName }, "Group message saved");
       return;
@@ -235,6 +239,7 @@ async function processMessage(sock: any, queuedMessage: QueuedMessage): Promise<
     const stream = await sendMessageToAI(whatsappJid, formattedMessage, {
       senderJid,
       senderName,
+      conversationType,
     });
 
     await sendProgressiveMessage(sock, whatsappJid, stream);
@@ -242,7 +247,9 @@ async function processMessage(sock: any, queuedMessage: QueuedMessage): Promise<
 
   } else {
     // Handle private message
-    const stream = await sendMessageToAI(whatsappJid, messageText);
+    const stream = await sendMessageToAI(whatsappJid, messageText, {
+      conversationType,
+    });
     await sendProgressiveMessage(sock, whatsappJid, stream);
     logger.info({ whatsappJid }, "Sent AI response");
   }
