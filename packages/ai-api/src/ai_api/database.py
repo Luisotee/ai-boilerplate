@@ -2,10 +2,11 @@ import os
 import uuid
 from datetime import datetime
 from enum import Enum
-from sqlalchemy import create_engine, Column, String, Text, DateTime, ForeignKey
+from sqlalchemy import create_engine, Column, String, Text, DateTime, ForeignKey, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
+from pgvector.sqlalchemy import Vector
 from .logger import logger
 
 class ConversationType(str, Enum):
@@ -45,12 +46,24 @@ class ConversationMessage(Base):
 
     timestamp = Column(DateTime, default=datetime.utcnow, nullable=False)
 
+    # Embeddings for semantic search (nullable)
+    embedding = Column(Vector(3072), nullable=True)  # Google gemini-embedding-001
+    embedding_generated_at = Column(DateTime, nullable=True)
+
     # Relationship
     user = relationship('User', back_populates='messages')
 
 def init_db():
     """Initialize database tables"""
     logger.info('Initializing database...')
+
+    # Enable pgvector extension (required for VECTOR column type)
+    with engine.connect() as conn:
+        conn.execute(text('CREATE EXTENSION IF NOT EXISTS vector'))
+        conn.commit()
+    logger.info('pgvector extension enabled')
+
+    # Create all tables
     Base.metadata.create_all(bind=engine)
     logger.info('Database initialized successfully')
 
@@ -104,17 +117,20 @@ def get_conversation_history(db, whatsapp_jid: str, conversation_type: str, limi
     return list(reversed(messages))
 
 def save_message(db, whatsapp_jid: str, role: str, content: str, conversation_type: str,
-                 sender_jid: str = None, sender_name: str = None):
-    """Save a message to the database with optional group context"""
+                 sender_jid: str = None, sender_name: str = None, embedding: list = None):
+    """Save a message to the database with optional group context and embedding"""
     user = get_or_create_user(db, whatsapp_jid, conversation_type)
     message = ConversationMessage(
         user_id=user.id,
         role=role,
         content=content,
         sender_jid=sender_jid,
-        sender_name=sender_name
+        sender_name=sender_name,
+        embedding=embedding,
+        embedding_generated_at=datetime.utcnow() if embedding else None
     )
     db.add(message)
     db.commit()
-    logger.info(f'Saved {role} message for user {whatsapp_jid}')
+    db.refresh(message)
+    logger.info(f'Saved {role} message for user {whatsapp_jid} (embedding: {embedding is not None})')
     return message

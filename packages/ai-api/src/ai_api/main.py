@@ -9,9 +9,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from .logger import logger
-from .database import init_db, get_db, get_conversation_history, save_message
+from .database import init_db, get_db, get_conversation_history, save_message, get_or_create_user
 from .schemas import ChatRequest, ChatResponse, SaveMessageRequest
-from .agent import get_ai_response, format_message_history
+from .agent import get_ai_response, format_message_history, AgentDeps
+from .embeddings import create_embedding_service
+from .rag.conversation import ConversationRAG
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -89,6 +91,17 @@ async def save_message_only(request: SaveMessageRequest, db: Session = Depends(g
         # Format message with sender name if group message
         content = f"{request.sender_name}: {request.message}" if request.sender_name else request.message
 
+        # Generate embedding for message using embedding service
+        user_embedding = None
+        embedding_service = create_embedding_service(os.getenv("GEMINI_API_KEY"))
+        if embedding_service:
+            try:
+                user_embedding = await embedding_service.generate(content)
+                if not user_embedding:
+                    logger.warning("Failed to generate embedding (graceful degradation)")
+            except Exception as e:
+                logger.error(f"Embedding generation error (continuing anyway): {str(e)}")
+
         # Save user message only
         save_message(
             db,
@@ -97,7 +110,8 @@ async def save_message_only(request: SaveMessageRequest, db: Session = Depends(g
             content,
             request.conversation_type,
             sender_jid=request.sender_jid,
-            sender_name=request.sender_name
+            sender_name=request.sender_name,
+            embedding=user_embedding
         )
 
         return {'success': True}
@@ -136,7 +150,20 @@ async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)):
         # Format message with sender name if provided (group message)
         content = f"{request.sender_name}: {request.message}" if request.sender_name else request.message
 
-        # Save user message with group context
+        # Generate embedding for user message using embedding service
+        user_embedding = None
+        embedding_service_for_save = create_embedding_service(os.getenv("GEMINI_API_KEY"))
+        if embedding_service_for_save:
+            try:
+                user_embedding = await embedding_service_for_save.generate(content)
+                if user_embedding:
+                    logger.info("Generated embedding for user message")
+                else:
+                    logger.warning("Failed to generate embedding (graceful degradation)")
+            except Exception as e:
+                logger.error(f"Embedding generation error (continuing anyway): {str(e)}")
+
+        # Save user message with group context and embedding
         save_message(
             db,
             request.whatsapp_jid,
@@ -144,17 +171,42 @@ async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)):
             content,
             request.conversation_type,
             sender_jid=request.sender_jid,
-            sender_name=request.sender_name
+            sender_name=request.sender_name,
+            embedding=user_embedding
+        )
+
+        # Prepare agent dependencies for semantic search tool (dependency injection)
+        user = get_or_create_user(db, request.whatsapp_jid, request.conversation_type)
+
+        # Initialize embedding service and RAG following Pydantic AI best practices
+        embedding_service = create_embedding_service(os.getenv("GEMINI_API_KEY"))
+        conversation_rag = ConversationRAG() if embedding_service else None
+
+        agent_deps = AgentDeps(
+            db=db,
+            user_id=str(user.id),
+            whatsapp_jid=request.whatsapp_jid,
+            recent_message_ids=[str(msg.id) for msg in history] if history else [],
+            embedding_service=embedding_service,
+            conversation_rag=conversation_rag
         )
 
         # Stream response
         async def generate():
             full_response = ""
             try:
-                # Stream tokens from AI as they arrive
-                async for token in get_ai_response(content, message_history):
+                # Stream tokens from AI as they arrive with semantic search capability
+                async for token in get_ai_response(content, message_history, agent_deps=agent_deps):
                     full_response += token
                     yield f'data: {token}\n\n'
+
+                # Generate embedding for assistant response using embedding service
+                assistant_embedding = None
+                if embedding_service_for_save:
+                    try:
+                        assistant_embedding = await embedding_service_for_save.generate(full_response)
+                    except Exception as e:
+                        logger.error(f"Error generating assistant embedding: {str(e)}")
 
                 # Save complete assistant response after streaming completes
                 save_message(
@@ -162,7 +214,8 @@ async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)):
                     request.whatsapp_jid,
                     'assistant',
                     full_response,
-                    request.conversation_type
+                    request.conversation_type,
+                    embedding=assistant_embedding
                 )
 
                 yield 'data: [DONE]\n\n'
@@ -177,7 +230,8 @@ async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)):
                         request.whatsapp_jid,
                         'assistant',
                         full_response,
-                        request.conversation_type
+                        request.conversation_type,
+                        embedding=None  # No embedding for partial response
                     )
 
                 yield 'data: [ERROR]\n\n'
@@ -224,7 +278,20 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
         # Format message with sender name if provided (group message)
         content = f"{request.sender_name}: {request.message}" if request.sender_name else request.message
 
-        # Save user message with group context
+        # Generate embedding for user message using embedding service
+        user_embedding = None
+        embedding_service_for_save = create_embedding_service(os.getenv("GEMINI_API_KEY"))
+        if embedding_service_for_save:
+            try:
+                user_embedding = await embedding_service_for_save.generate(content)
+                if user_embedding:
+                    logger.info("Generated embedding for user message")
+                else:
+                    logger.warning("Failed to generate embedding (graceful degradation)")
+            except Exception as e:
+                logger.error(f"Embedding generation error (continuing anyway): {str(e)}")
+
+        # Save user message with group context and embedding
         save_message(
             db,
             request.whatsapp_jid,
@@ -232,21 +299,47 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
             content,
             request.conversation_type,
             sender_jid=request.sender_jid,
-            sender_name=request.sender_name
+            sender_name=request.sender_name,
+            embedding=user_embedding
+        )
+
+        # Prepare agent dependencies for semantic search tool (dependency injection)
+        user = get_or_create_user(db, request.whatsapp_jid, request.conversation_type)
+
+        # Initialize embedding service and RAG following Pydantic AI best practices
+        embedding_service = create_embedding_service(os.getenv("GEMINI_API_KEY"))
+        conversation_rag = ConversationRAG() if embedding_service else None
+
+        agent_deps = AgentDeps(
+            db=db,
+            user_id=str(user.id),
+            whatsapp_jid=request.whatsapp_jid,
+            recent_message_ids=[str(msg.id) for msg in history] if history else [],
+            embedding_service=embedding_service,
+            conversation_rag=conversation_rag
         )
 
         # Get AI response (using formatted content) - consume stream into complete response
         ai_response = ""
-        async for token in get_ai_response(content, message_history):
+        async for token in get_ai_response(content, message_history, agent_deps=agent_deps):
             ai_response += token
 
-        # Save assistant response (no sender info for bot)
+        # Generate embedding for assistant response using embedding service
+        assistant_embedding = None
+        if embedding_service_for_save:
+            try:
+                assistant_embedding = await embedding_service_for_save.generate(ai_response)
+            except Exception as e:
+                logger.error(f"Error generating assistant embedding: {str(e)}")
+
+        # Save assistant response (no sender info for bot) with embedding
         save_message(
             db,
             request.whatsapp_jid,
             'assistant',
             ai_response,
-            request.conversation_type
+            request.conversation_type,
+            embedding=assistant_embedding
         )
 
         return ChatResponse(response=ai_response)

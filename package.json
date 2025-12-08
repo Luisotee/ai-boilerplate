@@ -6,7 +6,8 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev:ai": "cd packages/ai-api && uv run uvicorn ai_api.main:app --reload --host 0.0.0.0 --port 8000",
-    "dev:whatsapp": "pnpm --filter @ai-boilerplate/whatsapp-client dev"
+    "dev:whatsapp": "pnpm --filter @ai-boilerplate/whatsapp-client dev",
+    "install:all": "pnpm install && cd packages/ai-api && uv sync"
   },
   "keywords": [],
   "author": "",
