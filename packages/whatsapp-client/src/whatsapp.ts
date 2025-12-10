@@ -269,78 +269,111 @@ async function sendProgressiveMessage(
 ): Promise<string> {
   let fullResponse = "";
   let sentMessage: any = null;
-  let editingEnabled = true;
+  let typingInterval: NodeJS.Timeout | null = null;
   let lastUpdateLength = 0;
+
+  // Configuration
   const UPDATE_THRESHOLD_CHARS = 50;  // Update every 50 characters
-  const EDIT_DELAY_MS = 500;          // Rate limit protection
+  const EDIT_DELAY_MS = 500;          // Delay between edits (rate limiting)
 
   try {
+    // Start typing indicator immediately
+    await sock.sendPresenceUpdate('composing', jid);
+    logger.debug({ jid }, "Started typing indicator");
+
+    // Refresh typing indicator every 8 seconds (while no message sent yet)
+    typingInterval = setInterval(async () => {
+      if (!sentMessage) {  // Only refresh if we haven't sent a message yet
+        try {
+          await sock.sendPresenceUpdate('composing', jid);
+          logger.debug({ jid }, "Refreshed typing indicator");
+        } catch (error) {
+          logger.warn({ error, jid }, "Failed to refresh typing indicator");
+        }
+      }
+    }, 8000);
+
+    // Stream and progressively update message
     for await (const chunk of stream) {
       fullResponse += chunk;
 
-      // Update when we've accumulated enough new characters
       const newCharsAccumulated = fullResponse.length - lastUpdateLength;
-      if (newCharsAccumulated >= UPDATE_THRESHOLD_CHARS && editingEnabled) {
-        if (!sentMessage) {
-          // Send initial message
-          try {
-            sentMessage = await sock.sendMessage(jid, {
-              text: fullResponse
-            });
-            logger.debug({ jid, length: fullResponse.length }, "Initial message sent");
-            lastUpdateLength = fullResponse.length;
-          } catch (error) {
-            logger.error({ error, jid }, "Failed to send initial message");
-            editingEnabled = false;
-          }
-        } else {
-          // Edit existing message
-          try {
-            await sock.sendMessage(jid, {
-              text: fullResponse,
-              edit: sentMessage.key
-            });
-            logger.debug({ jid, length: fullResponse.length }, "Message updated");
-            lastUpdateLength = fullResponse.length;
 
-            // Rate limit protection: delay before next edit
-            await new Promise(resolve => setTimeout(resolve, EDIT_DELAY_MS));
-          } catch (error) {
-            logger.warn({ error, jid }, "Failed to edit message, disabling progressive updates");
-            editingEnabled = false; // Disable further edits but continue streaming
+      // Send or edit message when we have enough new content
+      if (newCharsAccumulated >= UPDATE_THRESHOLD_CHARS) {
+        if (!sentMessage) {
+          // First message - stop typing indicator and send initial message
+          if (typingInterval) {
+            clearInterval(typingInterval);
+            typingInterval = null;
           }
+          await sock.sendPresenceUpdate('paused', jid);
+
+          sentMessage = await sock.sendMessage(jid, { text: fullResponse });
+          logger.debug({ jid, length: fullResponse.length }, "Sent initial message");
+        } else {
+          // Subsequent updates - edit existing message
+          await new Promise(resolve => setTimeout(resolve, EDIT_DELAY_MS));
+          await sock.sendMessage(jid, {
+            text: fullResponse,
+            edit: sentMessage.key
+          });
+          logger.debug({ jid, length: fullResponse.length }, "Updated message");
         }
+
+        lastUpdateLength = fullResponse.length;
       }
     }
 
-    // Send final complete message
-    if (sentMessage && editingEnabled) {
-      // Final edit with complete response
-      try {
+    // Cleanup typing indicator if still running
+    if (typingInterval) {
+      clearInterval(typingInterval);
+      typingInterval = null;
+    }
+
+    // Send final update with complete content
+    if (!sentMessage) {
+      // No message sent yet (response was too short for threshold)
+      await sock.sendPresenceUpdate('paused', jid);
+      await sock.sendMessage(jid, { text: fullResponse });
+      logger.info({ jid, length: fullResponse.length }, "Sent complete message (below threshold)");
+    } else if (fullResponse.length > lastUpdateLength) {
+      // Send final edit with any remaining content
+      await sock.sendMessage(jid, {
+        text: fullResponse,
+        edit: sentMessage.key
+      });
+      logger.info({ jid, length: fullResponse.length }, "Sent final message update");
+    }
+
+    return fullResponse;
+
+  } catch (error) {
+    logger.error({ error, jid }, "Error in progressive message sending");
+
+    // Cleanup
+    if (typingInterval) {
+      clearInterval(typingInterval);
+    }
+
+    // Ensure typing indicator is stopped
+    try {
+      await sock.sendPresenceUpdate('paused', jid);
+    } catch (e) {
+      logger.warn({ error: e, jid }, "Failed to stop typing indicator on error");
+    }
+
+    // Try to send whatever content we have
+    if (fullResponse) {
+      if (!sentMessage) {
+        await sock.sendMessage(jid, { text: fullResponse });
+      } else {
         await sock.sendMessage(jid, {
           text: fullResponse,
           edit: sentMessage.key
         });
-        logger.info({ jid, length: fullResponse.length }, "Final message sent (edited)");
-      } catch (error) {
-        logger.error({ error, jid }, "Failed to send final edit");
-        // Fallback: send as new message
-        await sock.sendMessage(jid, { text: fullResponse });
-        logger.info({ jid }, "Final message sent as fallback");
       }
-    } else if (!sentMessage) {
-      // No message sent yet, send complete response now
-      await sock.sendMessage(jid, { text: fullResponse });
-      logger.info({ jid, length: fullResponse.length }, "Final message sent (no edits)");
-    }
-
-    return fullResponse;
-  } catch (error) {
-    logger.error({ error, jid }, "Error in progressive message sending");
-
-    // Ensure message is sent even if streaming fails
-    if (fullResponse && !sentMessage) {
-      await sock.sendMessage(jid, { text: fullResponse });
+      logger.info({ jid, length: fullResponse.length }, "Message sent despite error");
     }
 
     throw error;

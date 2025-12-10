@@ -186,7 +186,7 @@ class ConversationRAG(BaseRAG):
             # Attach similarity score as metadata
             msg._similarity_score = float(row.similarity)
 
-            logger.debug(f"  - [{row.role}] (similarity: {row.similarity:.3f}): {row.content[:60]}...")
+            logger.debug(f"  - [{row.role}] (similarity: {row.similarity:.3f})\n{row.content}")
 
             if include_context and self.context_window > 0:
                 # Get surrounding context

@@ -70,12 +70,23 @@ async function* parseSSE(body: ReadableStream<Uint8Array>): AsyncIterable<string
       for (const line of lines) {
         if (line.startsWith('data: ')) {
           const data = line.slice(6);
+
+          // Handle special SSE signals
           if (data === '[DONE]') return;
           if (data === '[ERROR]') {
             logger.error('Stream error received from API');
             return;
           }
-          yield data;
+
+          // JSON-decode the data to unescape newlines
+          try {
+            const decoded = JSON.parse(data);
+            yield decoded;
+          } catch (e) {
+            // Fallback for non-JSON data (backwards compatibility)
+            logger.warn({ data, error: e }, 'Failed to JSON-parse SSE data, using raw');
+            yield data;
+          }
         }
       }
     }

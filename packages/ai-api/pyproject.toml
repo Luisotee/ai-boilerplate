@@ -8,9 +8,12 @@ authors = [
 ]
 requires-python = ">=3.11"
 dependencies = [
+    "docling>=2.64.0",
+    "docling-core[chunking-openai]>=2.54.1",
     "fastapi>=0.122.0",
-    "google-genai>=1.0.0",
+    "google-genai>=1.52.0",
     "litellm>=1.80.7",
+    "numpy>=2.3.5",
     "pgvector>=0.3.6",
     "psycopg2-binary>=2.9.11",
     "pydantic-ai>=1.25.1",
