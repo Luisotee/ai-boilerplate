@@ -10,7 +10,9 @@
       "WebFetch(domain:github.com)",
       "WebSearch",
       "WebFetch(domain:hub.docker.com)",
-      "WebFetch(domain:baileys.wiki)"
+      "WebFetch(domain:baileys.wiki)",
+      "Bash(find:*)",
+      "Bash(grep:*)"
     ],
     "deny": [],
     "ask": []
