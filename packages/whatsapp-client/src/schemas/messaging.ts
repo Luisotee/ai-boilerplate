@@ -23,6 +23,17 @@ export const ReadMessagesSchema = z.object({
   message_ids: z.array(z.string()).describe('Message IDs to mark as read'),
 });
 
+export const EditMessageSchema = z.object({
+  phoneNumber: z.string().describe('Phone number (e.g., 5511999999999)'),
+  message_id: z.string().describe('Message ID to edit'),
+  new_text: z.string().min(1).describe('Updated message text'),
+});
+
+export const DeleteMessageSchema = z.object({
+  phoneNumber: z.string().describe('Phone number (e.g., 5511999999999)'),
+  message_id: z.string().describe('Message ID to delete'),
+});
+
 // Response schemas
 export const SendTextResponseSchema = z.object({
   success: z.boolean(),
@@ -47,3 +58,5 @@ export type SendTextRequest = z.infer<typeof SendTextSchema>;
 export type SendReactionRequest = z.infer<typeof SendReactionSchema>;
 export type TypingIndicatorRequest = z.infer<typeof TypingIndicatorSchema>;
 export type ReadMessagesRequest = z.infer<typeof ReadMessagesSchema>;
+export type EditMessageRequest = z.infer<typeof EditMessageSchema>;
+export type DeleteMessageRequest = z.infer<typeof DeleteMessageSchema>;
