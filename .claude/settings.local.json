@@ -12,7 +12,9 @@
       "WebFetch(domain:hub.docker.com)",
       "WebFetch(domain:baileys.wiki)",
       "Bash(find:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "WebFetch(domain:www.npmjs.com)",
+      "WebFetch(domain:fastify.dev)"
     ],
     "deny": [],
     "ask": []

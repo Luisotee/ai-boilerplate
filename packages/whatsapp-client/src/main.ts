@@ -1,7 +1,7 @@
 import Fastify from 'fastify';
 import FastifySwagger from '@fastify/swagger';
 import FastifySwaggerUI from '@fastify/swagger-ui';
-import FastifyMultipart from '@fastify/multipart';
+import FastifyMultipart, { ajvFilePlugin } from '@fastify/multipart';
 import FastifyCors from '@fastify/cors';
 import {
   serializerCompiler,
@@ -18,6 +18,36 @@ import { registerOperationsRoutes } from './routes/operations.js';
 const API_PORT = parseInt(process.env.WHATSAPP_API_PORT || '3001', 10);
 const API_HOST = process.env.WHATSAPP_API_HOST || '0.0.0.0';
 
+/**
+ * Transform function that handles both Zod and plain JSON Schema.
+ * Pattern based on fastify-zod-openapi's approach of passing through non-Zod schemas.
+ *
+ * @see https://www.npmjs.com/package/fastify-zod-openapi
+ * "This library assumes that if a response schema provided is not a Zod Schema,
+ *  it is a JSON Schema and will naively pass it straight through"
+ */
+function createMixedSchemaTransform() {
+  const multipartRoutes = [
+    '/whatsapp/send-image',
+    '/whatsapp/send-document',
+    '/whatsapp/send-audio',
+    '/whatsapp/send-video',
+  ];
+
+  return function mixedTransform(transformObject) {
+    const { schema, url } = transformObject;
+
+    // Multipart routes use plain JSON Schema - pass through unchanged
+    if (multipartRoutes.includes(url)) {
+      return { schema, url };
+    }
+
+    // All other routes use Zod - apply Zod transformation
+    // Pass through the full transform object, not just schema and url
+    return jsonSchemaTransform(transformObject);
+  };
+}
+
 async function start() {
   // Initialize Fastify with built-in Pino logger and ZodTypeProvider
   const app = Fastify({
@@ -30,6 +60,9 @@ async function start() {
           ignore: 'pid,hostname',
         },
       },
+    },
+    ajv: {
+      plugins: [ajvFilePlugin]
     }
   }).withTypeProvider<ZodTypeProvider>();
 
@@ -44,6 +77,7 @@ async function start() {
 
   // Register multipart for file uploads
   await app.register(FastifyMultipart, {
+    attachFieldsToBody: true,
     limits: {
       fileSize: 50 * 1024 * 1024, // 50MB max file size
     },
@@ -68,7 +102,7 @@ async function start() {
         { name: 'Operations', description: 'Edit, delete, forward messages' },
       ],
     },
-    transform: jsonSchemaTransform,
+    transform: createMixedSchemaTransform(),
   });
 
   // Register Swagger UI

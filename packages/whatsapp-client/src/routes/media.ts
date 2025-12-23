@@ -1,10 +1,796 @@
 import type { FastifyInstance } from 'fastify';
+import type { ZodTypeProvider } from 'fastify-type-provider-zod';
+import type { MultipartFile } from '@fastify/multipart';
+import { getBaileysSocket, isBaileysReady } from '../services/baileys.js';
+import { normalizeJid } from '../utils/jid.js';
+import { validateMediaFile } from '../utils/file-validation.js';
+import { buildVCard, validateContactInfo } from '../utils/vcard-builder.js';
+import {
+  SendLocationSchema,
+  SendContactSchema,
+  MediaResponseSchema,
+  ErrorResponseSchema,
+} from '../schemas/media.js';
 
 export async function registerMediaRoutes(app: FastifyInstance) {
-  // POST /whatsapp/send-image - To be implemented
-  // POST /whatsapp/send-document - To be implemented
-  // POST /whatsapp/send-audio - To be implemented
-  // POST /whatsapp/send-video - To be implemented
-  // POST /whatsapp/send-location - To be implemented
-  // POST /whatsapp/send-contact - To be implemented
+  // ==================== 1. POST /whatsapp/send-image ====================
+  app.post(
+    '/whatsapp/send-image',
+    {
+      schema: {
+        tags: ['Media'],
+        description: 'Send an image to WhatsApp user or group',
+        consumes: ['multipart/form-data'],
+        body: {
+          type: 'object',
+          required: ['file', 'phoneNumber'],
+          properties: {
+            file: { type: 'string', format: 'binary', description: 'Image file (JPEG, PNG, WebP)' },
+            phoneNumber: { type: 'string', description: 'Recipient phone number' },
+            caption: { type: 'string', description: 'Optional image caption' },
+          },
+        },
+        response: {
+          200: {
+            type: 'object',
+            properties: {
+              success: { type: 'boolean' },
+              message_id: { type: 'string' },
+            },
+          },
+          400: {
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+            },
+          },
+          404: {
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+            },
+          },
+          500: {
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+            },
+          },
+          503: {
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+            },
+          },
+        },
+      },
+      validatorCompiler: ({ schema }) => {
+        // Skip body validation - we validate manually in handler
+        return function (data) {
+          return { value: data };
+        };
+      },
+      serializerCompiler: ({ schema }) => {
+        // Skip response serialization - return data as-is for plain JSON Schema
+        return function (data) {
+          return JSON.stringify(data);
+        };
+      },
+    },
+    async (request, reply) => {
+      app.log.debug({ url: request.url }, 'Processing multipart request');
+
+      if (!isBaileysReady()) {
+        app.log.debug('Baileys not ready');
+        return reply.code(503).send({ error: 'WhatsApp not connected' });
+      }
+
+      try {
+        const body = request.body as {
+          file: MultipartFile;
+          phoneNumber: any;
+          caption?: any;
+        };
+
+        const file = body.file;
+        const phoneNumber = body.phoneNumber?.value || body.phoneNumber;
+        const caption = body.caption?.value;
+
+        app.log.debug({ phoneNumber, hasFile: !!file }, 'Extracted multipart fields');
+
+        if (!phoneNumber) {
+          app.log.debug('Missing phoneNumber');
+          return reply.code(400).send({ error: 'phoneNumber is required' });
+        }
+        if (!file) {
+          app.log.debug('Missing file');
+          return reply.code(400).send({ error: 'file is required' });
+        }
+
+        app.log.debug({ mimetype: file.mimetype }, 'Converting file to buffer');
+        const fileBuffer = await file.toBuffer();
+        app.log.debug({ bufferSize: fileBuffer.length }, 'File converted to buffer');
+
+        const mimetype = file.mimetype;
+
+        const validation = validateMediaFile(mimetype, fileBuffer.length, 'image');
+        if (!validation.valid) {
+          app.log.debug({ validationError: validation.error }, 'File validation failed');
+          return reply.code(400).send({ error: validation.error });
+        }
+
+        const normalizedJid = await normalizeJid(phoneNumber);
+        const sock = getBaileysSocket();
+
+        app.log.debug({ normalizedJid }, 'Sending message via Baileys');
+        const result = await sock.sendMessage(normalizedJid, {
+          image: fileBuffer,
+          caption: caption,
+          mimetype: mimetype,
+        });
+
+        app.log.debug({ messageId: result?.key.id }, 'Message sent successfully');
+        return { success: true, message_id: result?.key.id };
+      } catch (error: any) {
+        // Extract error details for proper logging
+        const errorDetails = {
+          message: error?.message || String(error) || 'Unknown error',
+          code: error?.code,
+          name: error?.constructor?.name,
+          stack: error?.stack,
+        };
+        app.log.error(errorDetails, 'Failed to send image');
+
+        // Handle specific multipart errors
+        const { multipartErrors } = app;
+
+        if (error instanceof multipartErrors.RequestFileTooLargeError) {
+          return reply.code(413).send({
+            error: 'File exceeds maximum size',
+            code: 'FILE_TOO_LARGE'
+          });
+        }
+
+        if (error instanceof multipartErrors.FilesLimitError) {
+          return reply.code(413).send({
+            error: 'Too many files uploaded',
+            code: 'FILES_LIMIT'
+          });
+        }
+
+        if (error instanceof multipartErrors.InvalidMultipartContentTypeError) {
+          return reply.code(406).send({
+            error: 'Request is not multipart',
+            code: 'INVALID_CONTENT_TYPE'
+          });
+        }
+
+        // Handle WhatsApp-specific errors
+        if (error.message?.includes('not registered on WhatsApp')) {
+          return reply.code(404).send({ error: error.message });
+        }
+
+        // Generic error with preserved message
+        return reply.code(500).send({
+          error: errorDetails.message
+        });
+      }
+    }
+  );
+
+  // ==================== 2. POST /whatsapp/send-document ====================
+  app.post(
+    '/whatsapp/send-document',
+    {
+      schema: {
+        tags: ['Media'],
+        description: 'Send a document to WhatsApp user or group',
+        consumes: ['multipart/form-data'],
+        body: {
+          type: 'object',
+          required: ['file', 'phoneNumber'],
+          properties: {
+            file: { type: 'string', format: 'binary', description: 'Document file (PDF, DOCX, etc.)' },
+            phoneNumber: { type: 'string', description: 'Recipient phone number' },
+            caption: { type: 'string', description: 'Optional document caption' },
+            fileName: { type: 'string', description: 'Optional custom file name' },
+          },
+        },
+        response: {
+          200: {
+            type: 'object',
+            properties: {
+              success: { type: 'boolean' },
+              message_id: { type: 'string' },
+            },
+          },
+          400: {
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+            },
+          },
+          404: {
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+            },
+          },
+          500: {
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+            },
+          },
+          503: {
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+            },
+          },
+        },
+      },
+      validatorCompiler: ({ schema }) => {
+        // Skip body validation - we validate manually in handler
+        return function (data) {
+          return { value: data };
+        };
+      },
+      serializerCompiler: ({ schema }) => {
+        // Skip response serialization - return data as-is for plain JSON Schema
+        return function (data) {
+          return JSON.stringify(data);
+        };
+      },
+    },
+    async (request, reply) => {
+      app.log.debug({ url: request.url }, 'Processing multipart request');
+
+      if (!isBaileysReady()) {
+        app.log.debug('Baileys not ready');
+        return reply.code(503).send({ error: 'WhatsApp not connected' });
+      }
+
+      try {
+        const body = request.body as {
+          file: MultipartFile;
+          phoneNumber: any;
+          caption?: any;
+          fileName?: any;
+        };
+
+        const file = body.file;
+        const phoneNumber = body.phoneNumber?.value || body.phoneNumber;
+        const caption = body.caption?.value;
+        const fileName = body.fileName?.value;
+
+        app.log.debug({ phoneNumber, hasFile: !!file, fileName }, 'Extracted multipart fields');
+
+        if (!phoneNumber) {
+          app.log.debug('Missing phoneNumber');
+          return reply.code(400).send({ error: 'phoneNumber is required' });
+        }
+        if (!file) {
+          app.log.debug('Missing file');
+          return reply.code(400).send({ error: 'file is required' });
+        }
+
+        app.log.debug({ mimetype: file.mimetype }, 'Converting file to buffer');
+        const fileBuffer = await file.toBuffer();
+        app.log.debug({ bufferSize: fileBuffer.length }, 'File converted to buffer');
+
+        const mimetype = file.mimetype;
+
+        const validation = validateMediaFile(mimetype, fileBuffer.length, 'document');
+        if (!validation.valid) {
+          app.log.debug({ validationError: validation.error }, 'File validation failed');
+          return reply.code(400).send({ error: validation.error });
+        }
+
+        const normalizedJid = await normalizeJid(phoneNumber);
+        const sock = getBaileysSocket();
+
+        app.log.debug({ normalizedJid }, 'Sending message via Baileys');
+        const result = await sock.sendMessage(normalizedJid, {
+          document: fileBuffer,
+          mimetype: mimetype,
+          fileName: fileName || file.filename,
+          caption: caption,
+        });
+
+        app.log.debug({ messageId: result?.key.id }, 'Message sent successfully');
+        return { success: true, message_id: result?.key.id };
+      } catch (error: any) {
+        // Extract error details for proper logging
+        const errorDetails = {
+          message: error?.message || String(error) || 'Unknown error',
+          code: error?.code,
+          name: error?.constructor?.name,
+          stack: error?.stack,
+        };
+        app.log.error(errorDetails, 'Failed to send document');
+
+        // Handle specific multipart errors
+        const { multipartErrors } = app;
+
+        if (error instanceof multipartErrors.RequestFileTooLargeError) {
+          return reply.code(413).send({
+            error: 'File exceeds maximum size',
+            code: 'FILE_TOO_LARGE'
+          });
+        }
+
+        if (error instanceof multipartErrors.FilesLimitError) {
+          return reply.code(413).send({
+            error: 'Too many files uploaded',
+            code: 'FILES_LIMIT'
+          });
+        }
+
+        if (error instanceof multipartErrors.InvalidMultipartContentTypeError) {
+          return reply.code(406).send({
+            error: 'Request is not multipart',
+            code: 'INVALID_CONTENT_TYPE'
+          });
+        }
+
+        // Handle WhatsApp-specific errors
+        if (error.message?.includes('not registered on WhatsApp')) {
+          return reply.code(404).send({ error: error.message });
+        }
+
+        // Generic error with preserved message
+        return reply.code(500).send({
+          error: errorDetails.message
+        });
+      }
+    }
+  );
+
+  // ==================== 3. POST /whatsapp/send-audio ====================
+  app.post(
+    '/whatsapp/send-audio',
+    {
+      schema: {
+        tags: ['Media'],
+        description: 'Send audio or voice note to WhatsApp user or group',
+        consumes: ['multipart/form-data'],
+        body: {
+          type: 'object',
+          required: ['file', 'phoneNumber'],
+          properties: {
+            file: { type: 'string', format: 'binary', description: 'Audio file (MP3, OGG, M4A)' },
+            phoneNumber: { type: 'string', description: 'Recipient phone number' },
+            isVoiceNote: { type: 'boolean', description: 'Send as voice note (default: false)' },
+          },
+        },
+        response: {
+          200: {
+            type: 'object',
+            properties: {
+              success: { type: 'boolean' },
+              message_id: { type: 'string' },
+            },
+          },
+          400: {
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+            },
+          },
+          404: {
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+            },
+          },
+          500: {
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+            },
+          },
+          503: {
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+            },
+          },
+        },
+      },
+      validatorCompiler: ({ schema }) => {
+        // Skip body validation - we validate manually in handler
+        return function (data) {
+          return { value: data };
+        };
+      },
+      serializerCompiler: ({ schema }) => {
+        // Skip response serialization - return data as-is for plain JSON Schema
+        return function (data) {
+          return JSON.stringify(data);
+        };
+      },
+    },
+    async (request, reply) => {
+      app.log.debug({ url: request.url }, 'Processing multipart request');
+
+      if (!isBaileysReady()) {
+        app.log.debug('Baileys not ready');
+        return reply.code(503).send({ error: 'WhatsApp not connected' });
+      }
+
+      try {
+        const body = request.body as {
+          file: MultipartFile;
+          phoneNumber: any;
+          isVoiceNote?: any;
+        };
+
+        const file = body.file;
+        const phoneNumber = body.phoneNumber?.value || body.phoneNumber;
+        const isVoiceNote = body.isVoiceNote?.value === 'true' || body.isVoiceNote?.value === true;
+
+        app.log.debug({ phoneNumber, hasFile: !!file, isVoiceNote }, 'Extracted multipart fields');
+
+        if (!phoneNumber) {
+          app.log.debug('Missing phoneNumber');
+          return reply.code(400).send({ error: 'phoneNumber is required' });
+        }
+        if (!file) {
+          app.log.debug('Missing file');
+          return reply.code(400).send({ error: 'file is required' });
+        }
+
+        app.log.debug({ mimetype: file.mimetype }, 'Converting file to buffer');
+        const fileBuffer = await file.toBuffer();
+        app.log.debug({ bufferSize: fileBuffer.length }, 'File converted to buffer');
+
+        const mimetype = file.mimetype;
+
+        const validation = validateMediaFile(mimetype, fileBuffer.length, 'audio');
+        if (!validation.valid) {
+          app.log.debug({ validationError: validation.error }, 'File validation failed');
+          return reply.code(400).send({ error: validation.error });
+        }
+
+        const normalizedJid = await normalizeJid(phoneNumber);
+        const sock = getBaileysSocket();
+
+        app.log.debug({ normalizedJid, ptt: isVoiceNote || false }, 'Sending message via Baileys');
+        const result = await sock.sendMessage(normalizedJid, {
+          audio: fileBuffer,
+          mimetype: mimetype,
+          ptt: isVoiceNote || false, // Push-to-talk (voice note)
+        });
+
+        app.log.debug({ messageId: result?.key.id }, 'Message sent successfully');
+        return { success: true, message_id: result?.key.id };
+      } catch (error: any) {
+        // Extract error details for proper logging
+        const errorDetails = {
+          message: error?.message || String(error) || 'Unknown error',
+          code: error?.code,
+          name: error?.constructor?.name,
+          stack: error?.stack,
+        };
+        app.log.error(errorDetails, 'Failed to send audio');
+
+        // Handle specific multipart errors
+        const { multipartErrors } = app;
+
+        if (error instanceof multipartErrors.RequestFileTooLargeError) {
+          return reply.code(413).send({
+            error: 'File exceeds maximum size',
+            code: 'FILE_TOO_LARGE'
+          });
+        }
+
+        if (error instanceof multipartErrors.FilesLimitError) {
+          return reply.code(413).send({
+            error: 'Too many files uploaded',
+            code: 'FILES_LIMIT'
+          });
+        }
+
+        if (error instanceof multipartErrors.InvalidMultipartContentTypeError) {
+          return reply.code(406).send({
+            error: 'Request is not multipart',
+            code: 'INVALID_CONTENT_TYPE'
+          });
+        }
+
+        // Handle WhatsApp-specific errors
+        if (error.message?.includes('not registered on WhatsApp')) {
+          return reply.code(404).send({ error: error.message });
+        }
+
+        // Generic error with preserved message
+        return reply.code(500).send({
+          error: errorDetails.message
+        });
+      }
+    }
+  );
+
+  // ==================== 4. POST /whatsapp/send-video ====================
+  app.post(
+    '/whatsapp/send-video',
+    {
+      schema: {
+        tags: ['Media'],
+        description: 'Send video to WhatsApp user or group',
+        consumes: ['multipart/form-data'],
+        body: {
+          type: 'object',
+          required: ['file', 'phoneNumber'],
+          properties: {
+            file: { type: 'string', format: 'binary', description: 'Video file (MP4)' },
+            phoneNumber: { type: 'string', description: 'Recipient phone number' },
+            caption: { type: 'string', description: 'Optional video caption' },
+            isGif: { type: 'boolean', description: 'Send as GIF (default: false)' },
+          },
+        },
+        response: {
+          200: {
+            type: 'object',
+            properties: {
+              success: { type: 'boolean' },
+              message_id: { type: 'string' },
+            },
+          },
+          400: {
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+            },
+          },
+          404: {
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+            },
+          },
+          500: {
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+            },
+          },
+          503: {
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+            },
+          },
+        },
+      },
+      validatorCompiler: ({ schema }) => {
+        // Skip body validation - we validate manually in handler
+        return function (data) {
+          return { value: data };
+        };
+      },
+      serializerCompiler: ({ schema }) => {
+        // Skip response serialization - return data as-is for plain JSON Schema
+        return function (data) {
+          return JSON.stringify(data);
+        };
+      },
+    },
+    async (request, reply) => {
+      app.log.debug({ url: request.url }, 'Processing multipart request');
+
+      if (!isBaileysReady()) {
+        app.log.debug('Baileys not ready');
+        return reply.code(503).send({ error: 'WhatsApp not connected' });
+      }
+
+      try {
+        const body = request.body as {
+          file: MultipartFile;
+          phoneNumber: any;
+          caption?: any;
+          isGif?: any;
+        };
+
+        const file = body.file;
+        const phoneNumber = body.phoneNumber?.value || body.phoneNumber;
+        const caption = body.caption?.value;
+        const isGif = body.isGif?.value === 'true' || body.isGif?.value === true;
+
+        app.log.debug({ phoneNumber, hasFile: !!file, isGif }, 'Extracted multipart fields');
+
+        if (!phoneNumber) {
+          app.log.debug('Missing phoneNumber');
+          return reply.code(400).send({ error: 'phoneNumber is required' });
+        }
+        if (!file) {
+          app.log.debug('Missing file');
+          return reply.code(400).send({ error: 'file is required' });
+        }
+
+        app.log.debug({ mimetype: file.mimetype }, 'Converting file to buffer');
+        const fileBuffer = await file.toBuffer();
+        app.log.debug({ bufferSize: fileBuffer.length }, 'File converted to buffer');
+
+        const mimetype = file.mimetype;
+
+        const validation = validateMediaFile(mimetype, fileBuffer.length, 'video');
+        if (!validation.valid) {
+          app.log.debug({ validationError: validation.error }, 'File validation failed');
+          return reply.code(400).send({ error: validation.error });
+        }
+
+        const normalizedJid = await normalizeJid(phoneNumber);
+        const sock = getBaileysSocket();
+
+        app.log.debug({ normalizedJid, gifPlayback: isGif || false }, 'Sending message via Baileys');
+        const result = await sock.sendMessage(normalizedJid, {
+          video: fileBuffer,
+          caption: caption,
+          mimetype: mimetype,
+          gifPlayback: isGif || false,
+        });
+
+        app.log.debug({ messageId: result?.key.id }, 'Message sent successfully');
+        return { success: true, message_id: result?.key.id };
+      } catch (error: any) {
+        // Extract error details for proper logging
+        const errorDetails = {
+          message: error?.message || String(error) || 'Unknown error',
+          code: error?.code,
+          name: error?.constructor?.name,
+          stack: error?.stack,
+        };
+        app.log.error(errorDetails, 'Failed to send video');
+
+        // Handle specific multipart errors
+        const { multipartErrors } = app;
+
+        if (error instanceof multipartErrors.RequestFileTooLargeError) {
+          return reply.code(413).send({
+            error: 'File exceeds maximum size',
+            code: 'FILE_TOO_LARGE'
+          });
+        }
+
+        if (error instanceof multipartErrors.FilesLimitError) {
+          return reply.code(413).send({
+            error: 'Too many files uploaded',
+            code: 'FILES_LIMIT'
+          });
+        }
+
+        if (error instanceof multipartErrors.InvalidMultipartContentTypeError) {
+          return reply.code(406).send({
+            error: 'Request is not multipart',
+            code: 'INVALID_CONTENT_TYPE'
+          });
+        }
+
+        // Handle WhatsApp-specific errors
+        if (error.message?.includes('not registered on WhatsApp')) {
+          return reply.code(404).send({ error: error.message });
+        }
+
+        // Generic error with preserved message
+        return reply.code(500).send({
+          error: errorDetails.message
+        });
+      }
+    }
+  );
+
+  // ==================== 5. POST /whatsapp/send-location ====================
+  app.withTypeProvider<ZodTypeProvider>().post(
+    '/whatsapp/send-location',
+    {
+      schema: {
+        tags: ['Media'],
+        description: 'Send location to WhatsApp user or group',
+        body: SendLocationSchema,
+        response: {
+          200: MediaResponseSchema,
+          400: ErrorResponseSchema,
+          404: ErrorResponseSchema,
+          500: ErrorResponseSchema,
+          503: ErrorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      if (!isBaileysReady()) {
+        return reply.code(503).send({ error: 'WhatsApp not connected' });
+      }
+
+      try {
+        const { phoneNumber, latitude, longitude, name, address } = request.body;
+        const normalizedJid = await normalizeJid(phoneNumber);
+        const sock = getBaileysSocket();
+
+        const result = await sock.sendMessage(normalizedJid, {
+          location: {
+            degreesLatitude: latitude,
+            degreesLongitude: longitude,
+            name: name,
+            address: address,
+          },
+        });
+
+        return { success: true, message_id: result?.key.id };
+      } catch (error: any) {
+        app.log.error({ error }, 'Failed to send location');
+        if (error.message?.includes('not registered on WhatsApp')) {
+          return reply.code(404).send({ error: error.message });
+        }
+        return reply.code(500).send({ error: 'Failed to send location' });
+      }
+    }
+  );
+
+  // ==================== 6. POST /whatsapp/send-contact ====================
+  app.withTypeProvider<ZodTypeProvider>().post(
+    '/whatsapp/send-contact',
+    {
+      schema: {
+        tags: ['Media'],
+        description: 'Send contact card to WhatsApp user or group',
+        body: SendContactSchema,
+        response: {
+          200: MediaResponseSchema,
+          400: ErrorResponseSchema,
+          404: ErrorResponseSchema,
+          500: ErrorResponseSchema,
+          503: ErrorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      if (!isBaileysReady()) {
+        return reply.code(503).send({ error: 'WhatsApp not connected' });
+      }
+
+      try {
+        const { phoneNumber, contactName, contactPhone, contactEmail, contactOrg } = request.body;
+
+        // Validate contact info
+        const contactValidation = validateContactInfo({
+          name: contactName,
+          phone: contactPhone,
+          email: contactEmail,
+          organization: contactOrg,
+        });
+
+        if (!contactValidation.valid) {
+          return reply.code(400).send({ error: contactValidation.error });
+        }
+
+        // Build vCard
+        const vcard = buildVCard({
+          name: contactName,
+          phone: contactPhone,
+          email: contactEmail,
+          organization: contactOrg,
+        });
+
+        const normalizedJid = await normalizeJid(phoneNumber);
+        const sock = getBaileysSocket();
+
+        const result = await sock.sendMessage(normalizedJid, {
+          contacts: {
+            displayName: contactName,
+            contacts: [{ vcard }],
+          },
+        });
+
+        return { success: true, message_id: result?.key.id };
+      } catch (error: any) {
+        app.log.error({ error }, 'Failed to send contact');
+        if (error.message?.includes('not registered on WhatsApp')) {
+          return reply.code(404).send({ error: error.message });
+        }
+        return reply.code(500).send({ error: 'Failed to send contact' });
+      }
+    }
+  );
 }
