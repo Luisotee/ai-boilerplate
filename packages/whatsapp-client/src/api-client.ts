@@ -17,17 +17,36 @@ export async function sendMessageToAI(
 
   const { conversationType, senderJid, senderName, saveOnly } = options;
 
-  // Use save-only endpoint if requested
-  const endpoint = saveOnly ? '/chat/save' : '/chat/stream';
+  // Handle save-only endpoint separately
+  if (saveOnly) {
+    logger.info({ whatsappJid, saveOnly, conversationType }, 'Saving message only');
 
-  logger.info({ whatsappJid, saveOnly, conversationType }, 'Sending message to AI API');
+    const response = await fetch(`${AI_API_URL}/chat/save`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        whatsapp_jid: whatsappJid,
+        message,
+        sender_jid: senderJid,
+        sender_name: senderName,
+        conversation_type: conversationType,
+      }),
+    });
 
-  const response = await fetch(`${AI_API_URL}${endpoint}`, {
+    if (!response.ok) {
+      throw new Error(`AI API error: ${response.status} ${response.statusText}`);
+    }
+
+    // Return empty iterator for save-only requests
+    return (async function*() {})();
+  }
+
+  // Step 1: POST to /chat/enqueue to get job_id
+  logger.info({ whatsappJid, conversationType }, 'Enqueuing message to AI API');
+
+  const enqueueResponse = await fetch(`${AI_API_URL}/chat/enqueue`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Accept': saveOnly ? 'application/json' : 'text/event-stream',
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       whatsapp_jid: whatsappJid,
       message,
@@ -37,23 +56,30 @@ export async function sendMessageToAI(
     }),
   });
 
-  if (!response.ok) {
-    throw new Error(`AI API error: ${response.status} ${response.statusText}`);
+  if (!enqueueResponse.ok) {
+    throw new Error(`Enqueue failed: ${enqueueResponse.status} ${enqueueResponse.statusText}`);
   }
 
-  if (saveOnly) {
-    // Return empty iterator for save-only requests
-    return (async function*() {})();
+  const { job_id } = await enqueueResponse.json();
+  logger.info({ job_id }, 'Job enqueued, starting stream');
+
+  // Step 2: Stream from /chat/stream/{job_id}
+  const streamResponse = await fetch(`${AI_API_URL}/chat/stream/${job_id}`, {
+    headers: { 'Accept': 'text/event-stream' },
+  });
+
+  if (!streamResponse.ok) {
+    throw new Error(`Stream failed: ${streamResponse.status} ${streamResponse.statusText}`);
   }
 
-  if (!response.body) {
-    throw new Error('No response body from AI API');
+  if (!streamResponse.body) {
+    throw new Error('No response body from stream endpoint');
   }
 
-  return parseSSE(response.body);
+  return parseJobSSE(streamResponse.body);
 }
 
-async function* parseSSE(body: ReadableStream<Uint8Array>): AsyncIterable<string> {
+async function* parseJobSSE(body: ReadableStream<Uint8Array>): AsyncIterable<string> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
@@ -72,20 +98,22 @@ async function* parseSSE(body: ReadableStream<Uint8Array>): AsyncIterable<string
           const data = line.slice(6);
 
           // Handle special SSE signals
-          if (data === '[DONE]') return;
-          if (data === '[ERROR]') {
-            logger.error('Stream error received from API');
+          if (data === '[DONE]') {
+            logger.info('Stream completed successfully');
             return;
           }
+          if (data === '[ERROR]') {
+            logger.error('Stream error received from worker');
+            throw new Error('Worker processing failed');
+          }
 
-          // JSON-decode the data to unescape newlines
           try {
-            const decoded = JSON.parse(data);
-            yield decoded;
+            // Parse chunk object: {index, content, timestamp}
+            const chunk = JSON.parse(data);
+            yield chunk.content;  // Yield only the content string
           } catch (e) {
-            // Fallback for non-JSON data (backwards compatibility)
-            logger.warn({ data, error: e }, 'Failed to JSON-parse SSE data, using raw');
-            yield data;
+            logger.warn({ data, error: e }, 'Failed to parse chunk JSON');
+            // Don't yield unparseable data
           }
         }
       }

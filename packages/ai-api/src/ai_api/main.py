@@ -1,6 +1,7 @@
 import os
 import json
 import uuid
+import asyncio
 from pathlib import Path
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, UploadFile, File
@@ -21,12 +22,28 @@ from .rag.conversation import ConversationRAG
 from .rag.knowledge_base import KnowledgeBaseRAG
 from .kb_models import KnowledgeBaseDocument
 from .processing import process_pdf_document
+from .queue.connection import get_arq_redis, close_arq_redis, get_redis_client
+from .queue.schemas import EnqueueResponse, JobStatusResponse, ChunkData
+from .queue.utils import get_job_chunks, get_job_metadata
+from arq.jobs import Job
+from .streams.manager import add_message_to_stream
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize database on startup"""
+    """Initialize database and Redis on startup"""
     logger.info('Starting AI API service...')
+
+    # Initialize PostgreSQL
     init_db()
+
+    # Initialize Redis connection pool
+    try:
+        arq_redis = await get_arq_redis()
+        logger.info('✅ Redis connection pool initialized')
+    except Exception as e:
+        logger.error(f'❌ Failed to initialize Redis: {e}')
+        raise
+
     logger.info('=' * 60)
     logger.info('AI API is ready!')
     logger.info('=' * 60)
@@ -37,8 +54,13 @@ async def lifespan(app: FastAPI):
     logger.info('=' * 60)
     logger.info('🏥 Health Check: http://localhost:8000/health')
     logger.info('=' * 60)
+
     yield
+
+    # Cleanup on shutdown
     logger.info('Shutting down AI API service...')
+    await close_arq_redis()
+    logger.info('✅ Redis connection pool closed')
 
 app = FastAPI(
     title='AI WhatsApp Agent API',
@@ -71,6 +93,33 @@ app = FastAPI(
 UPLOAD_DIR = Path(os.getenv('KB_UPLOAD_DIR', '/tmp/knowledge_base'))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 logger.info(f'Knowledge base upload directory: {UPLOAD_DIR}')
+
+
+# Helper function for Redis Streams job status inference
+async def get_stream_job_status(redis: 'Redis', job_id: str) -> str:
+    """
+    Infer job status from Redis chunks and metadata.
+
+    Args:
+        redis: Redis client instance
+        job_id: Job identifier
+
+    Returns:
+        Status string: 'complete', 'in_progress', or 'queued'
+    """
+    # Check if metadata exists (job complete)
+    metadata = await get_job_metadata(redis, job_id)
+    if metadata:
+        return 'complete'
+
+    # Check if chunks exist (job in progress)
+    chunks = await get_job_chunks(redis, job_id)
+    if chunks:
+        return 'in_progress'
+
+    # No chunks or metadata (job queued or not found)
+    return 'queued'
+
 
 @app.get('/health', tags=['Health'])
 async def health_check():
@@ -621,42 +670,46 @@ async def save_message_only(request: SaveMessageRequest, db: Session = Depends(g
         logger.error(f'Error saving message: {str(e)}', exc_info=True)
         raise HTTPException(status_code=500, detail='Internal server error')
 
-@app.post('/chat/stream', tags=['Chat'])
-async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)):
+@app.post('/chat/enqueue', response_model=EnqueueResponse, tags=['Chat'])
+async def enqueue_chat(request: ChatRequest, db: Session = Depends(get_db)):
     """
-    Stream AI response for a chat message
+    Enqueue a chat message for asynchronous processing
 
-    This endpoint accepts a message and streams the AI response using Server-Sent Events (SSE).
+    This endpoint accepts a message, saves it immediately to the database,
+    and adds it to a Redis Stream for processing. Returns a job ID
+    that can be used to poll for status or stream results.
 
     **Request Body:**
     - `whatsapp_jid`: WhatsApp JID (e.g., "70253400879283@lid" or "1234567890@s.whatsapp.net")
     - `message`: User's message text
+    - `conversation_type`: 'private' or 'group'
+    - `sender_jid`: (Optional) Sender's JID for group messages
+    - `sender_name`: (Optional) Sender's name for group messages
 
     **Response:**
-    - Server-Sent Events stream with AI response chunks
-    - Format: `data: <content>\\n\\n`
-    - End signal: `data: [DONE]\\n\\n`
+    - `job_id`: Unique identifier for tracking this job
+    - `status`: 'queued'
+    - `message`: Success message
+
+    **Next Steps:**
+    - Poll `/chat/job/{job_id}` for status and accumulated chunks
+    - Or stream from `/chat/stream/{job_id}` via SSE
     """
-    logger.info(f'Received chat request from {request.whatsapp_jid}')
+    logger.info(f'Enqueueing chat request from {request.whatsapp_jid}')
 
     try:
-        # Get conversation history with type-specific limit
-        history = get_conversation_history(
-            db,
-            request.whatsapp_jid,
-            request.conversation_type
-        )
-        message_history = format_message_history(history) if history else None
-
         # Format message with sender name if provided (group message)
         content = f"{request.sender_name}: {request.message}" if request.sender_name else request.message
 
-        # Generate embedding for user message using embedding service
+        # Get or create user
+        user = get_or_create_user(db, request.whatsapp_jid, request.conversation_type)
+
+        # Generate embedding for user message
         user_embedding = None
-        embedding_service_for_save = create_embedding_service(os.getenv("GEMINI_API_KEY"))
-        if embedding_service_for_save:
+        embedding_service = create_embedding_service(os.getenv("GEMINI_API_KEY"))
+        if embedding_service:
             try:
-                user_embedding = await embedding_service_for_save.generate(content)
+                user_embedding = await embedding_service.generate(content)
                 if user_embedding:
                     logger.info("Generated embedding for user message")
                 else:
@@ -664,8 +717,8 @@ async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)):
             except Exception as e:
                 logger.error(f"Embedding generation error (continuing anyway): {str(e)}")
 
-        # Save user message with group context and embedding
-        save_message(
+        # Save user message immediately
+        user_msg = save_message(
             db,
             request.whatsapp_jid,
             'user',
@@ -676,82 +729,158 @@ async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)):
             embedding=user_embedding
         )
 
-        # Prepare agent dependencies for semantic search tool (dependency injection)
-        user = get_or_create_user(db, request.whatsapp_jid, request.conversation_type)
+        # Add message to user's Redis Stream for sequential processing
+        redis_client = await get_redis_client()
+        job_id = str(uuid.uuid4())
 
-        # Initialize embedding service and RAG following Pydantic AI best practices
-        embedding_service = create_embedding_service(os.getenv("GEMINI_API_KEY"))
-        conversation_rag = ConversationRAG() if embedding_service else None
-        knowledge_base_rag = KnowledgeBaseRAG() if embedding_service else None
-
-        agent_deps = AgentDeps(
-            db=db,
+        message_id = await add_message_to_stream(
+            redis=redis_client,
             user_id=str(user.id),
-            whatsapp_jid=request.whatsapp_jid,
-            recent_message_ids=[str(msg.id) for msg in history] if history else [],
-            embedding_service=embedding_service,
-            conversation_rag=conversation_rag,
-            knowledge_base_rag=knowledge_base_rag
-        )
-
-        # Stream response
-        async def generate():
-            full_response = ""
-            try:
-                # Stream tokens from AI as they arrive with semantic search capability
-                async for token in get_ai_response(content, message_history, agent_deps=agent_deps):
-                    full_response += token
-                    yield f'data: {json.dumps(token)}\n\n'
-
-                # Generate embedding for assistant response using embedding service
-                assistant_embedding = None
-                if embedding_service_for_save:
-                    try:
-                        assistant_embedding = await embedding_service_for_save.generate(full_response)
-                    except Exception as e:
-                        logger.error(f"Error generating assistant embedding: {str(e)}")
-
-                # Save complete assistant response after streaming completes
-                save_message(
-                    db,
-                    request.whatsapp_jid,
-                    'assistant',
-                    full_response,
-                    request.conversation_type,
-                    embedding=assistant_embedding
-                )
-
-                yield 'data: [DONE]\n\n'
-
-            except Exception as e:
-                logger.error(f'Error streaming response: {str(e)}', exc_info=True)
-
-                # Save partial response if any
-                if full_response:
-                    save_message(
-                        db,
-                        request.whatsapp_jid,
-                        'assistant',
-                        full_response,
-                        request.conversation_type,
-                        embedding=None  # No embedding for partial response
-                    )
-
-                yield 'data: [ERROR]\n\n'
-
-        return StreamingResponse(
-            generate(),
-            media_type='text/event-stream',
-            headers={
-                'Cache-Control': 'no-cache',
-                'Connection': 'keep-alive',
-                'X-Accel-Buffering': 'no'  # Disable nginx buffering
+            job_data={
+                'job_id': job_id,
+                'user_id': str(user.id),
+                'whatsapp_jid': request.whatsapp_jid,
+                'message': content,
+                'conversation_type': request.conversation_type,
+                'user_message_id': str(user_msg.id),
             }
         )
 
+        logger.info(f'Job {job_id} added to stream for user {user.id}')
+
+        return EnqueueResponse(
+            job_id=job_id,
+            status='queued',
+            message='Job queued successfully'
+        )
+
     except Exception as e:
-        logger.error(f'Error processing chat: {str(e)}', exc_info=True)
+        logger.error(f'Error enqueueing chat: {str(e)}', exc_info=True)
         raise HTTPException(status_code=500, detail='Internal server error')
+
+
+@app.get('/chat/job/{job_id}', response_model=JobStatusResponse, tags=['Chat'])
+async def get_job_status(job_id: str):
+    """
+    Get the status and accumulated chunks for a job
+
+    Poll this endpoint to check job status and retrieve accumulated response chunks.
+    Suitable for clients that prefer polling over streaming.
+
+    **Parameters:**
+    - `job_id`: Job identifier from `/chat/enqueue`
+
+    **Response:**
+    - `job_id`: Job identifier
+    - `status`: 'queued', 'in_progress', or 'complete'
+    - `chunks`: Array of response chunks (index, content, timestamp)
+    - `total_chunks`: Total number of chunks available
+    - `complete`: Boolean indicating if job is finished
+    - `full_response`: (Only when complete) Complete assembled response
+    """
+    try:
+        redis_client = await get_redis_client()
+
+        # Infer status from Redis data (no arq)
+        status = await get_stream_job_status(redis_client, job_id)
+
+        # Get chunks
+        chunks = await get_job_chunks(redis_client, job_id)
+        total_chunks = len(chunks)
+
+        # Build response
+        response = JobStatusResponse(
+            job_id=job_id,
+            status=status,
+            chunks=[ChunkData(**chunk) for chunk in chunks],
+            total_chunks=total_chunks,
+            complete=(status == 'complete')
+        )
+
+        # If complete, assemble full response
+        if status == 'complete' and chunks:
+            response.full_response = ''.join(chunk['content'] for chunk in chunks)
+
+        await redis_client.close()
+        return response
+
+    except Exception as e:
+        logger.error(f'Error getting job status for {job_id}: {str(e)}', exc_info=True)
+        raise HTTPException(status_code=500, detail='Internal server error')
+
+
+@app.get('/chat/stream/{job_id}', tags=['Chat'])
+async def stream_job_chunks(job_id: str):
+    """
+    Stream job chunks via Server-Sent Events as they arrive
+
+    Connect to this endpoint to receive real-time streaming of response chunks
+    as the worker processes them. Uses SSE (Server-Sent Events) protocol.
+
+    **Parameters:**
+    - `job_id`: Job identifier from `/chat/enqueue`
+
+    **Response:**
+    - Server-Sent Events stream
+    - Format: `data: {"index": N, "content": "..."}\n\n`
+    - End signal: `data: [DONE]\n\n`
+    - Error signal: `data: [ERROR]\n\n`
+
+    **Example:**
+    ```javascript
+    const eventSource = new EventSource('/chat/stream/' + jobId);
+    eventSource.onmessage = (event) => {
+      if (event.data === '[DONE]') {
+        eventSource.close();
+      } else if (event.data === '[ERROR]') {
+        eventSource.close();
+      } else {
+        const chunk = JSON.parse(event.data);
+        console.log(chunk.content);
+      }
+    };
+    ```
+    """
+    async def generate():
+        last_index = -1
+
+        try:
+            redis_client = await get_redis_client()
+
+            while True:
+                # Get new chunks since last poll
+                chunks = await get_job_chunks(redis_client, job_id, start_index=last_index + 1)
+
+                # Yield new chunks
+                for chunk in chunks:
+                    if chunk['index'] > last_index:
+                        yield f'data: {json.dumps(chunk)}\n\n'
+                        last_index = chunk['index']
+
+                # Check if job is complete (metadata exists)
+                metadata = await get_job_metadata(redis_client, job_id)
+                if metadata:
+                    yield 'data: [DONE]\n\n'
+                    break
+
+                # Poll interval (100ms)
+                await asyncio.sleep(0.1)
+
+            await redis_client.close()
+
+        except Exception as e:
+            logger.error(f'Error streaming job {job_id}: {str(e)}', exc_info=True)
+            yield 'data: [ERROR]\n\n'
+
+    return StreamingResponse(
+        generate(),
+        media_type='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no'
+        }
+    )
 
 @app.post('/chat', response_model=ChatResponse, tags=['Chat'])
 async def chat(request: ChatRequest, db: Session = Depends(get_db)):
