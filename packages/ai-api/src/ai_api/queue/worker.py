@@ -17,8 +17,6 @@ from ..logger import logger
 from ..database import SessionLocal, get_conversation_history, save_message
 from ..agent import get_ai_response, format_message_history, AgentDeps
 from ..embeddings import create_embedding_service
-from ..rag.conversation import ConversationRAG
-from ..rag.knowledge_base import KnowledgeBaseRAG
 from .utils import save_job_chunk, set_job_metadata
 
 
@@ -76,11 +74,9 @@ async def process_chat_job(
         message_history = format_message_history(history) if history else None
         logger.info(f"[Job {job_id}] Retrieved {len(history) if history else 0} messages from history")
 
-        # Step 2: Initialize embedding service and RAG instances
-        logger.info(f"[Job {job_id}] Initializing embedding service and RAG...")
+        # Step 2: Initialize embedding service
+        logger.info(f"[Job {job_id}] Initializing embedding service...")
         embedding_service = create_embedding_service(os.getenv("GEMINI_API_KEY"))
-        conversation_rag = ConversationRAG() if embedding_service else None
-        knowledge_base_rag = KnowledgeBaseRAG() if embedding_service else None
 
         # Step 3: Prepare agent dependencies
         agent_deps = AgentDeps(
@@ -88,9 +84,7 @@ async def process_chat_job(
             user_id=user_id,
             whatsapp_jid=whatsapp_jid,
             recent_message_ids=[str(msg.id) for msg in history] if history else [],
-            embedding_service=embedding_service,
-            conversation_rag=conversation_rag,
-            knowledge_base_rag=knowledge_base_rag
+            embedding_service=embedding_service
         )
 
         # Step 4: Stream tokens from AI agent

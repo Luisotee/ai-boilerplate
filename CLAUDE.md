@@ -284,6 +284,8 @@ lsof -ti:8000 | xargs kill -9  # Kill process on port 8000
 
 **Note:** Don't add new libraries by editing `package.json` or `pyproject.toml` directly. Use `pnpm add <package>` or `uv add <package>` to ensure proper lockfile updates.
 
+**Code Style:** Prefer functional programming over classes. Use pure functions with clear inputs/outputs. Only use classes when maintaining state is necessary (e.g., database connections, WebSocket connections) or when required by library interfaces.
+
 ### TypeScript (WhatsApp Client)
 
 **Async/Await:**

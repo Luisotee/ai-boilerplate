@@ -5,8 +5,14 @@ from pydantic_ai import Agent, RunContext
 from pydantic_ai.models.gemini import GeminiModel
 from sqlalchemy.orm import Session
 from .logger import logger
-from .rag.conversation import ConversationRAG
-from .rag.knowledge_base import KnowledgeBaseRAG
+from .rag.conversation import (
+    search_conversation_history as search_conversation_fn,
+    format_conversation_results
+)
+from .rag.knowledge_base import (
+    search_knowledge_base as search_kb_fn,
+    format_knowledge_base_results
+)
 from .embeddings import EmbeddingService
 
 # Initialize Gemini via Pydantic AI
@@ -29,8 +35,6 @@ class AgentDeps:
     whatsapp_jid: str
     recent_message_ids: List[str]
     embedding_service: Optional[EmbeddingService] = None
-    conversation_rag: Optional[ConversationRAG] = None
-    knowledge_base_rag: Optional[KnowledgeBaseRAG] = None
 
 
 # Create the AI agent with dependencies
@@ -97,7 +101,7 @@ async def search_conversation_history(
     deps = ctx.deps
 
     # Check if semantic search dependencies are available
-    if not deps.embedding_service or not deps.conversation_rag:
+    if not deps.embedding_service:
         return (
             "Semantic search is not available (GEMINI_API_KEY not configured). "
             "I can only access recent messages."
@@ -114,17 +118,14 @@ async def search_conversation_history(
         if not query_embedding:
             return "Failed to generate search embedding. Please try again."
 
-        # Get configuration from environment
-        result_limit = int(os.getenv("SEMANTIC_SEARCH_LIMIT", "5"))
-
-        # Use injected RAG engine with pre-generated embedding
-        messages = await deps.conversation_rag.search(
+        # Call pure function for semantic search (uses env defaults)
+        messages = await search_conversation_fn(
             db=deps.db,
             query_embedding=query_embedding,
-            query_text=search_query,  # For logging/debugging
-            limit=result_limit,
             user_id=deps.user_id,
+            query_text=search_query,  # For logging/debugging
             exclude_message_ids=deps.recent_message_ids,
+            # Omit limit, similarity_threshold, context_window to use env defaults
         )
 
         if not messages:
@@ -138,8 +139,8 @@ async def search_conversation_history(
             f"Found {len(messages)} relevant past messages for query: '{search_query}'"
         )
 
-        # Format results with context
-        formatted_results = deps.conversation_rag.format_results(messages)
+        # Format results with context using pure function
+        formatted_results = format_conversation_results(messages)
 
         # Log detailed results for debugging
         logger.info(f"Conversation RAG returned {len(messages)} results:")
@@ -197,7 +198,7 @@ async def search_knowledge_base(
     deps = ctx.deps
 
     # Check if knowledge base dependencies are available
-    if not deps.embedding_service or not deps.knowledge_base_rag:
+    if not deps.embedding_service:
         return (
             "Knowledge base search is not available (GEMINI_API_KEY not configured). "
             "I can only answer based on general knowledge."
@@ -213,13 +214,12 @@ async def search_knowledge_base(
         if not query_embedding:
             return "Failed to generate search embedding. Please try again."
 
-        # Search knowledge base
-        result_limit = int(os.getenv("KB_SEARCH_LIMIT", "5"))
-        results = await deps.knowledge_base_rag.search(
+        # Call pure function for knowledge base search (uses env defaults)
+        results = await search_kb_fn(
             db=deps.db,
             query_embedding=query_embedding,
             query_text=search_query,
-            limit=result_limit
+            # Omit limit and similarity_threshold to use env defaults
         )
 
         if not results:
@@ -231,8 +231,8 @@ async def search_knowledge_base(
 
         logger.info(f"Found {len(results)} relevant passages from knowledge base")
 
-        # Format results with citations
-        formatted_results = deps.knowledge_base_rag.format_results(results)
+        # Format results with citations using pure function
+        formatted_results = format_knowledge_base_results(results)
 
         # Log detailed results for debugging
         logger.info(f"Knowledge Base RAG returned {len(results)} results:")
@@ -287,8 +287,6 @@ async def get_ai_response(
     logger.info(f"   Has dependencies: {agent_deps is not None}")
     if agent_deps:
         logger.info(f"   - Embedding service: {agent_deps.embedding_service is not None}")
-        logger.info(f"   - Conversation RAG: {agent_deps.conversation_rag is not None}")
-        logger.info(f"   - Knowledge Base RAG: {agent_deps.knowledge_base_rag is not None}")
     logger.info("=" * 80)
 
     # Track full response for logging

@@ -18,8 +18,6 @@ from .database import init_db, get_db, get_conversation_history, save_message, g
 from .schemas import ChatRequest, ChatResponse, SaveMessageRequest, UploadPDFResponse, BatchUploadResponse, FileUploadResult
 from .agent import get_ai_response, format_message_history, AgentDeps
 from .embeddings import create_embedding_service
-from .rag.conversation import ConversationRAG
-from .rag.knowledge_base import KnowledgeBaseRAG
 from .kb_models import KnowledgeBaseDocument
 from .processing import process_pdf_document
 from .queue.connection import get_arq_redis, close_arq_redis, get_redis_client
@@ -938,19 +936,15 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
         # Prepare agent dependencies for semantic search tool (dependency injection)
         user = get_or_create_user(db, request.whatsapp_jid, request.conversation_type)
 
-        # Initialize embedding service and RAG following Pydantic AI best practices
+        # Initialize embedding service following Pydantic AI best practices
         embedding_service = create_embedding_service(os.getenv("GEMINI_API_KEY"))
-        conversation_rag = ConversationRAG() if embedding_service else None
-        knowledge_base_rag = KnowledgeBaseRAG() if embedding_service else None
 
         agent_deps = AgentDeps(
             db=db,
             user_id=str(user.id),
             whatsapp_jid=request.whatsapp_jid,
             recent_message_ids=[str(msg.id) for msg in history] if history else [],
-            embedding_service=embedding_service,
-            conversation_rag=conversation_rag,
-            knowledge_base_rag=knowledge_base_rag
+            embedding_service=embedding_service
         )
 
         # Get AI response (using formatted content) - consume stream into complete response
