@@ -81,22 +81,17 @@ async def process_chat_job_direct(
             embedding_service=embedding_service
         )
 
-        # Step 4: Stream tokens from AI agent
-        logger.info(f"[Job {job_id}] Starting AI streaming...")
+        # Step 4: Get AI response
+        logger.info(f"[Job {job_id}] Getting AI response...")
 
         async for token in get_ai_response(message, message_history, agent_deps=agent_deps):
             full_response += token
 
-            # Save chunk to Redis immediately
-            await save_job_chunk(
-                redis,
-                job_id,
-                chunk_index,
-                token
-            )
-            chunk_index += 1
+        # Save complete response as single chunk
+        await save_job_chunk(redis, job_id, 0, full_response)
+        chunk_index = 1
 
-        logger.info(f"[Job {job_id}] AI streaming completed. Total chunks: {chunk_index}")
+        logger.info(f"[Job {job_id}] AI response completed.")
         logger.info(f"[Job {job_id}] Full response length: {len(full_response)} characters")
 
         # Step 5: Generate embedding for complete assistant response

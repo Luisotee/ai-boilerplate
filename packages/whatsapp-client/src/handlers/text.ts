@@ -28,19 +28,12 @@ export async function handleTextMessage(
   await sock.sendPresenceUpdate('composing', whatsappJid);
 
   try {
-    const stream = await sendMessageToAI(whatsappJid, text, {
+    const response = await sendMessageToAI(whatsappJid, text, {
       conversationType,
       senderJid: msg.key.participant,
       senderName: getSenderName(msg),
     });
 
-    // Accumulate response chunks
-    let response = '';
-    for await (const chunk of stream) {
-      response += chunk;
-    }
-
-    // Send complete response
     await sock.sendMessage(whatsappJid, { text: response });
 
     logger.info(
