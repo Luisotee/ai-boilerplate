@@ -1,4 +1,3 @@
-import os
 import uuid
 from datetime import datetime
 from enum import Enum
@@ -15,6 +14,7 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from pgvector.sqlalchemy import Vector
+from .config import settings
 from .logger import logger
 
 
@@ -23,11 +23,7 @@ class ConversationType(str, Enum):
     GROUP = "group"
 
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL", "postgresql://aiagent:changeme@localhost:5432/aiagent"
-)
-
-engine = create_engine(DATABASE_URL)
+engine = create_engine(settings.database_url)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
@@ -139,12 +135,12 @@ def get_conversation_history(
     """Retrieve recent conversation history for a user by WhatsApp JID"""
     user = get_or_create_user(db, whatsapp_jid, conversation_type)
 
-    # Load limit from environment if not explicitly provided
+    # Load limit from settings if not explicitly provided
     if limit is None:
         if user.conversation_type == ConversationType.GROUP:
-            limit = int(os.getenv("HISTORY_LIMIT_GROUP", "10"))
+            limit = settings.history_limit_group
         else:  # private
-            limit = int(os.getenv("HISTORY_LIMIT_PRIVATE", "10"))
+            limit = settings.history_limit_private
 
         logger.info(
             f"Using history limit {limit} for {user.conversation_type} conversation"

@@ -5,9 +5,9 @@ This processor can be called directly without arq job context,
 making it compatible with Redis Streams.
 """
 
-import os
 from redis.asyncio import Redis
 
+from ..config import settings
 from ..logger import logger
 from ..database import SessionLocal, get_conversation_history, save_message
 from ..agent import get_ai_response, format_message_history, AgentDeps
@@ -70,7 +70,7 @@ async def process_chat_job_direct(
 
         # Step 2: Initialize embedding service
         logger.info(f"[Job {job_id}] Initializing embedding service...")
-        embedding_service = create_embedding_service(os.getenv("GEMINI_API_KEY"))
+        embedding_service = create_embedding_service(settings.gemini_api_key)
 
         # Step 3: Prepare agent dependencies
         agent_deps = AgentDeps(

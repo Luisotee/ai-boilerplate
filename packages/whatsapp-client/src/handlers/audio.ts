@@ -1,5 +1,6 @@
 import type { WASocket, WAMessage } from '@whiskeysockets/baileys';
 import { downloadMediaMessage } from '@whiskeysockets/baileys';
+import { config } from '../config.js';
 import { logger } from '../logger.js';
 
 /**
@@ -58,7 +59,7 @@ async function transcribeAudio(
   const formData = new FormData();
   formData.append('file', blob, filename);
 
-  const response = await fetch(`${process.env.AI_API_URL}/transcribe`, {
+  const response = await fetch(`${config.aiApiUrl}/transcribe`, {
     method: 'POST',
     body: formData,
   });

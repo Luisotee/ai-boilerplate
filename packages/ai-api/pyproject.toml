@@ -19,6 +19,7 @@ dependencies = [
     "pgvector>=0.3.6",
     "psycopg2-binary>=2.9.11",
     "pydantic-ai>=1.25.1",
+    "pydantic-settings>=2.12.0",
     "python-dotenv>=1.2.1",
     "redis[hiredis]>=5.0.0",
     "sqlalchemy>=2.0.44",

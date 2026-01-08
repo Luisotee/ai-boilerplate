@@ -10,19 +10,14 @@ Follows functional programming style with pure functions for:
 Pattern mirrors embeddings.py for consistency.
 """
 
-import os
 from typing import Optional, Tuple, BinaryIO
 from groq import Groq
+from .config import settings
 from .logger import logger
 
-# Configuration from environment
-STT_MODEL = os.getenv('STT_MODEL', 'whisper-large-v3')
-MAX_FILE_SIZE_MB = int(os.getenv('STT_MAX_FILE_SIZE_MB', '25'))
-MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
-SUPPORTED_FORMATS = os.getenv(
-    'STT_SUPPORTED_FORMATS',
-    'mp3,mp4,mpeg,mpga,m4a,wav,webm,ogg,flac'
-).split(',')
+# Derived constants from settings
+MAX_FILE_SIZE_BYTES = settings.stt_max_file_size_mb * 1024 * 1024
+SUPPORTED_FORMATS = settings.stt_supported_formats.split(',')
 
 # MIME type mappings for validation
 AUDIO_MIME_TYPES = {
@@ -65,7 +60,7 @@ def validate_audio_file(
 
     if file_size > MAX_FILE_SIZE_BYTES:
         size_mb = file_size / (1024 * 1024)
-        return False, f"File too large ({size_mb:.1f} MB). Maximum: {MAX_FILE_SIZE_MB} MB", None
+        return False, f"File too large ({size_mb:.1f} MB). Maximum: {settings.stt_max_file_size_mb} MB", None
 
     # Extract format from filename
     file_format = None
@@ -114,7 +109,7 @@ def create_groq_client(api_key: Optional[str]) -> Optional[Groq]:
 
     try:
         client = Groq(api_key=api_key)
-        logger.info(f"Groq client initialized (model: {STT_MODEL})")
+        logger.info(f"Groq client initialized (model: {settings.stt_model})")
         return client
     except Exception as e:
         logger.error(f"Failed to create Groq client: {str(e)}", exc_info=True)
@@ -152,7 +147,7 @@ async def transcribe_audio(
         # Build parameters
         params = {
             'file': (filename, audio_content),
-            'model': STT_MODEL,
+            'model': settings.stt_model,
             'response_format': 'json',  # Simple JSON with just text
             'temperature': 0.0  # Deterministic output
         }
@@ -163,7 +158,7 @@ async def transcribe_audio(
             logger.debug(f"Transcribing with language hint: {language}")
 
         # Call Groq Whisper API
-        logger.info(f"Transcribing audio with {STT_MODEL} (size: {len(audio_content)} bytes)")
+        logger.info(f"Transcribing audio with {settings.stt_model} (size: {len(audio_content)} bytes)")
         transcription = client.audio.transcriptions.create(**params)
 
         # Extract text from response

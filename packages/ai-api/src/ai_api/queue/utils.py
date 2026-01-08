@@ -6,11 +6,11 @@ and managing job metadata.
 """
 
 import json
-import os
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from redis.asyncio import Redis
 
+from ..config import settings
 from ..logger import logger
 
 
@@ -41,8 +41,7 @@ async def save_job_chunk(
     await redis.rpush(chunk_key, chunk_data)
 
     # Set TTL (default 1 hour, configurable)
-    ttl = int(os.getenv('QUEUE_CHUNK_TTL', '3600'))
-    await redis.expire(chunk_key, ttl)
+    await redis.expire(chunk_key, settings.queue_chunk_ttl)
 
 
 async def get_job_chunks(
@@ -119,7 +118,7 @@ async def set_job_metadata(
     await redis.set(
         meta_key,
         json.dumps(metadata),
-        ex=int(os.getenv('ARQ_KEEP_RESULT', '3600'))  # Match job result TTL
+        ex=settings.arq_keep_result  # Match job result TTL
     )
 
 

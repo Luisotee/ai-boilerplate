@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import { config } from './config.js';
 import Fastify from 'fastify';
 import FastifySwagger from '@fastify/swagger';
 import FastifySwaggerUI from '@fastify/swagger-ui';
@@ -15,9 +15,6 @@ import { registerHealthRoutes } from './routes/health.js';
 import { registerMessagingRoutes } from './routes/messaging.js';
 import { registerMediaRoutes } from './routes/media.js';
 import { registerOperationsRoutes } from './routes/operations.js';
-
-const API_PORT = parseInt(process.env.WHATSAPP_API_PORT || '3001', 10);
-const API_HOST = process.env.WHATSAPP_API_HOST || '0.0.0.0';
 
 /**
  * Transform function that handles both Zod and plain JSON Schema.
@@ -53,7 +50,7 @@ async function start() {
   // Initialize Fastify with built-in Pino logger and ZodTypeProvider
   const app = Fastify({
     logger: {
-      level: process.env.LOG_LEVEL || 'info',
+      level: config.logLevel,
       transport: {
         target: 'pino-pretty',
         options: {
@@ -94,7 +91,7 @@ async function start() {
         version: '1.0.0',
       },
       servers: [
-        { url: `http://localhost:${API_PORT}`, description: 'Development' },
+        { url: `http://localhost:${config.server.port}`, description: 'Development' },
       ],
       tags: [
         { name: 'Health', description: 'Health check endpoints' },
@@ -126,12 +123,12 @@ async function start() {
   await registerOperationsRoutes(app);
 
   // Start server
-  await app.listen({ port: API_PORT, host: API_HOST });
+  await app.listen({ port: config.server.port, host: config.server.host });
 
   app.log.info('='.repeat(60));
-  app.log.info(`WhatsApp REST API listening on http://${API_HOST}:${API_PORT}`);
-  app.log.info(`API Docs: http://localhost:${API_PORT}/docs`);
-  app.log.info(`OpenAPI JSON: http://localhost:${API_PORT}/docs/json`);
+  app.log.info(`WhatsApp REST API listening on http://${config.server.host}:${config.server.port}`);
+  app.log.info(`API Docs: http://localhost:${config.server.port}/docs`);
+  app.log.info(`OpenAPI JSON: http://localhost:${config.server.port}/docs/json`);
   app.log.info('='.repeat(60));
 }
 

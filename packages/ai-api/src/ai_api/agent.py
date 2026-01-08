@@ -1,9 +1,10 @@
-import os
 from dataclasses import dataclass
 from typing import List, Optional
 from pydantic_ai import Agent, RunContext
-from pydantic_ai.models.gemini import GeminiModel
+from pydantic_ai.models.google import GoogleModel
+from pydantic_ai.providers.google import GoogleProvider
 from sqlalchemy.orm import Session
+from .config import settings
 from .logger import logger
 from .rag.conversation import (
     search_conversation_history as search_conversation_fn,
@@ -14,11 +15,6 @@ from .rag.knowledge_base import (
     format_knowledge_base_results
 )
 from .embeddings import EmbeddingService
-
-# Initialize Gemini via Pydantic AI
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY environment variable is required")
 
 
 @dataclass
@@ -37,9 +33,13 @@ class AgentDeps:
     embedding_service: Optional[EmbeddingService] = None
 
 
+# Create Google provider and model with API key from settings
+google_provider = GoogleProvider(api_key=settings.gemini_api_key)
+google_model = GoogleModel("gemini-2.5-flash", provider=google_provider)
+
 # Create the AI agent with dependencies
 agent = Agent(
-    model="gemini-2.5-flash",
+    model=google_model,
     deps_type=AgentDeps,
     system_prompt="""You are a helpful AI assistant communicating via WhatsApp.
     Be concise, friendly, and helpful. Keep responses brief and to the point.

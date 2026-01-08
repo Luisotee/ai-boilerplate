@@ -4,12 +4,12 @@ Conversation history RAG implementation.
 Provides semantic search over user's conversation history using vector similarity.
 """
 
-import os
 from typing import List, Optional
 from datetime import datetime
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
+from ..config import settings
 from ..database import ConversationMessage
 from ..logger import logger
 
@@ -97,13 +97,13 @@ async def search_conversation_history(
         - 'messages_after': List of messages after the match
         - 'similarity_score': Cosine similarity score
     """
-    # Apply environment defaults if not provided
+    # Apply defaults from settings if not provided
     if similarity_threshold is None:
-        similarity_threshold = float(os.getenv('SEMANTIC_SIMILARITY_THRESHOLD', '0.7'))
+        similarity_threshold = settings.semantic_similarity_threshold
     if limit is None:
-        limit = int(os.getenv('SEMANTIC_SEARCH_LIMIT', '5'))
+        limit = settings.semantic_search_limit
     if context_window is None:
-        context_window = int(os.getenv('SEMANTIC_CONTEXT_WINDOW', '3'))
+        context_window = settings.semantic_context_window
 
     if not user_id:
         logger.error("user_id is required for conversation search")

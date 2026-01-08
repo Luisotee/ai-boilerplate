@@ -1,4 +1,3 @@
-import os
 import json
 import uuid
 import asyncio
@@ -9,11 +8,8 @@ from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, UploadFile
 from typing import List, Optional
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
-from dotenv import load_dotenv
 
-# Load environment variables BEFORE importing local modules
-load_dotenv()
-
+from .config import settings
 from .logger import logger
 from .database import init_db, get_db, get_conversation_history, save_message, get_or_create_user
 from .schemas import ChatRequest, ChatResponse, SaveMessageRequest, UploadPDFResponse, BatchUploadResponse, FileUploadResult, TranscribeResponse
@@ -90,7 +86,7 @@ app = FastAPI(
 )
 
 # Configure upload directory for knowledge base PDFs
-UPLOAD_DIR = Path(os.getenv('KB_UPLOAD_DIR', '/tmp/knowledge_base'))
+UPLOAD_DIR = Path(settings.kb_upload_dir)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 logger.info(f'Knowledge base upload directory: {UPLOAD_DIR}')
 
@@ -171,8 +167,7 @@ async def upload_pdf(
         file_size = len(content)
 
         # Check file size limit
-        max_size_mb = int(os.getenv('KB_MAX_FILE_SIZE_MB', '50'))
-        max_size_bytes = max_size_mb * 1024 * 1024
+        max_size_bytes = settings.kb_max_file_size_mb * 1024 * 1024
 
         if file_size > max_size_bytes:
             raise HTTPException(
@@ -260,10 +255,8 @@ async def upload_pdf_batch(
     logger.info(f'Received batch PDF upload: {len(files)} files')
 
     # Read configuration
-    max_file_size_mb = int(os.getenv('KB_MAX_FILE_SIZE_MB', '50'))
-    max_batch_size_mb = int(os.getenv('KB_MAX_BATCH_SIZE_MB', '500'))
-    max_file_size_bytes = max_file_size_mb * 1024 * 1024
-    max_batch_size_bytes = max_batch_size_mb * 1024 * 1024
+    max_file_size_bytes = settings.kb_max_file_size_mb * 1024 * 1024
+    max_batch_size_bytes = settings.kb_max_batch_size_mb * 1024 * 1024
 
     # Check if any files provided
     if len(files) == 0:
@@ -643,7 +636,7 @@ async def save_message_only(request: SaveMessageRequest, db: Session = Depends(g
 
         # Generate embedding for message using embedding service
         user_embedding = None
-        embedding_service = create_embedding_service(os.getenv("GEMINI_API_KEY"))
+        embedding_service = create_embedding_service(settings.gemini_api_key)
         if embedding_service:
             try:
                 user_embedding = await embedding_service.generate(content)
@@ -706,7 +699,7 @@ async def enqueue_chat(request: ChatRequest, db: Session = Depends(get_db)):
 
         # Generate embedding for user message
         user_embedding = None
-        embedding_service = create_embedding_service(os.getenv("GEMINI_API_KEY"))
+        embedding_service = create_embedding_service(settings.gemini_api_key)
         if embedding_service:
             try:
                 user_embedding = await embedding_service.generate(content)
@@ -839,7 +832,7 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
 
         # Generate embedding for user message using embedding service
         user_embedding = None
-        embedding_service_for_save = create_embedding_service(os.getenv("GEMINI_API_KEY"))
+        embedding_service_for_save = create_embedding_service(settings.gemini_api_key)
         if embedding_service_for_save:
             try:
                 user_embedding = await embedding_service_for_save.generate(content)
@@ -866,7 +859,7 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
         user = get_or_create_user(db, request.whatsapp_jid, request.conversation_type)
 
         # Initialize embedding service following Pydantic AI best practices
-        embedding_service = create_embedding_service(os.getenv("GEMINI_API_KEY"))
+        embedding_service = create_embedding_service(settings.gemini_api_key)
 
         agent_deps = AgentDeps(
             db=db,
@@ -959,7 +952,7 @@ async def transcribe_audio_endpoint(
         logger.info(f'Audio validated: {file.filename} ({file_size / 1024:.1f} KB, format: {file_format})')
 
         # Step 2: Create Groq client
-        groq_client = create_groq_client(os.getenv('GROQ_API_KEY'))
+        groq_client = create_groq_client(settings.groq_api_key)
         if not groq_client:
             raise HTTPException(
                 status_code=503,

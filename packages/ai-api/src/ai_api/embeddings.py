@@ -10,11 +10,11 @@ This module handles:
 Reusable for all RAG implementations (conversation history, knowledge base, etc.)
 """
 
-import os
 import asyncio
 from typing import List, Optional
 from google import genai
 from google.genai import types
+from .config import settings
 from .logger import logger
 
 # Configuration constants
@@ -146,8 +146,7 @@ async def generate_embedding(text: str) -> Optional[List[float]]:
 
     Kept for backward compatibility during migration.
     """
-    api_key = os.getenv("GEMINI_API_KEY")
-    service = create_embedding_service(api_key)
+    service = create_embedding_service(settings.gemini_api_key)
     if not service:
         return None
     return await service.generate(text)

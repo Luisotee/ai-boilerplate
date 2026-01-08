@@ -5,12 +5,12 @@ Provides connection pooling and arq client initialization
 shared between API endpoints and worker processes.
 """
 
-import os
 from typing import Optional
 from arq import create_pool
 from arq.connections import RedisSettings, ArqRedis
 from redis.asyncio import Redis
 
+from ..config import settings
 from ..logger import logger
 
 
@@ -20,16 +20,16 @@ _arq_pool: Optional[ArqRedis] = None
 
 def get_redis_settings() -> RedisSettings:
     """
-    Create Redis settings from environment variables.
+    Create Redis settings from config.
 
     Returns:
         RedisSettings for arq connection
     """
     return RedisSettings(
-        host=os.getenv('REDIS_HOST', 'localhost'),
-        port=int(os.getenv('REDIS_PORT', '6379')),
-        database=int(os.getenv('REDIS_DB', '0')),
-        password=os.getenv('REDIS_PASSWORD') or None,
+        host=settings.redis_host,
+        port=settings.redis_port,
+        database=settings.redis_db,
+        password=settings.redis_password,
     )
 
 

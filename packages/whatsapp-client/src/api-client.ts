@@ -1,6 +1,6 @@
+import { config } from './config.js';
 import { logger } from './logger.js';
 
-const AI_API_URL = process.env.AI_API_URL || 'http://localhost:8000';
 const POLL_INTERVAL_MS = 500;
 
 interface MessageOptions {
@@ -28,7 +28,7 @@ export async function sendMessageToAI(
   if (saveOnly) {
     logger.info({ whatsappJid, saveOnly, conversationType }, 'Saving message only');
 
-    const response = await fetch(`${AI_API_URL}/chat/save`, {
+    const response = await fetch(`${config.aiApiUrl}/chat/save`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -50,7 +50,7 @@ export async function sendMessageToAI(
   // Step 1: Enqueue message
   logger.info({ whatsappJid, conversationType }, 'Enqueuing message to AI API');
 
-  const enqueueResponse = await fetch(`${AI_API_URL}/chat/enqueue`, {
+  const enqueueResponse = await fetch(`${config.aiApiUrl}/chat/enqueue`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -71,7 +71,7 @@ export async function sendMessageToAI(
 
   // Step 2: Poll until complete
   while (true) {
-    const statusResponse = await fetch(`${AI_API_URL}/chat/job/${job_id}`);
+    const statusResponse = await fetch(`${config.aiApiUrl}/chat/job/${job_id}`);
 
     if (!statusResponse.ok) {
       throw new Error(`Job status failed: ${statusResponse.status} ${statusResponse.statusText}`);

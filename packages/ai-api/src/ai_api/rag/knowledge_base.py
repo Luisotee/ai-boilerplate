@@ -5,11 +5,11 @@ Provides semantic search over globally accessible PDF documents
 with source attribution and citation.
 """
 
-import os
 from typing import List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
+from ..config import settings
 from ..logger import logger
 
 
@@ -38,11 +38,11 @@ async def search_knowledge_base(
         - 'document': Dict with document metadata (filename, upload_date, etc.)
         - 'similarity_score': Cosine similarity score
     """
-    # Apply environment defaults if not provided
+    # Apply defaults from settings if not provided
     if similarity_threshold is None:
-        similarity_threshold = float(os.getenv('KB_SIMILARITY_THRESHOLD', '0.7'))
+        similarity_threshold = settings.kb_similarity_threshold
     if limit is None:
-        limit = int(os.getenv('KB_SEARCH_LIMIT', '5'))
+        limit = settings.kb_search_limit
 
     if not query_embedding:
         logger.error("query_embedding is required for knowledge base search")

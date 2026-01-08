@@ -5,7 +5,6 @@ Handles background processing of uploaded PDFs: parsing, semantic chunking,
 embedding generation, and storage in the database.
 """
 
-import os
 import asyncio
 from typing import List, Optional, Dict
 from datetime import datetime
@@ -17,15 +16,11 @@ from docling.chunking import HybridChunker
 from docling_core.types.doc import DoclingDocument
 from docling_core.transforms.chunker.tokenizer.openai import OpenAITokenizer
 
+from .config import settings
 from .database import SessionLocal
 from .kb_models import KnowledgeBaseDocument, KnowledgeBaseChunk
 from .embeddings import EmbeddingService, create_embedding_service
 from .logger import logger
-
-
-# Configuration from environment variables
-# HybridChunker configuration (replaces old custom chunking parameters)
-MAX_CHUNK_TOKENS = int(os.getenv('KB_MAX_CHUNK_TOKENS', '512'))
 
 
 async def process_pdf_document(document_id: str, file_path: str):
@@ -86,18 +81,18 @@ async def process_pdf_document(document_id: str, file_path: str):
         logger.info(f"Updated document metadata: {metadata}")
 
         # Step 4: Get embedding service
-        embedding_service = create_embedding_service(os.getenv("GEMINI_API_KEY"))
+        embedding_service = create_embedding_service(settings.gemini_api_key)
         if not embedding_service:
             raise ValueError("GEMINI_API_KEY not configured - cannot generate embeddings")
 
         # Step 5: Perform hybrid chunking with token-aware chunker
         # HybridChunker uses document structure + token limits for optimal RAG chunks
-        logger.info(f"Chunking document with HybridChunker (max_tokens: {MAX_CHUNK_TOKENS})")
+        logger.info(f"Chunking document with HybridChunker (max_tokens: {settings.kb_max_chunk_tokens})")
 
         # Wrap tiktoken encoder in OpenAITokenizer for HybridChunker compatibility
         tokenizer_wrapper = OpenAITokenizer(
             tokenizer=encoder,
-            max_tokens=MAX_CHUNK_TOKENS,
+            max_tokens=settings.kb_max_chunk_tokens,
         )
 
         chunker = HybridChunker(
