@@ -1,6 +1,28 @@
 import { getBaileysSocket } from '../services/baileys.js';
 
 /**
+ * Strip device suffix from JID
+ * Example: "5491126726818:50@s.whatsapp.net" -> "5491126726818@s.whatsapp.net"
+ */
+export function stripDeviceSuffix(jid: string): string {
+  return jid.replace(/:\d+@/, '@');
+}
+
+/**
+ * Check if JID is a group chat
+ */
+export function isGroupChat(jid: string): boolean {
+  return jid.endsWith('@g.us');
+}
+
+/**
+ * Extract phone number from JID
+ */
+export function extractPhoneFromJid(jid: string): string {
+  return jid.split('@')[0];
+}
+
+/**
  * Check if string is already a JID
  * JIDs contain @ symbol (e.g., 1234567890@s.whatsapp.net, 123456-789@g.us)
  */
