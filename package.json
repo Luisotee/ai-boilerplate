@@ -12,7 +12,8 @@
     "lint": "eslint packages/whatsapp-client/src && cd packages/ai-api && uv run ruff check .",
     "lint:fix": "eslint packages/whatsapp-client/src --fix && cd packages/ai-api && uv run ruff check . --fix",
     "format": "prettier --write packages/whatsapp-client/src && cd packages/ai-api && uv run ruff format .",
-    "format:check": "prettier --check packages/whatsapp-client/src && cd packages/ai-api && uv run ruff format . --check"
+    "format:check": "prettier --check packages/whatsapp-client/src && cd packages/ai-api && uv run ruff format . --check",
+    "prepare": "husky"
   },
   "keywords": [],
   "author": "",
@@ -22,6 +23,7 @@
     "@eslint/js": "^9.39.2",
     "eslint": "^9.39.2",
     "eslint-config-prettier": "^10.1.8",
+    "husky": "^9.1.7",
     "prettier": "^3.7.4",
     "typescript-eslint": "^8.52.0"
   }
