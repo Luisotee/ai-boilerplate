@@ -41,3 +41,9 @@ class BatchUploadResponse(BaseModel):
     rejected: int = Field(..., description="Number of files rejected")
     results: List[FileUploadResult] = Field(..., description="Per-file results")
     message: str = Field(..., description="Overall batch status message")
+
+class TranscribeResponse(BaseModel):
+    """Audio transcription response - TEXT ONLY"""
+    transcription: str = Field(..., description="Transcribed text from audio")
+    message: str = Field(..., description="Status message")
+    # NOTE: No ai_response field - client will call /chat/enqueue separately

@@ -15,7 +15,9 @@
       "Bash(grep:*)",
       "WebFetch(domain:www.npmjs.com)",
       "WebFetch(domain:fastify.dev)",
-      "mcp__context7__query-docs"
+      "mcp__context7__query-docs",
+      "WebFetch(domain:www.humanlayer.dev)",
+      "WebFetch(domain:arize.com)"
     ],
     "deny": [],
     "ask": []

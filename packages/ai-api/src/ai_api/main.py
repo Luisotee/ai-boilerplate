@@ -3,9 +3,10 @@ import json
 import uuid
 import asyncio
 from pathlib import Path
+from io import BytesIO
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, UploadFile, File
-from typing import List
+from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, UploadFile, File, Form
+from typing import List, Optional
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from dotenv import load_dotenv
@@ -15,9 +16,10 @@ load_dotenv()
 
 from .logger import logger
 from .database import init_db, get_db, get_conversation_history, save_message, get_or_create_user
-from .schemas import ChatRequest, ChatResponse, SaveMessageRequest, UploadPDFResponse, BatchUploadResponse, FileUploadResult
+from .schemas import ChatRequest, ChatResponse, SaveMessageRequest, UploadPDFResponse, BatchUploadResponse, FileUploadResult, TranscribeResponse
 from .agent import get_ai_response, format_message_history, AgentDeps
 from .embeddings import create_embedding_service
+from .transcription import create_groq_client, transcribe_audio, validate_audio_file
 from .kb_models import KnowledgeBaseDocument
 from .processing import process_pdf_document
 from .queue.connection import get_arq_redis, close_arq_redis, get_redis_client
@@ -974,4 +976,91 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
 
     except Exception as e:
         logger.error(f'Error processing chat: {str(e)}', exc_info=True)
+        raise HTTPException(status_code=500, detail='Internal server error')
+
+@app.post('/transcribe', response_model=TranscribeResponse, tags=['Speech-to-Text'])
+async def transcribe_audio_endpoint(
+    file: UploadFile = File(...),
+    language: Optional[str] = Form(None)
+):
+    """
+    Transcribe audio to text using Groq Whisper API
+
+    This endpoint ONLY does audio-to-text transcription. It does NOT:
+    - Save messages to database
+    - Call the AI agent
+    - Generate embeddings
+    - Process conversation history
+
+    The client should call /chat/enqueue with the transcribed text for AI processing.
+
+    **Request (multipart/form-data):**
+    - `file`: Audio file (mp3, wav, ogg, m4a, webm, flac, etc.)
+    - `language`: (Optional) ISO-639-1 language code (e.g., 'en', 'es') for better accuracy
+
+    **Response:**
+    - `transcription`: Transcribed text
+    - `message`: Status message
+
+    **Supported Formats:** mp3, mp4, mpeg, mpga, m4a, wav, webm, ogg, flac
+    **Maximum File Size:** 25 MB
+
+    **Example:**
+    ```bash
+    curl -X POST http://localhost:8000/transcribe \\
+      -F "file=@audio.mp3" \\
+      -F "language=en"
+    ```
+    """
+    logger.info('Received audio transcription request')
+
+    try:
+        # Step 1: Read and validate audio file
+        audio_content = await file.read()
+        file_size = len(audio_content)
+
+        is_valid, error_msg, file_format = validate_audio_file(
+            file.filename or 'unknown',
+            file.content_type,
+            file_size
+        )
+
+        if not is_valid:
+            logger.warning(f'Invalid audio file: {error_msg}')
+            raise HTTPException(status_code=400, detail=error_msg)
+
+        logger.info(f'Audio validated: {file.filename} ({file_size / 1024:.1f} KB, format: {file_format})')
+
+        # Step 2: Create Groq client
+        groq_client = create_groq_client(os.getenv('GROQ_API_KEY'))
+        if not groq_client:
+            raise HTTPException(
+                status_code=503,
+                detail='Speech-to-text service not configured. Please set GROQ_API_KEY environment variable.'
+            )
+
+        # Step 3: Transcribe audio
+        audio_file_obj = BytesIO(audio_content)
+        transcription_text, transcription_error = await transcribe_audio(
+            groq_client,
+            audio_file_obj,
+            file.filename or f'audio.{file_format}',
+            language=language
+        )
+
+        if transcription_error:
+            raise HTTPException(status_code=500, detail=transcription_error)
+
+        logger.info(f'Transcription successful: "{transcription_text[:100]}..." ({len(transcription_text)} chars)')
+
+        # Step 4: Return transcription ONLY
+        return TranscribeResponse(
+            transcription=transcription_text,
+            message='Audio transcribed successfully'
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f'Error processing audio transcription: {str(e)}', exc_info=True)
         raise HTTPException(status_code=500, detail='Internal server error')

@@ -9,5 +9,8 @@ export const logger = pino({
       translateTime: 'SYS:standard',
       ignore: 'pid,hostname'
     }
+  },
+  serializers: {
+    error: pino.stdSerializers.err  // Properly serialize Error objects
   }
 });
