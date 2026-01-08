@@ -90,8 +90,7 @@ async def search_knowledge_base(
     rows = result.fetchall()
 
     logger.info(
-        f"Knowledge base search found {len(rows)} results "
-        f"(threshold: {similarity_threshold})"
+        f"Knowledge base search found {len(rows)} results (threshold: {similarity_threshold})"
     )
 
     # Convert to structured results
@@ -121,8 +120,7 @@ async def search_knowledge_base(
         )
 
         logger.debug(
-            f"  - [{row.original_filename}] "
-            f"(similarity: {row.similarity:.3f})\n{row.content}"
+            f"  - [{row.original_filename}] (similarity: {row.similarity:.3f})\n{row.content}"
         )
 
     return results

@@ -39,9 +39,7 @@ def main():
     logger.info("=" * 80)
     logger.info("🚀 Starting arq worker for AI API")
     logger.info("=" * 80)
-    logger.info(
-        f"Redis: {WorkerSettings.redis_settings.host}:{WorkerSettings.redis_settings.port}"
-    )
+    logger.info(f"Redis: {WorkerSettings.redis_settings.host}:{WorkerSettings.redis_settings.port}")
     logger.info(f"Database: {WorkerSettings.redis_settings.database}")
     logger.info(f"Max concurrent jobs: {WorkerSettings.max_jobs}")
     logger.info(f"Job timeout: {WorkerSettings.job_timeout}s")

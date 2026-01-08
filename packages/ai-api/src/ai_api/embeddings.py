@@ -43,9 +43,7 @@ class EmbeddingService:
         self.model = EMBEDDING_MODEL
         self.dimensions = EMBEDDING_DIMENSIONS
         self.max_length = MAX_EMBEDDING_LENGTH
-        logger.info(
-            f"EmbeddingService initialized (model: {self.model}, dims: {self.dimensions})"
-        )
+        logger.info(f"EmbeddingService initialized (model: {self.model}, dims: {self.dimensions})")
 
     async def generate(
         self, text: str, task_type: str = "RETRIEVAL_DOCUMENT"
@@ -77,9 +75,7 @@ class EmbeddingService:
                 ),
             )
             embedding = response.embeddings[0].values
-            logger.debug(
-                f"Generated embedding: {len(embedding)} dimensions (task: {task_type})"
-            )
+            logger.debug(f"Generated embedding: {len(embedding)} dimensions (task: {task_type})")
             return embedding
 
         except Exception as e:

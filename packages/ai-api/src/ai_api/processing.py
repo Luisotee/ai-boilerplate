@@ -52,9 +52,7 @@ async def process_pdf_document(document_id: str, file_path: str):
 
         document.status = "processing"
         db.commit()
-        logger.info(
-            f"Document status updated to 'processing': {document.original_filename}"
-        )
+        logger.info(f"Document status updated to 'processing': {document.original_filename}")
 
         # Verify file exists
         if not Path(file_path).exists():
@@ -83,9 +81,7 @@ async def process_pdf_document(document_id: str, file_path: str):
         # Step 4: Get embedding service
         embedding_service = create_embedding_service(settings.gemini_api_key)
         if not embedding_service:
-            raise ValueError(
-                "GEMINI_API_KEY not configured - cannot generate embeddings"
-            )
+            raise ValueError("GEMINI_API_KEY not configured - cannot generate embeddings")
 
         # Step 5: Perform hybrid chunking with token-aware chunker
         # HybridChunker uses document structure + token limits for optimal RAG chunks
@@ -133,9 +129,7 @@ async def process_pdf_document(document_id: str, file_path: str):
                             page_numbers.add(prov.page_no)
 
                 # Extract headings (if item is a section header)
-                if hasattr(doc_item, "label") and "SECTION_HEADER" in str(
-                    doc_item.label
-                ):
+                if hasattr(doc_item, "label") and "SECTION_HEADER" in str(doc_item.label):
                     if hasattr(doc_item, "text"):
                         headings.append(doc_item.text)
 
@@ -147,9 +141,7 @@ async def process_pdf_document(document_id: str, file_path: str):
 
             # Prepare chunk metadata
             chunk_metadata = {
-                "all_page_numbers": sorted(
-                    list(page_numbers)
-                ),  # All pages this chunk spans
+                "all_page_numbers": sorted(list(page_numbers)),  # All pages this chunk spans
                 "all_headings": headings,  # All headings in this chunk
                 "doc_item_count": len(chunk.meta.doc_items),
             }
@@ -205,9 +197,7 @@ async def process_pdf_document(document_id: str, file_path: str):
         )
 
     except Exception as e:
-        logger.error(
-            f"❌ Error processing document {document_id}: {str(e)}", exc_info=True
-        )
+        logger.error(f"❌ Error processing document {document_id}: {str(e)}", exc_info=True)
 
         # Update document status to failed
         try:

@@ -38,9 +38,7 @@ async def save_job_chunk(redis: Redis, job_id: str, index: int, content: str) ->
     await redis.expire(chunk_key, settings.queue_chunk_ttl)
 
 
-async def get_job_chunks(
-    redis: Redis, job_id: str, start_index: int = 0
-) -> list[dict[str, Any]]:
+async def get_job_chunks(redis: Redis, job_id: str, start_index: int = 0) -> list[dict[str, Any]]:
     """
     Retrieve chunks for a job from Redis.
 

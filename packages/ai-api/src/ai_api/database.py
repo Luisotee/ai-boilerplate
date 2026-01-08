@@ -37,9 +37,7 @@ class User(Base):
     whatsapp_jid = Column(String, unique=True, index=True, nullable=False)
     phone = Column(String, nullable=True)
     name = Column(String, nullable=True)
-    conversation_type = Column(
-        String, nullable=False, index=True
-    )  # 'private' or 'group'
+    conversation_type = Column(String, nullable=False, index=True)  # 'private' or 'group'
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     # Relationship
@@ -54,9 +52,7 @@ class ConversationMessage(Base):
     __tablename__ = "conversation_messages"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
-    user_id = Column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
-    )
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
     role = Column(String, nullable=False)  # 'user' or 'assistant'
     content = Column(Text, nullable=False)
 
@@ -119,9 +115,7 @@ def get_or_create_user(db, whatsapp_jid: str, conversation_type: str, name: str 
     return user
 
 
-def get_conversation_history(
-    db, whatsapp_jid: str, conversation_type: str, limit: int = None
-):
+def get_conversation_history(db, whatsapp_jid: str, conversation_type: str, limit: int = None):
     """Retrieve recent conversation history for a user by WhatsApp JID"""
     user = get_or_create_user(db, whatsapp_jid, conversation_type)
 
@@ -132,9 +126,7 @@ def get_conversation_history(
         else:  # private
             limit = settings.history_limit_private
 
-        logger.info(
-            f"Using history limit {limit} for {user.conversation_type} conversation"
-        )
+        logger.info(f"Using history limit {limit} for {user.conversation_type} conversation")
 
     messages = (
         db.query(ConversationMessage)

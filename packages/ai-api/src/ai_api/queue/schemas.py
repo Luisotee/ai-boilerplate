@@ -14,9 +14,7 @@ class ChunkData(BaseModel):
 
     index: int = Field(..., description="Sequential chunk index (0-based)")
     content: str = Field(..., description="Chunk content (token or text fragment)")
-    timestamp: str = Field(
-        ..., description="ISO format timestamp when chunk was created"
-    )
+    timestamp: str = Field(..., description="ISO format timestamp when chunk was created")
 
 
 class EnqueueResponse(BaseModel):
@@ -25,12 +23,8 @@ class EnqueueResponse(BaseModel):
     """
 
     job_id: str = Field(..., description="Unique job identifier for tracking")
-    status: Literal["queued"] = Field(
-        default="queued", description="Initial job status"
-    )
-    message: str = Field(
-        default="Job queued successfully", description="Human-readable message"
-    )
+    status: Literal["queued"] = Field(default="queued", description="Initial job status")
+    message: str = Field(default="Job queued successfully", description="Human-readable message")
 
 
 class JobStatusResponse(BaseModel):
@@ -53,9 +47,7 @@ class JobStatusResponse(BaseModel):
         default=None,
         description="Complete assembled response (only present when status=complete)",
     )
-    error: str | None = Field(
-        default=None, description="Error message if status=failed"
-    )
+    error: str | None = Field(default=None, description="Error message if status=failed")
 
 
 class JobMetadata(BaseModel):

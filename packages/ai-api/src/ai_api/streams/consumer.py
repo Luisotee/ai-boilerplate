@@ -128,8 +128,7 @@ async def run_stream_consumer(redis: Redis):
             # But each user's messages are processed sequentially
             if active_streams:
                 tasks = [
-                    process_user_stream(redis, user_id, running_flag)
-                    for user_id in active_streams
+                    process_user_stream(redis, user_id, running_flag) for user_id in active_streams
                 ]
                 await asyncio.gather(*tasks)
 

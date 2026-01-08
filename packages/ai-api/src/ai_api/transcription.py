@@ -94,9 +94,7 @@ def validate_audio_file(
                 f"expected one of {expected_mimes}. Proceeding anyway."
             )
 
-    logger.debug(
-        f"Audio file validated: {filename} ({file_size} bytes, format: {file_format})"
-    )
+    logger.debug(f"Audio file validated: {filename} ({file_size} bytes, format: {file_format})")
     return True, None, file_format
 
 

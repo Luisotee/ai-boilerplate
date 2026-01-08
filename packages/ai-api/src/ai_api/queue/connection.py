@@ -5,7 +5,6 @@ Provides connection pooling and arq client initialization
 shared between API endpoints and worker processes.
 """
 
-
 from arq import create_pool
 from arq.connections import ArqRedis, RedisSettings
 from redis.asyncio import Redis

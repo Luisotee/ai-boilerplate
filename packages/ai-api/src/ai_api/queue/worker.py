@@ -93,35 +93,25 @@ async def process_chat_job(
         # Step 4: Stream tokens from AI agent
         logger.info(f"[Job {job_id}] Starting AI streaming...")
 
-        async for token in get_ai_response(
-            message, message_history, agent_deps=agent_deps
-        ):
+        async for token in get_ai_response(message, message_history, agent_deps=agent_deps):
             full_response += token
 
             # Save chunk to Redis immediately
             await save_job_chunk(redis, job_id, chunk_index, token)
             chunk_index += 1
 
-        logger.info(
-            f"[Job {job_id}] AI streaming completed. Total chunks: {chunk_index}"
-        )
-        logger.info(
-            f"[Job {job_id}] Full response length: {len(full_response)} characters"
-        )
+        logger.info(f"[Job {job_id}] AI streaming completed. Total chunks: {chunk_index}")
+        logger.info(f"[Job {job_id}] Full response length: {len(full_response)} characters")
 
         # Step 5: Generate embedding for complete assistant response
         assistant_embedding = None
         if embedding_service:
             try:
-                logger.info(
-                    f"[Job {job_id}] Generating embedding for assistant response..."
-                )
+                logger.info(f"[Job {job_id}] Generating embedding for assistant response...")
                 assistant_embedding = await embedding_service.generate(full_response)
                 logger.info(f"[Job {job_id}] Embedding generated successfully")
             except Exception as e:
-                logger.error(
-                    f"[Job {job_id}] Error generating assistant embedding: {e}"
-                )
+                logger.error(f"[Job {job_id}] Error generating assistant embedding: {e}")
                 # Continue without embedding - not critical
 
         # Step 6: Save complete assistant response to PostgreSQL
@@ -134,9 +124,7 @@ async def process_chat_job(
             conversation_type,
             embedding=assistant_embedding,
         )
-        logger.info(
-            f"[Job {job_id}] Assistant message saved with ID: {assistant_msg.id}"
-        )
+        logger.info(f"[Job {job_id}] Assistant message saved with ID: {assistant_msg.id}")
 
         # Step 7: Save job metadata to Redis
         await set_job_metadata(
@@ -168,9 +156,7 @@ async def process_chat_job(
 
         # Save partial response if any
         if full_response:
-            logger.info(
-                f"[Job {job_id}] Saving partial response ({len(full_response)} chars)"
-            )
+            logger.info(f"[Job {job_id}] Saving partial response ({len(full_response)} chars)")
             try:
                 save_message(
                     db,
@@ -181,9 +167,7 @@ async def process_chat_job(
                     embedding=None,
                 )
             except Exception as save_error:
-                logger.error(
-                    f"[Job {job_id}] Failed to save partial response: {save_error}"
-                )
+                logger.error(f"[Job {job_id}] Failed to save partial response: {save_error}")
 
         # Re-raise so arq marks job as failed
         raise

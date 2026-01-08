@@ -147,9 +147,7 @@ async def health_check():
     return {"status": "healthy"}
 
 
-@app.post(
-    "/knowledge-base/upload", response_model=UploadPDFResponse, tags=["Knowledge Base"]
-)
+@app.post("/knowledge-base/upload", response_model=UploadPDFResponse, tags=["Knowledge Base"])
 async def upload_pdf(
     file: UploadFile = File(...),
     background_tasks: BackgroundTasks = BackgroundTasks(),
@@ -180,9 +178,7 @@ async def upload_pdf(
         "application/pdf",
         "application/x-pdf",
     ]:
-        logger.warning(
-            f"Unexpected content type: {file.content_type}, but filename ends with .pdf"
-        )
+        logger.warning(f"Unexpected content type: {file.content_type}, but filename ends with .pdf")
 
     # Generate unique document ID and filename
     doc_id = uuid.uuid4()
@@ -319,9 +315,7 @@ async def upload_pdf_batch(
         # Validate content type
         if not error and file.content_type:
             if file.content_type not in ["application/pdf", "application/x-pdf"]:
-                logger.warning(
-                    f"Unexpected content type: {file.content_type} for {filename}"
-                )
+                logger.warning(f"Unexpected content type: {file.content_type} for {filename}")
 
         # Read file and check size
         if not error:
@@ -376,9 +370,7 @@ async def upload_pdf_batch(
 
         # If file has validation error, add to rejected results
         if error:
-            results.append(
-                FileUploadResult(filename=filename, status="rejected", error=error)
-            )
+            results.append(FileUploadResult(filename=filename, status="rejected", error=error))
             rejected_count += 1
             logger.info(f"Rejected file: {filename} - {error}")
             continue
@@ -453,9 +445,7 @@ async def upload_pdf_batch(
             except Exception as cleanup_error:
                 logger.error(f"Cleanup error for {filename}: {str(cleanup_error)}")
 
-    logger.info(
-        f"Batch upload complete: {accepted_count} accepted, {rejected_count} rejected"
-    )
+    logger.info(f"Batch upload complete: {accepted_count} accepted, {rejected_count} rejected")
 
     # Build response message
     if accepted_count == 0:
@@ -463,7 +453,9 @@ async def upload_pdf_batch(
     elif rejected_count == 0:
         message = f"Successfully queued {accepted_count} files for processing"
     else:
-        message = f"Processed {len(files)} files: {accepted_count} accepted, {rejected_count} rejected"
+        message = (
+            f"Processed {len(files)} files: {accepted_count} accepted, {rejected_count} rejected"
+        )
 
     return BatchUploadResponse(
         total_files=len(files),
@@ -495,9 +487,7 @@ async def get_document_status(document_id: str, db: Session = Depends(get_db)):
     """
     try:
         document = (
-            db.query(KnowledgeBaseDocument)
-            .filter(KnowledgeBaseDocument.id == document_id)
-            .first()
+            db.query(KnowledgeBaseDocument).filter(KnowledgeBaseDocument.id == document_id).first()
         )
 
         if not document:
@@ -623,9 +613,7 @@ async def delete_document(document_id: str, db: Session = Depends(get_db)):
     try:
         # Find document
         document = (
-            db.query(KnowledgeBaseDocument)
-            .filter(KnowledgeBaseDocument.id == document_id)
-            .first()
+            db.query(KnowledgeBaseDocument).filter(KnowledgeBaseDocument.id == document_id).first()
         )
 
         if not document:
@@ -685,9 +673,7 @@ async def save_message_only(request: SaveMessageRequest, db: Session = Depends(g
     try:
         # Format message with sender name if group message
         content = (
-            f"{request.sender_name}: {request.message}"
-            if request.sender_name
-            else request.message
+            f"{request.sender_name}: {request.message}" if request.sender_name else request.message
         )
 
         # Generate embedding for message using embedding service
@@ -697,13 +683,9 @@ async def save_message_only(request: SaveMessageRequest, db: Session = Depends(g
             try:
                 user_embedding = await embedding_service.generate(content)
                 if not user_embedding:
-                    logger.warning(
-                        "Failed to generate embedding (graceful degradation)"
-                    )
+                    logger.warning("Failed to generate embedding (graceful degradation)")
             except Exception as e:
-                logger.error(
-                    f"Embedding generation error (continuing anyway): {str(e)}"
-                )
+                logger.error(f"Embedding generation error (continuing anyway): {str(e)}")
 
         # Save user message only
         save_message(
@@ -754,9 +736,7 @@ async def enqueue_chat(request: ChatRequest, db: Session = Depends(get_db)):
     try:
         # Format message with sender name if provided (group message)
         content = (
-            f"{request.sender_name}: {request.message}"
-            if request.sender_name
-            else request.message
+            f"{request.sender_name}: {request.message}" if request.sender_name else request.message
         )
 
         # Get or create user
@@ -771,13 +751,9 @@ async def enqueue_chat(request: ChatRequest, db: Session = Depends(get_db)):
                 if user_embedding:
                     logger.info("Generated embedding for user message")
                 else:
-                    logger.warning(
-                        "Failed to generate embedding (graceful degradation)"
-                    )
+                    logger.warning("Failed to generate embedding (graceful degradation)")
             except Exception as e:
-                logger.error(
-                    f"Embedding generation error (continuing anyway): {str(e)}"
-                )
+                logger.error(f"Embedding generation error (continuing anyway): {str(e)}")
 
         # Save user message immediately
         user_msg = save_message(
@@ -810,9 +786,7 @@ async def enqueue_chat(request: ChatRequest, db: Session = Depends(get_db)):
 
         logger.info(f"Job {job_id} added to stream for user {user.id}")
 
-        return EnqueueResponse(
-            job_id=job_id, status="queued", message="Job queued successfully"
-        )
+        return EnqueueResponse(job_id=job_id, status="queued", message="Job queued successfully")
 
     except Exception as e:
         logger.error(f"Error enqueueing chat: {str(e)}", exc_info=True)
@@ -887,16 +861,12 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
 
     try:
         # Get conversation history with type-specific limit
-        history = get_conversation_history(
-            db, request.whatsapp_jid, request.conversation_type
-        )
+        history = get_conversation_history(db, request.whatsapp_jid, request.conversation_type)
         message_history = format_message_history(history) if history else None
 
         # Format message with sender name if provided (group message)
         content = (
-            f"{request.sender_name}: {request.message}"
-            if request.sender_name
-            else request.message
+            f"{request.sender_name}: {request.message}" if request.sender_name else request.message
         )
 
         # Generate embedding for user message using embedding service
@@ -908,13 +878,9 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
                 if user_embedding:
                     logger.info("Generated embedding for user message")
                 else:
-                    logger.warning(
-                        "Failed to generate embedding (graceful degradation)"
-                    )
+                    logger.warning("Failed to generate embedding (graceful degradation)")
             except Exception as e:
-                logger.error(
-                    f"Embedding generation error (continuing anyway): {str(e)}"
-                )
+                logger.error(f"Embedding generation error (continuing anyway): {str(e)}")
 
         # Save user message with group context and embedding
         save_message(
@@ -944,18 +910,14 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
 
         # Get AI response (using formatted content) - consume stream into complete response
         ai_response = ""
-        async for token in get_ai_response(
-            content, message_history, agent_deps=agent_deps
-        ):
+        async for token in get_ai_response(content, message_history, agent_deps=agent_deps):
             ai_response += token
 
         # Generate embedding for assistant response using embedding service
         assistant_embedding = None
         if embedding_service_for_save:
             try:
-                assistant_embedding = await embedding_service_for_save.generate(
-                    ai_response
-                )
+                assistant_embedding = await embedding_service_for_save.generate(ai_response)
             except Exception as e:
                 logger.error(f"Error generating assistant embedding: {str(e)}")
 

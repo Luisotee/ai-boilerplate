@@ -81,9 +81,7 @@ agent = Agent(
 
 
 @agent.tool
-async def search_conversation_history(
-    ctx: RunContext[AgentDeps], search_query: str
-) -> str:
+async def search_conversation_history(ctx: RunContext[AgentDeps], search_query: str) -> str:
     """
     Search through conversation history for messages related to a specific topic.
 
@@ -140,9 +138,7 @@ async def search_conversation_history(
                 "Either we haven't discussed this topic, or messages are too old/dissimilar."
             )
 
-        logger.info(
-            f"Found {len(messages)} relevant past messages for query: '{search_query}'"
-        )
+        logger.info(f"Found {len(messages)} relevant past messages for query: '{search_query}'")
 
         # Format results with context using pure function
         formatted_results = format_conversation_results(messages)
@@ -271,9 +267,7 @@ async def search_knowledge_base(ctx: RunContext[AgentDeps], search_query: str) -
         return error_msg
 
 
-async def get_ai_response(
-    user_message: str, message_history=None, agent_deps: AgentDeps = None
-):
+async def get_ai_response(user_message: str, message_history=None, agent_deps: AgentDeps = None):
     """
     Stream AI response token by token for a user message with optional history
 
@@ -288,14 +282,10 @@ async def get_ai_response(
     logger.info("=" * 80)
     logger.info("🤖 AGENT STARTING")
     logger.info(f"   User message: {user_message}")
-    logger.info(
-        f"   History messages: {len(message_history) if message_history else 0}"
-    )
+    logger.info(f"   History messages: {len(message_history) if message_history else 0}")
     logger.info(f"   Has dependencies: {agent_deps is not None}")
     if agent_deps:
-        logger.info(
-            f"   - Embedding service: {agent_deps.embedding_service is not None}"
-        )
+        logger.info(f"   - Embedding service: {agent_deps.embedding_service is not None}")
     logger.info("=" * 80)
 
     # Track full response for logging

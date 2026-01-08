@@ -4,7 +4,6 @@ Conversation history RAG implementation.
 Provides semantic search over user's conversation history using vector similarity.
 """
 
-
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -117,9 +116,7 @@ async def search_conversation_history(
         return []
 
     query_preview = query_text[:50] if query_text else "embedding"
-    logger.info(
-        f"Semantic search for user {user_id}: '{query_preview}...' (limit: {limit})"
-    )
+    logger.info(f"Semantic search for user {user_id}: '{query_preview}...' (limit: {limit})")
 
     # Build exclusion clause
     exclude_clause = ""
@@ -163,9 +160,7 @@ async def search_conversation_history(
     result = db.execute(query_sql, params)
     rows = result.fetchall()
 
-    logger.info(
-        f"Semantic search found {len(rows)} results (threshold: {similarity_threshold})"
-    )
+    logger.info(f"Semantic search found {len(rows)} results (threshold: {similarity_threshold})")
 
     # Convert to ConversationMessage objects with context
     results = []
@@ -184,9 +179,7 @@ async def search_conversation_history(
         # Attach similarity score as metadata
         msg._similarity_score = float(row.similarity)
 
-        logger.debug(
-            f"  - [{row.role}] (similarity: {row.similarity:.3f})\n{row.content}"
-        )
+        logger.debug(f"  - [{row.role}] (similarity: {row.similarity:.3f})\n{row.content}")
 
         if include_context and context_window > 0:
             # Get surrounding context
@@ -260,9 +253,7 @@ def format_conversation_results(results: list[dict]) -> str:
     return f"Found {len(results)} relevant conversation snippets:\n\n{result}"
 
 
-def format_conversation_message(
-    msg: ConversationMessage, is_match: bool = False
-) -> str:
+def format_conversation_message(msg: ConversationMessage, is_match: bool = False) -> str:
     """
     Helper to format a single message.
 
@@ -313,9 +304,7 @@ def merge_and_deduplicate_messages(
     recent_ids = {str(msg.id) for msg in recent_messages}
 
     # Filter out semantic messages already in recent window
-    unique_semantic = [
-        msg for msg in semantic_messages if str(msg.id) not in recent_ids
-    ]
+    unique_semantic = [msg for msg in semantic_messages if str(msg.id) not in recent_ids]
 
     logger.info(
         f"Merging {len(recent_messages)} recent + {len(semantic_messages)} semantic "

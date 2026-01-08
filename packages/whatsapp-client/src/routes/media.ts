@@ -92,7 +92,10 @@ export async function registerMediaRoutes(app: FastifyInstance) {
           caption?: { value: string };
         };
 
-        app.log.debug({ phoneNumber: phoneNumber?.value, hasFile: !!file }, 'Extracted multipart fields');
+        app.log.debug(
+          { phoneNumber: phoneNumber?.value, hasFile: !!file },
+          'Extracted multipart fields'
+        );
 
         if (!phoneNumber?.value) {
           app.log.debug('Missing phoneNumber');

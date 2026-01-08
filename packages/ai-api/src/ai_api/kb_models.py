@@ -37,9 +37,7 @@ class KnowledgeBaseDocument(Base):
         String, nullable=False, default="pending"
     )  # 'pending', 'processing', 'completed', 'failed'
     error_message = Column(Text, nullable=True)
-    doc_metadata = Column(
-        JSON, nullable=True
-    )  # Document-level metadata (author, title, etc.)
+    doc_metadata = Column(JSON, nullable=True)  # Document-level metadata (author, title, etc.)
     chunk_count = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
@@ -81,9 +79,7 @@ class KnowledgeBaseChunk(Base):
     content_type = Column(String, default="text")  # 'text', 'table', 'list', 'code'
     page_number = Column(Integer, nullable=True)  # Source page in PDF
     heading = Column(String, nullable=True)  # Section heading if available
-    embedding = Column(
-        Vector(3072), nullable=True
-    )  # Google gemini-embedding-001 (3072 dimensions)
+    embedding = Column(Vector(3072), nullable=True)  # Google gemini-embedding-001 (3072 dimensions)
     embedding_generated_at = Column(DateTime, nullable=True)
     token_count = Column(Integer, nullable=True)  # Approximate token count
     chunk_metadata = Column(JSON, nullable=True)  # Chunk-level metadata
