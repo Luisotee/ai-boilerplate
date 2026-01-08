@@ -44,6 +44,10 @@ uv run uvicorn ai_api.main:app --reload --port 8000
 cd packages/whatsapp-client
 pnpm install
 pnpm dev                                # Scan QR code when prompted
+
+# Linting & Formatting
+pnpm lint                               # Check TypeScript (ESLint) + Python (Ruff)
+pnpm format                             # Format TypeScript (Prettier) + Python (Ruff)
 ```
 
 ## Guidelines
@@ -51,6 +55,7 @@ pnpm dev                                # Scan QR code when prompted
 - Use `pnpm add` / `uv add` for dependencies (never edit package.json/pyproject.toml directly)
 - Prefer pure functions over classes
 - Use structured logging (Pino for TS, Python logging) - no console.log/print
+- Keep this file updated with important changes
 
 ## References
 
