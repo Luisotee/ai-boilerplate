@@ -2,7 +2,8 @@
 Pydantic schemas for queue-related API requests and responses.
 """
 
-from typing import List, Optional, Literal
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -41,18 +42,18 @@ class JobStatusResponse(BaseModel):
     status: Literal["queued", "in_progress", "complete", "failed", "not_found"] = Field(
         ..., description="Current job status"
     )
-    chunks: List[ChunkData] = Field(
+    chunks: list[ChunkData] = Field(
         default_factory=list, description="Accumulated streaming chunks"
     )
     total_chunks: int = Field(default=0, description="Total number of chunks available")
     complete: bool = Field(
         default=False, description="Whether job has finished (success or failure)"
     )
-    full_response: Optional[str] = Field(
+    full_response: str | None = Field(
         default=None,
         description="Complete assembled response (only present when status=complete)",
     )
-    error: Optional[str] = Field(
+    error: str | None = Field(
         default=None, description="Error message if status=failed"
     )
 
@@ -67,6 +68,6 @@ class JobMetadata(BaseModel):
     message: str
     conversation_type: Literal["private", "group"]
     total_chunks: int = 0
-    db_message_id: Optional[str] = None  # UUID of saved assistant message
-    user_message_id: Optional[str] = None  # UUID of saved user message
-    created_at: Optional[str] = None  # ISO timestamp
+    db_message_id: str | None = None  # UUID of saved assistant message
+    user_message_id: str | None = None  # UUID of saved user message
+    created_at: str | None = None  # ISO timestamp

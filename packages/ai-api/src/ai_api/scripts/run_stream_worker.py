@@ -8,10 +8,12 @@ processing across different users.
 """
 
 import asyncio
+
 from redis.asyncio import Redis
+
 from ..config import settings
-from ..streams.consumer import run_stream_consumer
 from ..logger import logger
+from ..streams.consumer import run_stream_consumer
 
 
 async def main():

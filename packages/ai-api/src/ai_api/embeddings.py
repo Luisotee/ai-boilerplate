@@ -11,9 +11,10 @@ Reusable for all RAG implementations (conversation history, knowledge base, etc.
 """
 
 import asyncio
-from typing import List, Optional
+
 from google import genai
 from google.genai import types
+
 from .config import settings
 from .logger import logger
 
@@ -48,7 +49,7 @@ class EmbeddingService:
 
     async def generate(
         self, text: str, task_type: str = "RETRIEVAL_DOCUMENT"
-    ) -> Optional[List[float]]:
+    ) -> list[float] | None:
         """
         Generate embedding for a single text string.
 
@@ -85,7 +86,7 @@ class EmbeddingService:
             logger.error(f"Error generating embedding: {str(e)}", exc_info=True)
             return None
 
-    async def generate_batch(self, texts: List[str]) -> List[Optional[List[float]]]:
+    async def generate_batch(self, texts: list[str]) -> list[list[float] | None]:
         """
         Generate embeddings for multiple texts in parallel.
 
@@ -116,7 +117,7 @@ class EmbeddingService:
         return embeddings
 
 
-def create_embedding_service(api_key: str) -> Optional[EmbeddingService]:
+def create_embedding_service(api_key: str) -> EmbeddingService | None:
     """
     Create embedding service from API key.
 
@@ -141,7 +142,7 @@ def create_embedding_service(api_key: str) -> Optional[EmbeddingService]:
 
 
 # Backward compatibility: keep old function signature for gradual migration
-async def generate_embedding(text: str) -> Optional[List[float]]:
+async def generate_embedding(text: str) -> list[float] | None:
     """
     DEPRECATED: Use EmbeddingService.generate() instead.
 

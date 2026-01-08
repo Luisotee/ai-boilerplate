@@ -4,10 +4,9 @@ Conversation history RAG implementation.
 Provides semantic search over user's conversation history using vector similarity.
 """
 
-from typing import List, Optional
-from datetime import datetime
-from sqlalchemy.orm import Session
+
 from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import ConversationMessage
@@ -69,16 +68,16 @@ def get_context_messages(
 
 async def search_conversation_history(
     db: Session,
-    query_embedding: List[float],
+    query_embedding: list[float],
     user_id: str,
     query_text: str = None,
     limit: int = None,
-    exclude_message_ids: Optional[List[str]] = None,
+    exclude_message_ids: list[str] | None = None,
     include_context: bool = True,
     similarity_threshold: float = None,
     context_window: int = None,
     **kwargs,
-) -> List[dict]:
+) -> list[dict]:
     """
     Search for semantically similar messages with optional context window.
 
@@ -214,7 +213,7 @@ async def search_conversation_history(
     return results
 
 
-def format_conversation_results(results: List[dict]) -> str:
+def format_conversation_results(results: list[dict]) -> str:
     """
     Format conversation messages with context for agent consumption.
 
@@ -297,9 +296,9 @@ def format_conversation_message(
 
 
 def merge_and_deduplicate_messages(
-    recent_messages: List[ConversationMessage],
-    semantic_messages: List[ConversationMessage],
-) -> List[ConversationMessage]:
+    recent_messages: list[ConversationMessage],
+    semantic_messages: list[ConversationMessage],
+) -> list[ConversationMessage]:
     """
     Merge recent and semantic messages, deduplicate, and order chronologically.
 

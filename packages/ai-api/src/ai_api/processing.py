@@ -5,21 +5,19 @@ Handles background processing of uploaded PDFs: parsing, semantic chunking,
 embedding generation, and storage in the database.
 """
 
-import asyncio
-from typing import List, Optional, Dict
 from datetime import datetime
 from pathlib import Path
 
 import tiktoken
-from docling.document_converter import DocumentConverter
 from docling.chunking import HybridChunker
-from docling_core.types.doc import DoclingDocument
+from docling.document_converter import DocumentConverter
 from docling_core.transforms.chunker.tokenizer.openai import OpenAITokenizer
+from docling_core.types.doc import DoclingDocument
 
 from .config import settings
 from .database import SessionLocal
-from .kb_models import KnowledgeBaseDocument, KnowledgeBaseChunk
-from .embeddings import EmbeddingService, create_embedding_service
+from .embeddings import create_embedding_service
+from .kb_models import KnowledgeBaseChunk, KnowledgeBaseDocument
 from .logger import logger
 
 
@@ -69,7 +67,7 @@ async def process_pdf_document(document_id: str, file_path: str):
 
         # Step 2: Keep DoclingDocument for metadata access (don't export to Markdown!)
         doc: DoclingDocument = result.document
-        logger.info(f"Docling parsed document successfully")
+        logger.info("Docling parsed document successfully")
 
         # Step 3: Extract metadata
         metadata = {}

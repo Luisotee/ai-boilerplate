@@ -1,20 +1,25 @@
 from dataclasses import dataclass
-from typing import List, Optional
+
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
 from sqlalchemy.orm import Session
+
 from .config import settings
+from .embeddings import EmbeddingService
 from .logger import logger
 from .rag.conversation import (
-    search_conversation_history as search_conversation_fn,
     format_conversation_results,
+)
+from .rag.conversation import (
+    search_conversation_history as search_conversation_fn,
+)
+from .rag.knowledge_base import (
+    format_knowledge_base_results,
 )
 from .rag.knowledge_base import (
     search_knowledge_base as search_kb_fn,
-    format_knowledge_base_results,
 )
-from .embeddings import EmbeddingService
 
 
 @dataclass
@@ -29,8 +34,8 @@ class AgentDeps:
     db: Session
     user_id: str
     whatsapp_jid: str
-    recent_message_ids: List[str]
-    embedding_service: Optional[EmbeddingService] = None
+    recent_message_ids: list[str]
+    embedding_service: EmbeddingService | None = None
 
 
 # Create Google provider and model with API key from settings
@@ -93,7 +98,7 @@ async def search_conversation_history(
         Formatted string with relevant past messages or error message
     """
     logger.info("=" * 80)
-    logger.info(f"🔍 TOOL CALLED: search_conversation_history")
+    logger.info("🔍 TOOL CALLED: search_conversation_history")
     logger.info(f"   Query: '{search_query}'")
     logger.info(f"   User ID: {ctx.deps.user_id}")
     logger.info("=" * 80)
@@ -152,7 +157,7 @@ async def search_conversation_history(
         logger.info(f"Full formatted results:\n{formatted_results}")
 
         logger.info("=" * 80)
-        logger.info(f"✅ TOOL RETURNING: search_conversation_history")
+        logger.info("✅ TOOL RETURNING: search_conversation_history")
         logger.info(f"   Returning {len(formatted_results)} characters to agent")
         logger.info("=" * 80)
 
@@ -162,7 +167,7 @@ async def search_conversation_history(
         logger.error(f"Error in semantic search: {str(e)}", exc_info=True)
         error_msg = f"Error searching conversation history: {str(e)}"
         logger.info("=" * 80)
-        logger.info(f"❌ TOOL ERROR: search_conversation_history")
+        logger.info("❌ TOOL ERROR: search_conversation_history")
         logger.info(f"   Error: {str(e)}")
         logger.info("=" * 80)
         return error_msg
@@ -189,7 +194,7 @@ async def search_knowledge_base(ctx: RunContext[AgentDeps], search_query: str) -
         Formatted string with relevant document passages and citations
     """
     logger.info("=" * 80)
-    logger.info(f"📚 TOOL CALLED: search_knowledge_base")
+    logger.info("📚 TOOL CALLED: search_knowledge_base")
     logger.info(f"   Query: '{search_query}'")
     logger.info("=" * 80)
 
@@ -250,7 +255,7 @@ async def search_knowledge_base(ctx: RunContext[AgentDeps], search_query: str) -
         logger.info(f"Full formatted results (after cleaning):\n{formatted_results}")
 
         logger.info("=" * 80)
-        logger.info(f"✅ TOOL RETURNING: search_knowledge_base")
+        logger.info("✅ TOOL RETURNING: search_knowledge_base")
         logger.info(f"   Returning {len(formatted_results)} characters to agent")
         logger.info("=" * 80)
 
@@ -260,7 +265,7 @@ async def search_knowledge_base(ctx: RunContext[AgentDeps], search_query: str) -
         logger.error(f"Error in knowledge base search: {str(e)}", exc_info=True)
         error_msg = f"Error searching knowledge base: {str(e)}"
         logger.info("=" * 80)
-        logger.info(f"❌ TOOL ERROR: search_knowledge_base")
+        logger.info("❌ TOOL ERROR: search_knowledge_base")
         logger.info(f"   Error: {str(e)}")
         logger.info("=" * 80)
         return error_msg
@@ -281,7 +286,7 @@ async def get_ai_response(
         str: Text chunks as they arrive from Gemini
     """
     logger.info("=" * 80)
-    logger.info(f"🤖 AGENT STARTING")
+    logger.info("🤖 AGENT STARTING")
     logger.info(f"   User message: {user_message}")
     logger.info(
         f"   History messages: {len(message_history) if message_history else 0}"
@@ -306,7 +311,7 @@ async def get_ai_response(
             yield text_chunk
 
     logger.info("=" * 80)
-    logger.info(f"✅ AGENT COMPLETED")
+    logger.info("✅ AGENT COMPLETED")
     logger.info(f"   Final response length: {len(full_response)} characters")
     logger.info(f"   Full response:\n{full_response}")
     logger.info("=" * 80)
@@ -323,11 +328,10 @@ def format_message_history(db_messages):
         List of messages in Pydantic AI format
     """
     from pydantic_ai import (
-        ModelMessage,
         ModelRequest,
         ModelResponse,
-        UserPromptPart,
         TextPart,
+        UserPromptPart,
     )
 
     formatted = []

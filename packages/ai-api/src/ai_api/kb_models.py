@@ -7,10 +7,11 @@ with vector embeddings for semantic search.
 
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Integer, Text, DateTime, ForeignKey, JSON, Index
-from sqlalchemy.orm import relationship
-from sqlalchemy.dialects.postgresql import UUID
+
 from pgvector.sqlalchemy import Vector
+from sqlalchemy import JSON, Column, DateTime, ForeignKey, Index, Integer, String, Text
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import relationship
 
 from .database import Base
 

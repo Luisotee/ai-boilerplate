@@ -6,15 +6,15 @@ sequentially per user, and run the main consumer loop.
 """
 
 import asyncio
-from typing import Set
+
 from redis.asyncio import Redis
 
-from .manager import read_stream_messages, acknowledge_message, GROUP_NAME
-from .processor import process_chat_job_direct
 from ..logger import logger
+from .manager import GROUP_NAME, acknowledge_message, read_stream_messages
+from .processor import process_chat_job_direct
 
 
-async def discover_active_streams(redis: Redis) -> Set[str]:
+async def discover_active_streams(redis: Redis) -> set[str]:
     """
     Discover user streams that have pending messages.
 
@@ -24,7 +24,7 @@ async def discover_active_streams(redis: Redis) -> Set[str]:
     Returns:
         Set of user IDs with pending or new messages
     """
-    active_streams: Set[str] = set()
+    active_streams: set[str] = set()
     cursor = 0
 
     while True:

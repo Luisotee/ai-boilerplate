@@ -5,17 +5,16 @@ Provides connection pooling and arq client initialization
 shared between API endpoints and worker processes.
 """
 
-from typing import Optional
+
 from arq import create_pool
-from arq.connections import RedisSettings, ArqRedis
+from arq.connections import ArqRedis, RedisSettings
 from redis.asyncio import Redis
 
 from ..config import settings
 from ..logger import logger
 
-
 # Global connection pool (reused across requests)
-_arq_pool: Optional[ArqRedis] = None
+_arq_pool: ArqRedis | None = None
 
 
 def get_redis_settings() -> RedisSettings:

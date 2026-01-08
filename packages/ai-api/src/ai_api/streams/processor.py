@@ -7,13 +7,13 @@ making it compatible with Redis Streams.
 
 from redis.asyncio import Redis
 
+from ..agent import AgentDeps, format_message_history, get_ai_response
 from ..config import settings
-from ..logger import logger
 from ..database import SessionLocal, get_conversation_history, save_message
-from ..agent import get_ai_response, format_message_history, AgentDeps
 from ..embeddings import create_embedding_service
-from ..queue.utils import save_job_chunk, set_job_metadata
+from ..logger import logger
 from ..queue.connection import get_redis_client
+from ..queue.utils import save_job_chunk, set_job_metadata
 
 
 async def process_chat_job_direct(

@@ -20,14 +20,14 @@ The worker will:
 5. Gracefully handle shutdown signals (SIGINT, SIGTERM)
 """
 
-from dotenv import load_dotenv
 from arq.worker import run_worker
+from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
 
-from ..queue.worker import WorkerSettings
 from ..logger import logger
+from ..queue.worker import WorkerSettings
 
 
 def main():

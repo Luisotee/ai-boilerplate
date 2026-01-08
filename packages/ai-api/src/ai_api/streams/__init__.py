@@ -7,12 +7,12 @@ across different users.
 """
 
 from .manager import (
+    CONSUMER_ID,
+    GROUP_NAME,
+    acknowledge_message,
     add_message_to_stream,
     ensure_consumer_group,
     read_stream_messages,
-    acknowledge_message,
-    GROUP_NAME,
-    CONSUMER_ID,
 )
 
 __all__ = [

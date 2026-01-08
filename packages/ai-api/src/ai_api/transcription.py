@@ -10,8 +10,10 @@ Follows functional programming style with pure functions for:
 Pattern mirrors embeddings.py for consistency.
 """
 
-from typing import Optional, Tuple, BinaryIO
+from typing import BinaryIO
+
 from groq import Groq
+
 from .config import settings
 from .logger import logger
 
@@ -34,8 +36,8 @@ AUDIO_MIME_TYPES = {
 
 
 def validate_audio_file(
-    filename: str, content_type: Optional[str], file_size: int
-) -> Tuple[bool, Optional[str], Optional[str]]:
+    filename: str, content_type: str | None, file_size: int
+) -> tuple[bool, str | None, str | None]:
     """
     Validate audio file format, size, and MIME type.
 
@@ -98,7 +100,7 @@ def validate_audio_file(
     return True, None, file_format
 
 
-def create_groq_client(api_key: Optional[str]) -> Optional[Groq]:
+def create_groq_client(api_key: str | None) -> Groq | None:
     """
     Create Groq client from API key.
 
@@ -125,8 +127,8 @@ def create_groq_client(api_key: Optional[str]) -> Optional[Groq]:
 
 
 async def transcribe_audio(
-    client: Groq, audio_file: BinaryIO, filename: str, language: Optional[str] = None
-) -> Tuple[Optional[str], Optional[str]]:
+    client: Groq, audio_file: BinaryIO, filename: str, language: str | None = None
+) -> tuple[str | None, str | None]:
     """
     Transcribe audio file using Groq's Whisper API.
 

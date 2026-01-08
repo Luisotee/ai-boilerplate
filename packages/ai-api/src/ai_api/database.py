@@ -1,19 +1,21 @@
 import uuid
 from datetime import datetime
 from enum import Enum
+
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
-    create_engine,
     Column,
-    String,
-    Text,
     DateTime,
     ForeignKey,
+    String,
+    Text,
+    create_engine,
     text,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, relationship
-from pgvector.sqlalchemy import Vector
+from sqlalchemy.orm import relationship, sessionmaker
+
 from .config import settings
 from .logger import logger
 

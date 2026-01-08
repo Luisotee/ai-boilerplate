@@ -5,9 +5,8 @@ Provides semantic search over globally accessible PDF documents
 with source attribution and citation.
 """
 
-from typing import List, Optional
-from sqlalchemy.orm import Session
 from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..logger import logger
@@ -15,12 +14,12 @@ from ..logger import logger
 
 async def search_knowledge_base(
     db: Session,
-    query_embedding: List[float],
+    query_embedding: list[float],
     query_text: str = None,
     limit: int = None,
     similarity_threshold: float = None,
     **kwargs,
-) -> List[dict]:
+) -> list[dict]:
     """
     Search for semantically similar document chunks.
 
@@ -129,7 +128,7 @@ async def search_knowledge_base(
     return results
 
 
-def format_knowledge_base_results(results: List[dict]) -> str:
+def format_knowledge_base_results(results: list[dict]) -> str:
     """
     Format knowledge base chunks with source citations for agent consumption.
 

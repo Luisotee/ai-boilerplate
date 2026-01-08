@@ -9,25 +9,26 @@ This worker processes chat messages asynchronously by:
 """
 
 import os
-from typing import Dict, Any
+from typing import Any
+
 from arq.connections import RedisSettings
 from redis.asyncio import Redis
 
-from ..logger import logger
+from ..agent import AgentDeps, format_message_history, get_ai_response
 from ..database import SessionLocal, get_conversation_history, save_message
-from ..agent import get_ai_response, format_message_history, AgentDeps
 from ..embeddings import create_embedding_service
+from ..logger import logger
 from .utils import save_job_chunk, set_job_metadata
 
 
 async def process_chat_job(
-    ctx: Dict[str, Any],
+    ctx: dict[str, Any],
     user_id: str,
     whatsapp_jid: str,
     message: str,
     conversation_type: str,
     user_message_id: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Process a chat message asynchronously.
 

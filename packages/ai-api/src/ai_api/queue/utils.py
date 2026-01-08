@@ -7,7 +7,8 @@ and managing job metadata.
 
 import json
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import Any
+
 from redis.asyncio import Redis
 
 from ..config import settings
@@ -39,7 +40,7 @@ async def save_job_chunk(redis: Redis, job_id: str, index: int, content: str) ->
 
 async def get_job_chunks(
     redis: Redis, job_id: str, start_index: int = 0
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """
     Retrieve chunks for a job from Redis.
 
@@ -85,7 +86,7 @@ async def get_chunk_count(redis: Redis, job_id: str) -> int:
     return count
 
 
-async def set_job_metadata(redis: Redis, job_id: str, metadata: Dict[str, Any]) -> None:
+async def set_job_metadata(redis: Redis, job_id: str, metadata: dict[str, Any]) -> None:
     """
     Store job metadata in Redis.
 
@@ -106,7 +107,7 @@ async def set_job_metadata(redis: Redis, job_id: str, metadata: Dict[str, Any]) 
     )
 
 
-async def get_job_metadata(redis: Redis, job_id: str) -> Optional[Dict[str, Any]]:
+async def get_job_metadata(redis: Redis, job_id: str) -> dict[str, Any] | None:
     """
     Retrieve job metadata from Redis.
 

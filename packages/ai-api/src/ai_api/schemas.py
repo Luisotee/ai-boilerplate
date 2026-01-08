@@ -1,5 +1,6 @@
+from typing import Literal
+
 from pydantic import BaseModel, Field
-from typing import Literal, Optional, List
 
 
 class ChatRequest(BaseModel):
@@ -44,9 +45,9 @@ class FileUploadResult(BaseModel):
 
     filename: str = Field(..., description="Original filename")
     status: Literal["accepted", "rejected"] = Field(..., description="Upload status")
-    document_id: Optional[str] = Field(None, description="UUID if accepted")
-    message: Optional[str] = Field(None, description="Success message")
-    error: Optional[str] = Field(None, description="Error message if rejected")
+    document_id: str | None = Field(None, description="UUID if accepted")
+    message: str | None = Field(None, description="Success message")
+    error: str | None = Field(None, description="Error message if rejected")
 
 
 class BatchUploadResponse(BaseModel):
@@ -55,7 +56,7 @@ class BatchUploadResponse(BaseModel):
     total_files: int = Field(..., description="Total number of files in batch")
     accepted: int = Field(..., description="Number of files accepted for processing")
     rejected: int = Field(..., description="Number of files rejected")
-    results: List[FileUploadResult] = Field(..., description="Per-file results")
+    results: list[FileUploadResult] = Field(..., description="Per-file results")
     message: str = Field(..., description="Overall batch status message")
 
 

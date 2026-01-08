@@ -1,50 +1,46 @@
-import json
 import uuid
-import asyncio
-from pathlib import Path
-from io import BytesIO
 from contextlib import asynccontextmanager
+from io import BytesIO
+from pathlib import Path
+
 from fastapi import (
-    FastAPI,
-    Depends,
-    HTTPException,
     BackgroundTasks,
-    UploadFile,
+    Depends,
+    FastAPI,
     File,
     Form,
+    HTTPException,
+    UploadFile,
 )
-from typing import List, Optional
-from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
+from .agent import AgentDeps, format_message_history, get_ai_response
 from .config import settings
-from .logger import logger
 from .database import (
-    init_db,
-    get_db,
     get_conversation_history,
-    save_message,
+    get_db,
     get_or_create_user,
+    init_db,
+    save_message,
 )
+from .embeddings import create_embedding_service
+from .kb_models import KnowledgeBaseDocument
+from .logger import logger
+from .processing import process_pdf_document
+from .queue.connection import close_arq_redis, get_arq_redis, get_redis_client
+from .queue.schemas import ChunkData, EnqueueResponse, JobStatusResponse
+from .queue.utils import get_job_chunks, get_job_metadata
 from .schemas import (
+    BatchUploadResponse,
     ChatRequest,
     ChatResponse,
-    SaveMessageRequest,
-    UploadPDFResponse,
-    BatchUploadResponse,
     FileUploadResult,
+    SaveMessageRequest,
     TranscribeResponse,
+    UploadPDFResponse,
 )
-from .agent import get_ai_response, format_message_history, AgentDeps
-from .embeddings import create_embedding_service
-from .transcription import create_groq_client, transcribe_audio, validate_audio_file
-from .kb_models import KnowledgeBaseDocument
-from .processing import process_pdf_document
-from .queue.connection import get_arq_redis, close_arq_redis, get_redis_client
-from .queue.schemas import EnqueueResponse, JobStatusResponse, ChunkData
-from .queue.utils import get_job_chunks, get_job_metadata
-from arq.jobs import Job
 from .streams.manager import add_message_to_stream
+from .transcription import create_groq_client, transcribe_audio, validate_audio_file
 
 
 @asynccontextmanager
@@ -262,7 +258,7 @@ async def upload_pdf(
     tags=["Knowledge Base"],
 )
 async def upload_pdf_batch(
-    files: List[UploadFile] = File(...),
+    files: list[UploadFile] = File(...),
     background_tasks: BackgroundTasks = BackgroundTasks(),
     db: Session = Depends(get_db),
 ):
@@ -982,7 +978,7 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
 
 @app.post("/transcribe", response_model=TranscribeResponse, tags=["Speech-to-Text"])
 async def transcribe_audio_endpoint(
-    file: UploadFile = File(...), language: Optional[str] = Form(None)
+    file: UploadFile = File(...), language: str | None = Form(None)
 ):
     """
     Transcribe audio to text using Groq Whisper API

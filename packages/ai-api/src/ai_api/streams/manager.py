@@ -6,8 +6,9 @@ read messages in order, and acknowledge processed messages.
 """
 
 import os
-from typing import Dict, List, Tuple, Any
+
 from redis.asyncio import Redis
+
 from ..logger import logger
 
 # Constants
@@ -55,7 +56,7 @@ async def ensure_consumer_group(redis: Redis, user_id: str):
 
 async def read_stream_messages(
     redis: Redis, user_id: str, count: int = 1, block: int = 5000
-) -> List[Tuple[bytes, List[Tuple[bytes, Dict[bytes, bytes]]]]]:
+) -> list[tuple[bytes, list[tuple[bytes, dict[bytes, bytes]]]]]:
     """
     Read messages from user stream - returns in order.
 
