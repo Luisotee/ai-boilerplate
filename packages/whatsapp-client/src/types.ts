@@ -1,4 +1,4 @@
-import { WAMessage } from '@whiskeysockets/baileys';
+import type { WAMessage, WAMessageKey } from '@whiskeysockets/baileys';
 
 export interface ChatMessage {
   phone: string; // User's phone number (e.g., "1234567890@s.whatsapp.net")
@@ -13,7 +13,7 @@ export interface AIResponse {
 // Queue system types
 export interface QueuedMessage {
   msg: WAMessage; // Original Baileys message
-  messageKey: any; // For sending reactions
+  messageKey: WAMessageKey; // For sending reactions
   messageText: string; // Extracted text
   whatsappJid: string; // Conversation identifier
   isGroup: boolean; // Group vs private chat

@@ -51,7 +51,8 @@ export async function registerOperationsRoutes(app: FastifyInstance) {
         });
 
         return { success: true };
-      } catch (error: any) {
+      } catch (err) {
+        const error = err as Error;
         app.log.error({ error }, 'Failed to edit message');
 
         if (error.message?.includes('not registered on WhatsApp')) {
@@ -110,7 +111,8 @@ export async function registerOperationsRoutes(app: FastifyInstance) {
         });
 
         return { success: true };
-      } catch (error: any) {
+      } catch (err) {
+        const error = err as Error;
         app.log.error({ error }, 'Failed to delete message');
 
         if (error.message?.includes('not registered on WhatsApp')) {

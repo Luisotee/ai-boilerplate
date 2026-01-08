@@ -36,12 +36,13 @@ export async function registerMessagingRoutes(app: FastifyInstance) {
 
       try {
         const normalizedJid = await normalizeJid(request.body.phoneNumber);
-        const { text, quoted_message_id } = request.body;
+        const { text } = request.body;
         const sock = getBaileysSocket();
 
         const result = await sock.sendMessage(normalizedJid, { text });
         return { success: true, message_id: result?.key.id };
-      } catch (error: any) {
+      } catch (err) {
+        const error = err as Error;
         app.log.error({ error }, 'Failed to send message');
 
         if (error.message?.includes('not registered on WhatsApp')) {
@@ -86,7 +87,8 @@ export async function registerMessagingRoutes(app: FastifyInstance) {
           },
         });
         return { success: true };
-      } catch (error: any) {
+      } catch (err) {
+        const error = err as Error;
         app.log.error({ error }, 'Failed to send reaction');
 
         if (error.message?.includes('not registered on WhatsApp')) {
@@ -126,7 +128,8 @@ export async function registerMessagingRoutes(app: FastifyInstance) {
 
         await sock.sendPresenceUpdate(state, normalizedJid);
         return { success: true };
-      } catch (error: any) {
+      } catch (err) {
+        const error = err as Error;
         app.log.error({ error }, 'Failed to update typing indicator');
 
         if (error.message?.includes('not registered on WhatsApp')) {
@@ -171,7 +174,8 @@ export async function registerMessagingRoutes(app: FastifyInstance) {
         }));
         await sock.readMessages(keys);
         return { success: true };
-      } catch (error: any) {
+      } catch (err) {
+        const error = err as Error;
         app.log.error({ error }, 'Failed to mark messages as read');
 
         if (error.message?.includes('not registered on WhatsApp')) {

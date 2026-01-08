@@ -64,13 +64,13 @@ export async function registerMediaRoutes(app: FastifyInstance) {
           },
         },
       },
-      validatorCompiler: ({ schema }) => {
+      validatorCompiler: () => {
         // Skip body validation - we validate manually in handler
         return function (data) {
           return { value: data };
         };
       },
-      serializerCompiler: ({ schema }) => {
+      serializerCompiler: () => {
         // Skip response serialization - return data as-is for plain JSON Schema
         return function (data) {
           return JSON.stringify(data);
@@ -86,19 +86,15 @@ export async function registerMediaRoutes(app: FastifyInstance) {
       }
 
       try {
-        const body = request.body as {
+        const { file, phoneNumber, caption } = request.body as {
           file: MultipartFile;
-          phoneNumber: any;
-          caption?: any;
+          phoneNumber: { value: string };
+          caption?: { value: string };
         };
 
-        const file = body.file;
-        const phoneNumber = body.phoneNumber?.value || body.phoneNumber;
-        const caption = body.caption?.value;
+        app.log.debug({ phoneNumber: phoneNumber?.value, hasFile: !!file }, 'Extracted multipart fields');
 
-        app.log.debug({ phoneNumber, hasFile: !!file }, 'Extracted multipart fields');
-
-        if (!phoneNumber) {
+        if (!phoneNumber?.value) {
           app.log.debug('Missing phoneNumber');
           return reply.code(400).send({ error: 'phoneNumber is required' });
         }
@@ -119,19 +115,20 @@ export async function registerMediaRoutes(app: FastifyInstance) {
           return reply.code(400).send({ error: validation.error });
         }
 
-        const normalizedJid = await normalizeJid(phoneNumber);
+        const normalizedJid = await normalizeJid(phoneNumber.value);
         const sock = getBaileysSocket();
 
         app.log.debug({ normalizedJid }, 'Sending message via Baileys');
         const result = await sock.sendMessage(normalizedJid, {
           image: fileBuffer,
-          caption: caption,
+          caption: caption?.value,
           mimetype: mimetype,
         });
 
         app.log.debug({ messageId: result?.key.id }, 'Message sent successfully');
         return { success: true, message_id: result?.key.id };
-      } catch (error: any) {
+      } catch (err) {
+        const error = err as Error & { code?: string };
         // Extract error details for proper logging
         const errorDetails = {
           message: error?.message || String(error) || 'Unknown error',
@@ -144,21 +141,21 @@ export async function registerMediaRoutes(app: FastifyInstance) {
         // Handle specific multipart errors
         const { multipartErrors } = app;
 
-        if (error instanceof multipartErrors.RequestFileTooLargeError) {
+        if (err instanceof multipartErrors.RequestFileTooLargeError) {
           return reply.code(413).send({
             error: 'File exceeds maximum size',
             code: 'FILE_TOO_LARGE',
           });
         }
 
-        if (error instanceof multipartErrors.FilesLimitError) {
+        if (err instanceof multipartErrors.FilesLimitError) {
           return reply.code(413).send({
             error: 'Too many files uploaded',
             code: 'FILES_LIMIT',
           });
         }
 
-        if (error instanceof multipartErrors.InvalidMultipartContentTypeError) {
+        if (err instanceof multipartErrors.InvalidMultipartContentTypeError) {
           return reply.code(406).send({
             error: 'Request is not multipart',
             code: 'INVALID_CONTENT_TYPE',
@@ -234,13 +231,13 @@ export async function registerMediaRoutes(app: FastifyInstance) {
           },
         },
       },
-      validatorCompiler: ({ schema }) => {
+      validatorCompiler: () => {
         // Skip body validation - we validate manually in handler
         return function (data) {
           return { value: data };
         };
       },
-      serializerCompiler: ({ schema }) => {
+      serializerCompiler: () => {
         // Skip response serialization - return data as-is for plain JSON Schema
         return function (data) {
           return JSON.stringify(data);
@@ -256,21 +253,19 @@ export async function registerMediaRoutes(app: FastifyInstance) {
       }
 
       try {
-        const body = request.body as {
+        const { file, phoneNumber, caption, fileName } = request.body as {
           file: MultipartFile;
-          phoneNumber: any;
-          caption?: any;
-          fileName?: any;
+          phoneNumber: { value: string };
+          caption?: { value: string };
+          fileName?: { value: string };
         };
 
-        const file = body.file;
-        const phoneNumber = body.phoneNumber?.value || body.phoneNumber;
-        const caption = body.caption?.value;
-        const fileName = body.fileName?.value;
+        app.log.debug(
+          { phoneNumber: phoneNumber?.value, hasFile: !!file, fileName: fileName?.value },
+          'Extracted multipart fields'
+        );
 
-        app.log.debug({ phoneNumber, hasFile: !!file, fileName }, 'Extracted multipart fields');
-
-        if (!phoneNumber) {
+        if (!phoneNumber?.value) {
           app.log.debug('Missing phoneNumber');
           return reply.code(400).send({ error: 'phoneNumber is required' });
         }
@@ -291,20 +286,21 @@ export async function registerMediaRoutes(app: FastifyInstance) {
           return reply.code(400).send({ error: validation.error });
         }
 
-        const normalizedJid = await normalizeJid(phoneNumber);
+        const normalizedJid = await normalizeJid(phoneNumber.value);
         const sock = getBaileysSocket();
 
         app.log.debug({ normalizedJid }, 'Sending message via Baileys');
         const result = await sock.sendMessage(normalizedJid, {
           document: fileBuffer,
           mimetype: mimetype,
-          fileName: fileName || file.filename,
-          caption: caption,
+          fileName: fileName?.value || file.filename,
+          caption: caption?.value,
         });
 
         app.log.debug({ messageId: result?.key.id }, 'Message sent successfully');
         return { success: true, message_id: result?.key.id };
-      } catch (error: any) {
+      } catch (err) {
+        const error = err as Error & { code?: string };
         // Extract error details for proper logging
         const errorDetails = {
           message: error?.message || String(error) || 'Unknown error',
@@ -317,21 +313,21 @@ export async function registerMediaRoutes(app: FastifyInstance) {
         // Handle specific multipart errors
         const { multipartErrors } = app;
 
-        if (error instanceof multipartErrors.RequestFileTooLargeError) {
+        if (err instanceof multipartErrors.RequestFileTooLargeError) {
           return reply.code(413).send({
             error: 'File exceeds maximum size',
             code: 'FILE_TOO_LARGE',
           });
         }
 
-        if (error instanceof multipartErrors.FilesLimitError) {
+        if (err instanceof multipartErrors.FilesLimitError) {
           return reply.code(413).send({
             error: 'Too many files uploaded',
             code: 'FILES_LIMIT',
           });
         }
 
-        if (error instanceof multipartErrors.InvalidMultipartContentTypeError) {
+        if (err instanceof multipartErrors.InvalidMultipartContentTypeError) {
           return reply.code(406).send({
             error: 'Request is not multipart',
             code: 'INVALID_CONTENT_TYPE',
@@ -402,13 +398,13 @@ export async function registerMediaRoutes(app: FastifyInstance) {
           },
         },
       },
-      validatorCompiler: ({ schema }) => {
+      validatorCompiler: () => {
         // Skip body validation - we validate manually in handler
         return function (data) {
           return { value: data };
         };
       },
-      serializerCompiler: ({ schema }) => {
+      serializerCompiler: () => {
         // Skip response serialization - return data as-is for plain JSON Schema
         return function (data) {
           return JSON.stringify(data);
@@ -424,19 +420,20 @@ export async function registerMediaRoutes(app: FastifyInstance) {
       }
 
       try {
-        const body = request.body as {
+        const { file, phoneNumber, isVoiceNote } = request.body as {
           file: MultipartFile;
-          phoneNumber: any;
-          isVoiceNote?: any;
+          phoneNumber: { value: string };
+          isVoiceNote?: { value: string };
         };
 
-        const file = body.file;
-        const phoneNumber = body.phoneNumber?.value || body.phoneNumber;
-        const isVoiceNote = body.isVoiceNote?.value === 'true' || body.isVoiceNote?.value === true;
+        const ptt = isVoiceNote?.value === 'true';
 
-        app.log.debug({ phoneNumber, hasFile: !!file, isVoiceNote }, 'Extracted multipart fields');
+        app.log.debug(
+          { phoneNumber: phoneNumber?.value, hasFile: !!file, isVoiceNote: ptt },
+          'Extracted multipart fields'
+        );
 
-        if (!phoneNumber) {
+        if (!phoneNumber?.value) {
           app.log.debug('Missing phoneNumber');
           return reply.code(400).send({ error: 'phoneNumber is required' });
         }
@@ -457,19 +454,20 @@ export async function registerMediaRoutes(app: FastifyInstance) {
           return reply.code(400).send({ error: validation.error });
         }
 
-        const normalizedJid = await normalizeJid(phoneNumber);
+        const normalizedJid = await normalizeJid(phoneNumber.value);
         const sock = getBaileysSocket();
 
-        app.log.debug({ normalizedJid, ptt: isVoiceNote || false }, 'Sending message via Baileys');
+        app.log.debug({ normalizedJid, ptt }, 'Sending message via Baileys');
         const result = await sock.sendMessage(normalizedJid, {
           audio: fileBuffer,
           mimetype: mimetype,
-          ptt: isVoiceNote || false, // Push-to-talk (voice note)
+          ptt, // Push-to-talk (voice note)
         });
 
         app.log.debug({ messageId: result?.key.id }, 'Message sent successfully');
         return { success: true, message_id: result?.key.id };
-      } catch (error: any) {
+      } catch (err) {
+        const error = err as Error & { code?: string };
         // Extract error details for proper logging
         const errorDetails = {
           message: error?.message || String(error) || 'Unknown error',
@@ -482,21 +480,21 @@ export async function registerMediaRoutes(app: FastifyInstance) {
         // Handle specific multipart errors
         const { multipartErrors } = app;
 
-        if (error instanceof multipartErrors.RequestFileTooLargeError) {
+        if (err instanceof multipartErrors.RequestFileTooLargeError) {
           return reply.code(413).send({
             error: 'File exceeds maximum size',
             code: 'FILE_TOO_LARGE',
           });
         }
 
-        if (error instanceof multipartErrors.FilesLimitError) {
+        if (err instanceof multipartErrors.FilesLimitError) {
           return reply.code(413).send({
             error: 'Too many files uploaded',
             code: 'FILES_LIMIT',
           });
         }
 
-        if (error instanceof multipartErrors.InvalidMultipartContentTypeError) {
+        if (err instanceof multipartErrors.InvalidMultipartContentTypeError) {
           return reply.code(406).send({
             error: 'Request is not multipart',
             code: 'INVALID_CONTENT_TYPE',
@@ -568,13 +566,13 @@ export async function registerMediaRoutes(app: FastifyInstance) {
           },
         },
       },
-      validatorCompiler: ({ schema }) => {
+      validatorCompiler: () => {
         // Skip body validation - we validate manually in handler
         return function (data) {
           return { value: data };
         };
       },
-      serializerCompiler: ({ schema }) => {
+      serializerCompiler: () => {
         // Skip response serialization - return data as-is for plain JSON Schema
         return function (data) {
           return JSON.stringify(data);
@@ -590,21 +588,21 @@ export async function registerMediaRoutes(app: FastifyInstance) {
       }
 
       try {
-        const body = request.body as {
+        const { file, phoneNumber, caption, isGif } = request.body as {
           file: MultipartFile;
-          phoneNumber: any;
-          caption?: any;
-          isGif?: any;
+          phoneNumber: { value: string };
+          caption?: { value: string };
+          isGif?: { value: string };
         };
 
-        const file = body.file;
-        const phoneNumber = body.phoneNumber?.value || body.phoneNumber;
-        const caption = body.caption?.value;
-        const isGif = body.isGif?.value === 'true' || body.isGif?.value === true;
+        const gifPlayback = isGif?.value === 'true';
 
-        app.log.debug({ phoneNumber, hasFile: !!file, isGif }, 'Extracted multipart fields');
+        app.log.debug(
+          { phoneNumber: phoneNumber?.value, hasFile: !!file, isGif: gifPlayback },
+          'Extracted multipart fields'
+        );
 
-        if (!phoneNumber) {
+        if (!phoneNumber?.value) {
           app.log.debug('Missing phoneNumber');
           return reply.code(400).send({ error: 'phoneNumber is required' });
         }
@@ -625,23 +623,21 @@ export async function registerMediaRoutes(app: FastifyInstance) {
           return reply.code(400).send({ error: validation.error });
         }
 
-        const normalizedJid = await normalizeJid(phoneNumber);
+        const normalizedJid = await normalizeJid(phoneNumber.value);
         const sock = getBaileysSocket();
 
-        app.log.debug(
-          { normalizedJid, gifPlayback: isGif || false },
-          'Sending message via Baileys'
-        );
+        app.log.debug({ normalizedJid, gifPlayback }, 'Sending message via Baileys');
         const result = await sock.sendMessage(normalizedJid, {
           video: fileBuffer,
-          caption: caption,
+          caption: caption?.value,
           mimetype: mimetype,
-          gifPlayback: isGif || false,
+          gifPlayback,
         });
 
         app.log.debug({ messageId: result?.key.id }, 'Message sent successfully');
         return { success: true, message_id: result?.key.id };
-      } catch (error: any) {
+      } catch (err) {
+        const error = err as Error & { code?: string };
         // Extract error details for proper logging
         const errorDetails = {
           message: error?.message || String(error) || 'Unknown error',
@@ -654,21 +650,21 @@ export async function registerMediaRoutes(app: FastifyInstance) {
         // Handle specific multipart errors
         const { multipartErrors } = app;
 
-        if (error instanceof multipartErrors.RequestFileTooLargeError) {
+        if (err instanceof multipartErrors.RequestFileTooLargeError) {
           return reply.code(413).send({
             error: 'File exceeds maximum size',
             code: 'FILE_TOO_LARGE',
           });
         }
 
-        if (error instanceof multipartErrors.FilesLimitError) {
+        if (err instanceof multipartErrors.FilesLimitError) {
           return reply.code(413).send({
             error: 'Too many files uploaded',
             code: 'FILES_LIMIT',
           });
         }
 
-        if (error instanceof multipartErrors.InvalidMultipartContentTypeError) {
+        if (err instanceof multipartErrors.InvalidMultipartContentTypeError) {
           return reply.code(406).send({
             error: 'Request is not multipart',
             code: 'INVALID_CONTENT_TYPE',
@@ -725,7 +721,8 @@ export async function registerMediaRoutes(app: FastifyInstance) {
         });
 
         return { success: true, message_id: result?.key.id };
-      } catch (error: any) {
+      } catch (err) {
+        const error = err as Error;
         app.log.error({ error }, 'Failed to send location');
         if (error.message?.includes('not registered on WhatsApp')) {
           return reply.code(404).send({ error: error.message });
@@ -791,7 +788,8 @@ export async function registerMediaRoutes(app: FastifyInstance) {
         });
 
         return { success: true, message_id: result?.key.id };
-      } catch (error: any) {
+      } catch (err) {
+        const error = err as Error;
         app.log.error({ error }, 'Failed to send contact');
         if (error.message?.includes('not registered on WhatsApp')) {
           return reply.code(404).send({ error: error.message });
