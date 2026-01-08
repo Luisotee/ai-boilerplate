@@ -147,21 +147,21 @@ export async function registerMediaRoutes(app: FastifyInstance) {
         if (error instanceof multipartErrors.RequestFileTooLargeError) {
           return reply.code(413).send({
             error: 'File exceeds maximum size',
-            code: 'FILE_TOO_LARGE'
+            code: 'FILE_TOO_LARGE',
           });
         }
 
         if (error instanceof multipartErrors.FilesLimitError) {
           return reply.code(413).send({
             error: 'Too many files uploaded',
-            code: 'FILES_LIMIT'
+            code: 'FILES_LIMIT',
           });
         }
 
         if (error instanceof multipartErrors.InvalidMultipartContentTypeError) {
           return reply.code(406).send({
             error: 'Request is not multipart',
-            code: 'INVALID_CONTENT_TYPE'
+            code: 'INVALID_CONTENT_TYPE',
           });
         }
 
@@ -172,7 +172,7 @@ export async function registerMediaRoutes(app: FastifyInstance) {
 
         // Generic error with preserved message
         return reply.code(500).send({
-          error: errorDetails.message
+          error: errorDetails.message,
         });
       }
     }
@@ -190,7 +190,11 @@ export async function registerMediaRoutes(app: FastifyInstance) {
           type: 'object',
           required: ['file', 'phoneNumber'],
           properties: {
-            file: { type: 'string', format: 'binary', description: 'Document file (PDF, DOCX, etc.)' },
+            file: {
+              type: 'string',
+              format: 'binary',
+              description: 'Document file (PDF, DOCX, etc.)',
+            },
             phoneNumber: { type: 'string', description: 'Recipient phone number' },
             caption: { type: 'string', description: 'Optional document caption' },
             fileName: { type: 'string', description: 'Optional custom file name' },
@@ -316,21 +320,21 @@ export async function registerMediaRoutes(app: FastifyInstance) {
         if (error instanceof multipartErrors.RequestFileTooLargeError) {
           return reply.code(413).send({
             error: 'File exceeds maximum size',
-            code: 'FILE_TOO_LARGE'
+            code: 'FILE_TOO_LARGE',
           });
         }
 
         if (error instanceof multipartErrors.FilesLimitError) {
           return reply.code(413).send({
             error: 'Too many files uploaded',
-            code: 'FILES_LIMIT'
+            code: 'FILES_LIMIT',
           });
         }
 
         if (error instanceof multipartErrors.InvalidMultipartContentTypeError) {
           return reply.code(406).send({
             error: 'Request is not multipart',
-            code: 'INVALID_CONTENT_TYPE'
+            code: 'INVALID_CONTENT_TYPE',
           });
         }
 
@@ -341,7 +345,7 @@ export async function registerMediaRoutes(app: FastifyInstance) {
 
         // Generic error with preserved message
         return reply.code(500).send({
-          error: errorDetails.message
+          error: errorDetails.message,
         });
       }
     }
@@ -481,21 +485,21 @@ export async function registerMediaRoutes(app: FastifyInstance) {
         if (error instanceof multipartErrors.RequestFileTooLargeError) {
           return reply.code(413).send({
             error: 'File exceeds maximum size',
-            code: 'FILE_TOO_LARGE'
+            code: 'FILE_TOO_LARGE',
           });
         }
 
         if (error instanceof multipartErrors.FilesLimitError) {
           return reply.code(413).send({
             error: 'Too many files uploaded',
-            code: 'FILES_LIMIT'
+            code: 'FILES_LIMIT',
           });
         }
 
         if (error instanceof multipartErrors.InvalidMultipartContentTypeError) {
           return reply.code(406).send({
             error: 'Request is not multipart',
-            code: 'INVALID_CONTENT_TYPE'
+            code: 'INVALID_CONTENT_TYPE',
           });
         }
 
@@ -506,7 +510,7 @@ export async function registerMediaRoutes(app: FastifyInstance) {
 
         // Generic error with preserved message
         return reply.code(500).send({
-          error: errorDetails.message
+          error: errorDetails.message,
         });
       }
     }
@@ -624,7 +628,10 @@ export async function registerMediaRoutes(app: FastifyInstance) {
         const normalizedJid = await normalizeJid(phoneNumber);
         const sock = getBaileysSocket();
 
-        app.log.debug({ normalizedJid, gifPlayback: isGif || false }, 'Sending message via Baileys');
+        app.log.debug(
+          { normalizedJid, gifPlayback: isGif || false },
+          'Sending message via Baileys'
+        );
         const result = await sock.sendMessage(normalizedJid, {
           video: fileBuffer,
           caption: caption,
@@ -650,21 +657,21 @@ export async function registerMediaRoutes(app: FastifyInstance) {
         if (error instanceof multipartErrors.RequestFileTooLargeError) {
           return reply.code(413).send({
             error: 'File exceeds maximum size',
-            code: 'FILE_TOO_LARGE'
+            code: 'FILE_TOO_LARGE',
           });
         }
 
         if (error instanceof multipartErrors.FilesLimitError) {
           return reply.code(413).send({
             error: 'Too many files uploaded',
-            code: 'FILES_LIMIT'
+            code: 'FILES_LIMIT',
           });
         }
 
         if (error instanceof multipartErrors.InvalidMultipartContentTypeError) {
           return reply.code(406).send({
             error: 'Request is not multipart',
-            code: 'INVALID_CONTENT_TYPE'
+            code: 'INVALID_CONTENT_TYPE',
           });
         }
 
@@ -675,7 +682,7 @@ export async function registerMediaRoutes(app: FastifyInstance) {
 
         // Generic error with preserved message
         return reply.code(500).send({
-          error: errorDetails.message
+          error: errorDetails.message,
         });
       }
     }

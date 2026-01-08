@@ -41,7 +41,7 @@ export async function registerOperationsRoutes(app: FastifyInstance) {
         const messageKey = {
           remoteJid: normalizedJid,
           id: message_id,
-          fromMe: true,  // Can only edit messages sent by us
+          fromMe: true, // Can only edit messages sent by us
         };
 
         // Send edit message
@@ -61,7 +61,7 @@ export async function registerOperationsRoutes(app: FastifyInstance) {
         // Handle time limit or permission errors
         if (error.message?.includes('too old') || error.message?.includes('edit')) {
           return reply.code(400).send({
-            error: 'Cannot edit message (too old or not yours)'
+            error: 'Cannot edit message (too old or not yours)',
           });
         }
 
@@ -101,7 +101,7 @@ export async function registerOperationsRoutes(app: FastifyInstance) {
         const messageKey = {
           remoteJid: normalizedJid,
           id: message_id,
-          fromMe: true,  // Can only delete messages sent by us
+          fromMe: true, // Can only delete messages sent by us
         };
 
         // Send delete message
@@ -120,7 +120,7 @@ export async function registerOperationsRoutes(app: FastifyInstance) {
         // Handle time limit or permission errors
         if (error.message?.includes('too old') || error.message?.includes('delete')) {
           return reply.code(400).send({
-            error: 'Cannot delete message (too old or not yours)'
+            error: 'Cannot delete message (too old or not yours)',
           });
         }
 

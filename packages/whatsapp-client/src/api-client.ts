@@ -84,6 +84,6 @@ export async function sendMessageToAI(
       return status.full_response || '';
     }
 
-    await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
+    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
 }

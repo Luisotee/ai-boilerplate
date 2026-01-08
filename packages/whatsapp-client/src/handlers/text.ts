@@ -36,10 +36,7 @@ export async function handleTextMessage(
 
     await sock.sendMessage(whatsappJid, { text: response });
 
-    logger.info(
-      { to: whatsappJid, responseLength: response.length },
-      'Sent AI response'
-    );
+    logger.info({ to: whatsappJid, responseLength: response.length }, 'Sent AI response');
   } catch (error) {
     logger.error({ error, whatsappJid }, 'Error processing message');
     await sock.sendMessage(whatsappJid, {

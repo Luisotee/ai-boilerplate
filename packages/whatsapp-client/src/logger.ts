@@ -8,10 +8,10 @@ export const logger = pino({
     options: {
       colorize: true,
       translateTime: 'SYS:standard',
-      ignore: 'pid,hostname'
-    }
+      ignore: 'pid,hostname',
+    },
   },
   serializers: {
-    error: pino.stdSerializers.err  // Properly serialize Error objects
-  }
+    error: pino.stdSerializers.err, // Properly serialize Error objects
+  },
 });

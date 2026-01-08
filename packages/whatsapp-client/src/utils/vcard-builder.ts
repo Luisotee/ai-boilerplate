@@ -12,11 +12,7 @@ export interface ContactInfo {
  * @returns vCard formatted string
  */
 export function buildVCard(contact: ContactInfo): string {
-  const lines: string[] = [
-    'BEGIN:VCARD',
-    'VERSION:3.0',
-    `FN:${contact.name}`,
-  ];
+  const lines: string[] = ['BEGIN:VCARD', 'VERSION:3.0', `FN:${contact.name}`];
 
   // Phone number with WhatsApp ID (waid) if possible
   const phoneDigits = contact.phone.replace(/\D/g, ''); // Remove non-digits

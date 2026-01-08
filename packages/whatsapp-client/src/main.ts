@@ -8,7 +8,7 @@ import {
   serializerCompiler,
   validatorCompiler,
   jsonSchemaTransform,
-  type ZodTypeProvider
+  type ZodTypeProvider,
 } from 'fastify-type-provider-zod';
 import { initializeWhatsApp } from './whatsapp.js';
 import { registerHealthRoutes } from './routes/health.js';
@@ -60,8 +60,8 @@ async function start() {
       },
     },
     ajv: {
-      plugins: [ajvFilePlugin]
-    }
+      plugins: [ajvFilePlugin],
+    },
   }).withTypeProvider<ZodTypeProvider>();
 
   // Set Zod validators and serializers
@@ -90,9 +90,7 @@ async function start() {
         description: 'REST API for WhatsApp messaging via Baileys',
         version: '1.0.0',
       },
-      servers: [
-        { url: `http://localhost:${config.server.port}`, description: 'Development' },
-      ],
+      servers: [{ url: `http://localhost:${config.server.port}`, description: 'Development' }],
       tags: [
         { name: 'Health', description: 'Health check endpoints' },
         { name: 'Messaging', description: 'Text messaging, reactions, typing' },

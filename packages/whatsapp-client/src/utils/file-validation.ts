@@ -16,10 +16,10 @@ export const ALLOWED_MIMETYPES = {
 };
 
 export const MAX_FILE_SIZES = {
-  image: 16 * 1024 * 1024,    // 16MB
-  document: 50 * 1024 * 1024,  // 50MB
-  audio: 16 * 1024 * 1024,     // 16MB
-  video: 50 * 1024 * 1024,     // 50MB
+  image: 16 * 1024 * 1024, // 16MB
+  document: 50 * 1024 * 1024, // 50MB
+  audio: 16 * 1024 * 1024, // 16MB
+  video: 50 * 1024 * 1024, // 50MB
 };
 
 export interface FileValidationResult {
