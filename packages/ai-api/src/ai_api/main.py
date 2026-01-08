@@ -53,7 +53,7 @@ async def lifespan(app: FastAPI):
 
     # Initialize Redis connection pool
     try:
-        arq_redis = await get_arq_redis()
+        await get_arq_redis()  # Initialize connection pool
         logger.info("✅ Redis connection pool initialized")
     except Exception as e:
         logger.error(f"❌ Failed to initialize Redis: {e}")
@@ -112,7 +112,7 @@ logger.info(f"Knowledge base upload directory: {UPLOAD_DIR}")
 
 
 # Helper function for Redis Streams job status inference
-async def get_stream_job_status(redis: "Redis", job_id: str) -> str:
+async def get_stream_job_status(redis, job_id: str) -> str:
     """
     Infer job status from Redis chunks and metadata.
 
@@ -200,7 +200,7 @@ async def upload_pdf(
         if file_size > max_size_bytes:
             raise HTTPException(
                 status_code=413,
-                detail=f"File too large ({file_size / 1024 / 1024:.1f} MB). Maximum size: {max_size_mb} MB",
+                detail=f"File too large ({file_size / 1024 / 1024:.1f} MB). Maximum size: {settings.kb_max_file_size_mb} MB",
             )
 
         with open(file_path, "wb") as f:
@@ -332,7 +332,7 @@ async def upload_pdf_batch(
                 if file_size == 0:
                     error = "Empty file"
                 elif file_size > max_file_size_bytes:
-                    error = f"File too large ({file_size / 1024 / 1024:.1f} MB). Maximum: {max_file_size_mb} MB"
+                    error = f"File too large ({file_size / 1024 / 1024:.1f} MB). Maximum: {settings.kb_max_file_size_mb} MB"
 
             except Exception as e:
                 logger.error(f"Error reading file {filename}: {str(e)}", exc_info=True)
@@ -353,7 +353,7 @@ async def upload_pdf_batch(
     # Check total batch size
     if total_size > max_batch_size_bytes:
         logger.warning(
-            f"Batch too large: {total_size / 1024 / 1024:.1f} MB > {max_batch_size_mb} MB"
+            f"Batch too large: {total_size / 1024 / 1024:.1f} MB > {settings.kb_max_batch_size_mb} MB"
         )
         # Reject all files that exceed the remaining batch size
         running_total = 0
@@ -362,7 +362,7 @@ async def upload_pdf_batch(
                 running_total += validation["size"]
                 if running_total > max_batch_size_bytes:
                     validation["error"] = (
-                        f"Batch size limit exceeded. Total: {total_size / 1024 / 1024:.1f} MB, Maximum: {max_batch_size_mb} MB"
+                        f"Batch size limit exceeded. Total: {total_size / 1024 / 1024:.1f} MB, Maximum: {settings.kb_max_batch_size_mb} MB"
                     )
 
     # Phase 2: Process valid files and build results
@@ -795,7 +795,7 @@ async def enqueue_chat(request: ChatRequest, db: Session = Depends(get_db)):
         redis_client = await get_redis_client()
         job_id = str(uuid.uuid4())
 
-        message_id = await add_message_to_stream(
+        await add_message_to_stream(
             redis=redis_client,
             user_id=str(user.id),
             job_data={

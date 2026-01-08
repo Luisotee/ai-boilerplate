@@ -37,7 +37,7 @@ dev = [
 ]
 
 [tool.ruff]
-line-length = 88
+line-length = 100
 target-version = "py311"
 exclude = [".venv", "__pycache__", "build", "dist"]
 
@@ -47,6 +47,10 @@ select = [
     "F",   # pyflakes
     "I",   # isort
     "UP",  # pyupgrade
+]
+ignore = [
+    "E501",  # line length handled by formatter
+    "E402",  # allow imports after load_dotenv() in scripts
 ]
 
 [tool.ruff.format]
