@@ -9,11 +9,7 @@ import asyncio
 from typing import Set
 from redis.asyncio import Redis
 
-from .manager import (
-    read_stream_messages,
-    acknowledge_message,
-    GROUP_NAME
-)
+from .manager import read_stream_messages, acknowledge_message, GROUP_NAME
 from .processor import process_chat_job_direct
 from ..logger import logger
 
@@ -32,11 +28,7 @@ async def discover_active_streams(redis: Redis) -> Set[str]:
     cursor = 0
 
     while True:
-        cursor, keys = await redis.scan(
-            cursor,
-            match="stream:user:*",
-            count=100
-        )
+        cursor, keys = await redis.scan(cursor, match="stream:user:*", count=100)
         for key in keys:
             stream_key = key.decode()
             user_id = stream_key.split(":")[-1]
@@ -44,7 +36,7 @@ async def discover_active_streams(redis: Redis) -> Set[str]:
             # Check if stream has pending or new messages
             try:
                 info = await redis.xpending(stream_key, GROUP_NAME)
-                if info['pending'] > 0:
+                if info["pending"] > 0:
                     active_streams.add(user_id)
                     continue
             except Exception:
@@ -52,7 +44,7 @@ async def discover_active_streams(redis: Redis) -> Set[str]:
                 pass
 
             # Check for new messages
-            messages = await redis.xread(streams={stream_key: '0-0'}, count=1)
+            messages = await redis.xread(streams={stream_key: "0-0"}, count=1)
             if messages:
                 active_streams.add(user_id)
 
@@ -71,7 +63,7 @@ async def process_user_stream(redis: Redis, user_id: str, running_flag: dict):
         user_id: User ID to process messages for
         running_flag: Dict with 'running' key to control loop
     """
-    while running_flag.get('running', True):
+    while running_flag.get("running", True):
         try:
             messages = await read_stream_messages(redis, user_id, count=1)
 
@@ -98,17 +90,17 @@ async def process_single_message(user_id: str, message_id: str, data: dict):
         message_id: Stream message ID
         data: Message data dictionary with job information
     """
-    job_id = data[b'job_id'].decode()
+    job_id = data[b"job_id"].decode()
     logger.info(f"Processing job {job_id} for user {user_id}")
 
     # Call core processor function
     await process_chat_job_direct(
-        user_id=data[b'user_id'].decode(),
-        whatsapp_jid=data[b'whatsapp_jid'].decode(),
-        message=data[b'message'].decode(),
-        conversation_type=data[b'conversation_type'].decode(),
-        user_message_id=data[b'user_message_id'].decode(),
-        job_id=job_id
+        user_id=data[b"user_id"].decode(),
+        whatsapp_jid=data[b"whatsapp_jid"].decode(),
+        message=data[b"message"].decode(),
+        conversation_type=data[b"conversation_type"].decode(),
+        user_message_id=data[b"user_message_id"].decode(),
+        job_id=job_id,
     )
 
 
@@ -124,11 +116,11 @@ async def run_stream_consumer(redis: Redis):
     Args:
         redis: Redis client instance
     """
-    running_flag = {'running': True}
+    running_flag = {"running": True}
     logger.info("🚀 Starting Redis Streams consumer")
 
     try:
-        while running_flag['running']:
+        while running_flag["running"]:
             # Discover streams with pending messages
             active_streams = await discover_active_streams(redis)
 
@@ -145,4 +137,4 @@ async def run_stream_consumer(redis: Redis):
             await asyncio.sleep(1)
     except KeyboardInterrupt:
         logger.info("Shutting down consumer...")
-        running_flag['running'] = False
+        running_flag["running"] = False

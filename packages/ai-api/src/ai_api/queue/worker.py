@@ -26,7 +26,7 @@ async def process_chat_job(
     whatsapp_jid: str,
     message: str,
     conversation_type: str,
-    user_message_id: str
+    user_message_id: str,
 ) -> Dict[str, Any]:
     """
     Process a chat message asynchronously.
@@ -56,8 +56,8 @@ async def process_chat_job(
     Raises:
         Exception: Any error during processing (arq will mark job as failed)
     """
-    job_id = ctx['job_id']
-    redis: Redis = ctx['redis']
+    job_id = ctx["job_id"]
+    redis: Redis = ctx["redis"]
 
     logger.info(f"[Job {job_id}] Starting chat processing for user {user_id}")
     logger.info(f"[Job {job_id}] WhatsApp JID: {whatsapp_jid}")
@@ -72,7 +72,9 @@ async def process_chat_job(
         logger.info(f"[Job {job_id}] Fetching conversation history...")
         history = get_conversation_history(db, whatsapp_jid, conversation_type)
         message_history = format_message_history(history) if history else None
-        logger.info(f"[Job {job_id}] Retrieved {len(history) if history else 0} messages from history")
+        logger.info(
+            f"[Job {job_id}] Retrieved {len(history) if history else 0} messages from history"
+        )
 
         # Step 2: Initialize embedding service
         logger.info(f"[Job {job_id}] Initializing embedding service...")
@@ -84,36 +86,41 @@ async def process_chat_job(
             user_id=user_id,
             whatsapp_jid=whatsapp_jid,
             recent_message_ids=[str(msg.id) for msg in history] if history else [],
-            embedding_service=embedding_service
+            embedding_service=embedding_service,
         )
 
         # Step 4: Stream tokens from AI agent
         logger.info(f"[Job {job_id}] Starting AI streaming...")
 
-        async for token in get_ai_response(message, message_history, agent_deps=agent_deps):
+        async for token in get_ai_response(
+            message, message_history, agent_deps=agent_deps
+        ):
             full_response += token
 
             # Save chunk to Redis immediately
-            await save_job_chunk(
-                redis,
-                job_id,
-                chunk_index,
-                token
-            )
+            await save_job_chunk(redis, job_id, chunk_index, token)
             chunk_index += 1
 
-        logger.info(f"[Job {job_id}] AI streaming completed. Total chunks: {chunk_index}")
-        logger.info(f"[Job {job_id}] Full response length: {len(full_response)} characters")
+        logger.info(
+            f"[Job {job_id}] AI streaming completed. Total chunks: {chunk_index}"
+        )
+        logger.info(
+            f"[Job {job_id}] Full response length: {len(full_response)} characters"
+        )
 
         # Step 5: Generate embedding for complete assistant response
         assistant_embedding = None
         if embedding_service:
             try:
-                logger.info(f"[Job {job_id}] Generating embedding for assistant response...")
+                logger.info(
+                    f"[Job {job_id}] Generating embedding for assistant response..."
+                )
                 assistant_embedding = await embedding_service.generate(full_response)
                 logger.info(f"[Job {job_id}] Embedding generated successfully")
             except Exception as e:
-                logger.error(f"[Job {job_id}] Error generating assistant embedding: {e}")
+                logger.error(
+                    f"[Job {job_id}] Error generating assistant embedding: {e}"
+                )
                 # Continue without embedding - not critical
 
         # Step 6: Save complete assistant response to PostgreSQL
@@ -121,36 +128,38 @@ async def process_chat_job(
         assistant_msg = save_message(
             db,
             whatsapp_jid,
-            'assistant',
+            "assistant",
             full_response,
             conversation_type,
-            embedding=assistant_embedding
+            embedding=assistant_embedding,
         )
-        logger.info(f"[Job {job_id}] Assistant message saved with ID: {assistant_msg.id}")
+        logger.info(
+            f"[Job {job_id}] Assistant message saved with ID: {assistant_msg.id}"
+        )
 
         # Step 7: Save job metadata to Redis
         await set_job_metadata(
             redis,
             job_id,
             {
-                'user_id': user_id,
-                'whatsapp_jid': whatsapp_jid,
-                'message': message,
-                'conversation_type': conversation_type,
-                'total_chunks': chunk_index,
-                'db_message_id': str(assistant_msg.id),
-                'user_message_id': user_message_id
-            }
+                "user_id": user_id,
+                "whatsapp_jid": whatsapp_jid,
+                "message": message,
+                "conversation_type": conversation_type,
+                "total_chunks": chunk_index,
+                "db_message_id": str(assistant_msg.id),
+                "user_message_id": user_message_id,
+            },
         )
 
         logger.info(f"[Job {job_id}] ✅ Completed successfully")
 
         return {
-            'success': True,
-            'job_id': job_id,
-            'total_chunks': chunk_index,
-            'response_length': len(full_response),
-            'db_message_id': str(assistant_msg.id)
+            "success": True,
+            "job_id": job_id,
+            "total_chunks": chunk_index,
+            "response_length": len(full_response),
+            "db_message_id": str(assistant_msg.id),
         }
 
     except Exception as e:
@@ -158,18 +167,22 @@ async def process_chat_job(
 
         # Save partial response if any
         if full_response:
-            logger.info(f"[Job {job_id}] Saving partial response ({len(full_response)} chars)")
+            logger.info(
+                f"[Job {job_id}] Saving partial response ({len(full_response)} chars)"
+            )
             try:
                 save_message(
                     db,
                     whatsapp_jid,
-                    'assistant',
+                    "assistant",
                     f"[Partial - Error] {full_response}",
                     conversation_type,
-                    embedding=None
+                    embedding=None,
                 )
             except Exception as save_error:
-                logger.error(f"[Job {job_id}] Failed to save partial response: {save_error}")
+                logger.error(
+                    f"[Job {job_id}] Failed to save partial response: {save_error}"
+                )
 
         # Re-raise so arq marks job as failed
         raise
@@ -188,26 +201,26 @@ class WorkerSettings:
 
     # Redis connection settings
     redis_settings = RedisSettings(
-        host=os.getenv('REDIS_HOST', 'localhost'),
-        port=int(os.getenv('REDIS_PORT', '6379')),
-        database=int(os.getenv('REDIS_DB', '0')),
-        password=os.getenv('REDIS_PASSWORD') or None,
+        host=os.getenv("REDIS_HOST", "localhost"),
+        port=int(os.getenv("REDIS_PORT", "6379")),
+        database=int(os.getenv("REDIS_DB", "0")),
+        password=os.getenv("REDIS_PASSWORD") or None,
     )
 
     # Worker functions
     functions = [process_chat_job]
 
     # Job timeout (default 2 minutes, configurable)
-    job_timeout = int(os.getenv('ARQ_JOB_TIMEOUT', '120'))
+    job_timeout = int(os.getenv("ARQ_JOB_TIMEOUT", "120"))
 
     # Max concurrent jobs across all users
-    max_jobs = int(os.getenv('ARQ_MAX_JOBS', '50'))
+    max_jobs = int(os.getenv("ARQ_MAX_JOBS", "50"))
 
     # Poll interval for new jobs (default 100ms)
-    poll_delay = float(os.getenv('ARQ_POLL_DELAY', '0.1'))
+    poll_delay = float(os.getenv("ARQ_POLL_DELAY", "0.1"))
 
     # Keep job results for 1 hour (3600 seconds)
-    keep_result = int(os.getenv('ARQ_KEEP_RESULT', '3600'))
+    keep_result = int(os.getenv("ARQ_KEEP_RESULT", "3600"))
 
     # Health check interval (1 minute)
     health_check_interval = 60
@@ -216,4 +229,4 @@ class WorkerSettings:
     allow_abort_jobs = True
 
     # Queue name (default, can be overridden per job)
-    queue_name = 'arq:queue'
+    queue_name = "arq:queue"

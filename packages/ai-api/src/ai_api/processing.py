@@ -52,9 +52,11 @@ async def process_pdf_document(document_id: str, file_path: str):
             logger.error(f"Document {document_id} not found in database")
             return
 
-        document.status = 'processing'
+        document.status = "processing"
         db.commit()
-        logger.info(f"Document status updated to 'processing': {document.original_filename}")
+        logger.info(
+            f"Document status updated to 'processing': {document.original_filename}"
+        )
 
         # Verify file exists
         if not Path(file_path).exists():
@@ -71,10 +73,10 @@ async def process_pdf_document(document_id: str, file_path: str):
 
         # Step 3: Extract metadata
         metadata = {}
-        if hasattr(result.input, 'page_count'):
-            metadata['page_count'] = result.input.page_count
-        metadata['docling_version'] = 'latest'
-        metadata['processing_date'] = datetime.utcnow().isoformat()
+        if hasattr(result.input, "page_count"):
+            metadata["page_count"] = result.input.page_count
+        metadata["docling_version"] = "latest"
+        metadata["processing_date"] = datetime.utcnow().isoformat()
 
         document.doc_metadata = metadata
         db.commit()
@@ -83,11 +85,15 @@ async def process_pdf_document(document_id: str, file_path: str):
         # Step 4: Get embedding service
         embedding_service = create_embedding_service(settings.gemini_api_key)
         if not embedding_service:
-            raise ValueError("GEMINI_API_KEY not configured - cannot generate embeddings")
+            raise ValueError(
+                "GEMINI_API_KEY not configured - cannot generate embeddings"
+            )
 
         # Step 5: Perform hybrid chunking with token-aware chunker
         # HybridChunker uses document structure + token limits for optimal RAG chunks
-        logger.info(f"Chunking document with HybridChunker (max_tokens: {settings.kb_max_chunk_tokens})")
+        logger.info(
+            f"Chunking document with HybridChunker (max_tokens: {settings.kb_max_chunk_tokens})"
+        )
 
         # Wrap tiktoken encoder in OpenAITokenizer for HybridChunker compatibility
         tokenizer_wrapper = OpenAITokenizer(
@@ -123,14 +129,16 @@ async def process_pdf_document(document_id: str, file_path: str):
 
             # Iterate through doc items in the chunk to collect metadata
             for doc_item in chunk.meta.doc_items:
-                if hasattr(doc_item, 'prov') and doc_item.prov:
+                if hasattr(doc_item, "prov") and doc_item.prov:
                     for prov in doc_item.prov:
-                        if hasattr(prov, 'page_no'):
+                        if hasattr(prov, "page_no"):
                             page_numbers.add(prov.page_no)
 
                 # Extract headings (if item is a section header)
-                if hasattr(doc_item, 'label') and 'SECTION_HEADER' in str(doc_item.label):
-                    if hasattr(doc_item, 'text'):
+                if hasattr(doc_item, "label") and "SECTION_HEADER" in str(
+                    doc_item.label
+                ):
+                    if hasattr(doc_item, "text"):
                         headings.append(doc_item.text)
 
             # Determine primary page number (first page in sorted set)
@@ -141,17 +149,20 @@ async def process_pdf_document(document_id: str, file_path: str):
 
             # Prepare chunk metadata
             chunk_metadata = {
-                'all_page_numbers': sorted(list(page_numbers)),  # All pages this chunk spans
-                'all_headings': headings,  # All headings in this chunk
-                'doc_item_count': len(chunk.meta.doc_items),
+                "all_page_numbers": sorted(
+                    list(page_numbers)
+                ),  # All pages this chunk spans
+                "all_headings": headings,  # All headings in this chunk
+                "doc_item_count": len(chunk.meta.doc_items),
             }
 
-            logger.debug(f"Chunk {i}: page={primary_page}, heading={primary_heading}, tokens={token_count}")
+            logger.debug(
+                f"Chunk {i}: page={primary_page}, heading={primary_heading}, tokens={token_count}"
+            )
 
             # Generate embedding for chunk
             chunk_embedding = await embedding_service.generate(
-                chunk_text,
-                task_type='RETRIEVAL_DOCUMENT'
+                chunk_text, task_type="RETRIEVAL_DOCUMENT"
             )
 
             if not chunk_embedding:
@@ -163,13 +174,13 @@ async def process_pdf_document(document_id: str, file_path: str):
                 document_id=document_id,
                 chunk_index=i,
                 content=chunk_text,
-                content_type='text',
-                page_number=primary_page,        # ✅ FIXED: Extract from provenance
-                heading=primary_heading,         # ✅ FIXED: Extract from doc structure
+                content_type="text",
+                page_number=primary_page,  # ✅ FIXED: Extract from provenance
+                heading=primary_heading,  # ✅ FIXED: Extract from doc structure
                 embedding=chunk_embedding,
                 embedding_generated_at=datetime.utcnow(),
                 token_count=token_count,
-                chunk_metadata=chunk_metadata    # Store additional metadata
+                chunk_metadata=chunk_metadata,  # Store additional metadata
             )
 
             db.add(chunk_obj)
@@ -185,22 +196,26 @@ async def process_pdf_document(document_id: str, file_path: str):
         logger.info(f"Stored {stored_count} chunks with embeddings")
 
         # Step 8: Update document status to completed
-        document.status = 'completed'
+        document.status = "completed"
         document.processed_date = datetime.utcnow()
         document.chunk_count = stored_count
         db.commit()
 
-        logger.info(f"✅ Successfully processed document {document_id}: "
-                   f"{document.original_filename} ({stored_count} chunks)")
+        logger.info(
+            f"✅ Successfully processed document {document_id}: "
+            f"{document.original_filename} ({stored_count} chunks)"
+        )
 
     except Exception as e:
-        logger.error(f"❌ Error processing document {document_id}: {str(e)}", exc_info=True)
+        logger.error(
+            f"❌ Error processing document {document_id}: {str(e)}", exc_info=True
+        )
 
         # Update document status to failed
         try:
             document = db.query(KnowledgeBaseDocument).filter_by(id=document_id).first()
             if document:
-                document.status = 'failed'
+                document.status = "failed"
                 document.error_message = str(e)
                 document.processed_date = datetime.utcnow()
                 db.commit()

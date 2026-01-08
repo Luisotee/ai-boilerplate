@@ -15,9 +15,7 @@ from ..logger import logger
 
 
 def get_context_messages(
-    db: Session,
-    matched_message: ConversationMessage,
-    window_size: int
+    db: Session, matched_message: ConversationMessage, window_size: int
 ) -> dict:
     """
     Retrieve messages before and after a matched message for context.
@@ -32,34 +30,40 @@ def get_context_messages(
     """
     # Query messages from same user
     # Get window_size messages before the match (by timestamp)
-    messages_before = db.query(ConversationMessage)\
+    messages_before = (
+        db.query(ConversationMessage)
         .filter(
             ConversationMessage.user_id == matched_message.user_id,
-            ConversationMessage.timestamp < matched_message.timestamp
-        )\
-        .order_by(ConversationMessage.timestamp.desc())\
-        .limit(window_size)\
+            ConversationMessage.timestamp < matched_message.timestamp,
+        )
+        .order_by(ConversationMessage.timestamp.desc())
+        .limit(window_size)
         .all()
+    )
 
     # Reverse to get chronological order
     messages_before = list(reversed(messages_before))
 
     # Get window_size messages after the match
-    messages_after = db.query(ConversationMessage)\
+    messages_after = (
+        db.query(ConversationMessage)
         .filter(
             ConversationMessage.user_id == matched_message.user_id,
-            ConversationMessage.timestamp > matched_message.timestamp
-        )\
-        .order_by(ConversationMessage.timestamp.asc())\
-        .limit(window_size)\
+            ConversationMessage.timestamp > matched_message.timestamp,
+        )
+        .order_by(ConversationMessage.timestamp.asc())
+        .limit(window_size)
         .all()
+    )
 
-    logger.info(f"Context window: {len(messages_before)} before, {len(messages_after)} after (window_size={window_size})")
+    logger.info(
+        f"Context window: {len(messages_before)} before, {len(messages_after)} after (window_size={window_size})"
+    )
 
     return {
-        'before': messages_before,
-        'match': matched_message,
-        'after': messages_after
+        "before": messages_before,
+        "match": matched_message,
+        "after": messages_after,
     }
 
 
@@ -73,7 +77,7 @@ async def search_conversation_history(
     include_context: bool = True,
     similarity_threshold: float = None,
     context_window: int = None,
-    **kwargs
+    **kwargs,
 ) -> List[dict]:
     """
     Search for semantically similar messages with optional context window.
@@ -114,21 +118,23 @@ async def search_conversation_history(
         return []
 
     query_preview = query_text[:50] if query_text else "embedding"
-    logger.info(f"Semantic search for user {user_id}: '{query_preview}...' (limit: {limit})")
+    logger.info(
+        f"Semantic search for user {user_id}: '{query_preview}...' (limit: {limit})"
+    )
 
     # Build exclusion clause
     exclude_clause = ""
     params = {
-        'user_id': user_id,
-        'embedding': query_embedding,
-        'limit': limit,
-        'threshold': similarity_threshold
+        "user_id": user_id,
+        "embedding": query_embedding,
+        "limit": limit,
+        "threshold": similarity_threshold,
     }
 
     if exclude_message_ids:
         # Convert to tuple for SQL IN clause
         exclude_clause = "AND id NOT IN :exclude_ids"
-        params['exclude_ids'] = tuple(str(id) for id in exclude_message_ids)
+        params["exclude_ids"] = tuple(str(id) for id in exclude_message_ids)
 
     # Vector similarity query using cosine distance
     # pgvector uses <=> for cosine distance (lower = more similar)
@@ -158,7 +164,9 @@ async def search_conversation_history(
     result = db.execute(query_sql, params)
     rows = result.fetchall()
 
-    logger.info(f"Semantic search found {len(rows)} results (threshold: {similarity_threshold})")
+    logger.info(
+        f"Semantic search found {len(rows)} results (threshold: {similarity_threshold})"
+    )
 
     # Convert to ConversationMessage objects with context
     results = []
@@ -172,30 +180,36 @@ async def search_conversation_history(
             sender_name=row.sender_name,
             timestamp=row.timestamp,
             embedding=row.embedding,
-            embedding_generated_at=row.embedding_generated_at
+            embedding_generated_at=row.embedding_generated_at,
         )
         # Attach similarity score as metadata
         msg._similarity_score = float(row.similarity)
 
-        logger.debug(f"  - [{row.role}] (similarity: {row.similarity:.3f})\n{row.content}")
+        logger.debug(
+            f"  - [{row.role}] (similarity: {row.similarity:.3f})\n{row.content}"
+        )
 
         if include_context and context_window > 0:
             # Get surrounding context
             context = get_context_messages(db, msg, context_window)
-            results.append({
-                'messages_before': context['before'],
-                'matched_message': msg,
-                'messages_after': context['after'],
-                'similarity_score': msg._similarity_score
-            })
+            results.append(
+                {
+                    "messages_before": context["before"],
+                    "matched_message": msg,
+                    "messages_after": context["after"],
+                    "similarity_score": msg._similarity_score,
+                }
+            )
         else:
             # No context - return just the matched message (backward compatible)
-            results.append({
-                'messages_before': [],
-                'matched_message': msg,
-                'messages_after': [],
-                'similarity_score': msg._similarity_score
-            })
+            results.append(
+                {
+                    "messages_before": [],
+                    "matched_message": msg,
+                    "messages_after": [],
+                    "similarity_score": msg._similarity_score,
+                }
+            )
 
     return results
 
@@ -219,26 +233,26 @@ def format_conversation_results(results: List[dict]) -> str:
         snippet_parts = []
 
         # Header for this match
-        similarity = result['similarity_score']
+        similarity = result["similarity_score"]
         snippet_parts.append(f"=== Match {i} (similarity: {similarity:.2f}) ===\n")
 
         # Format messages before (if any)
-        if result['messages_before']:
+        if result["messages_before"]:
             snippet_parts.append("Context before:")
-            for msg in result['messages_before']:
+            for msg in result["messages_before"]:
                 snippet_parts.append(format_conversation_message(msg, is_match=False))
             snippet_parts.append("")
 
         # Format the matched message (highlighted)
-        matched = result['matched_message']
+        matched = result["matched_message"]
         snippet_parts.append("→ MATCHED MESSAGE:")
         snippet_parts.append(format_conversation_message(matched, is_match=True))
         snippet_parts.append("")
 
         # Format messages after (if any)
-        if result['messages_after']:
+        if result["messages_after"]:
             snippet_parts.append("Context after:")
-            for msg in result['messages_after']:
+            for msg in result["messages_after"]:
                 snippet_parts.append(format_conversation_message(msg, is_match=False))
 
         formatted_snippets.append("\n".join(snippet_parts))
@@ -247,7 +261,9 @@ def format_conversation_results(results: List[dict]) -> str:
     return f"Found {len(results)} relevant conversation snippets:\n\n{result}"
 
 
-def format_conversation_message(msg: ConversationMessage, is_match: bool = False) -> str:
+def format_conversation_message(
+    msg: ConversationMessage, is_match: bool = False
+) -> str:
     """
     Helper to format a single message.
 
@@ -282,7 +298,7 @@ def format_conversation_message(msg: ConversationMessage, is_match: bool = False
 
 def merge_and_deduplicate_messages(
     recent_messages: List[ConversationMessage],
-    semantic_messages: List[ConversationMessage]
+    semantic_messages: List[ConversationMessage],
 ) -> List[ConversationMessage]:
     """
     Merge recent and semantic messages, deduplicate, and order chronologically.
@@ -298,10 +314,14 @@ def merge_and_deduplicate_messages(
     recent_ids = {str(msg.id) for msg in recent_messages}
 
     # Filter out semantic messages already in recent window
-    unique_semantic = [msg for msg in semantic_messages if str(msg.id) not in recent_ids]
+    unique_semantic = [
+        msg for msg in semantic_messages if str(msg.id) not in recent_ids
+    ]
 
-    logger.info(f"Merging {len(recent_messages)} recent + {len(semantic_messages)} semantic "
-                f"= {len(recent_messages) + len(unique_semantic)} unique messages")
+    logger.info(
+        f"Merging {len(recent_messages)} recent + {len(semantic_messages)} semantic "
+        f"= {len(recent_messages) + len(unique_semantic)} unique messages"
+    )
 
     # Combine and sort by timestamp
     all_messages = list(recent_messages) + unique_semantic

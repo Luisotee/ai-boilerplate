@@ -31,7 +31,7 @@ async def add_message_to_stream(redis: Redis, user_id: str, job_data: dict) -> s
     message_id = await redis.xadd(
         stream_key,
         job_data,
-        maxlen=1000  # Keep last 1000 messages
+        maxlen=1000,  # Keep last 1000 messages
     )
     logger.info(f"Added message {message_id} to {stream_key}")
     return message_id.decode()
@@ -47,22 +47,14 @@ async def ensure_consumer_group(redis: Redis, user_id: str):
     """
     stream_key = f"stream:user:{user_id}"
     try:
-        await redis.xgroup_create(
-            stream_key,
-            GROUP_NAME,
-            id='0',
-            mkstream=True
-        )
+        await redis.xgroup_create(stream_key, GROUP_NAME, id="0", mkstream=True)
     except Exception as e:
         if "BUSYGROUP" not in str(e):
             logger.error(f"Error creating group: {e}")
 
 
 async def read_stream_messages(
-    redis: Redis,
-    user_id: str,
-    count: int = 1,
-    block: int = 5000
+    redis: Redis, user_id: str, count: int = 1, block: int = 5000
 ) -> List[Tuple[bytes, List[Tuple[bytes, Dict[bytes, bytes]]]]]:
     """
     Read messages from user stream - returns in order.
@@ -83,9 +75,9 @@ async def read_stream_messages(
     messages = await redis.xreadgroup(
         groupname=GROUP_NAME,
         consumername=CONSUMER_ID,
-        streams={stream_key: '>'},
+        streams={stream_key: ">"},
         count=count,
-        block=block
+        block=block,
     )
     return messages
 

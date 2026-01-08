@@ -11,23 +11,19 @@ from .conversation import (
     format_conversation_results,
     get_context_messages,
     format_conversation_message,
-    merge_and_deduplicate_messages
+    merge_and_deduplicate_messages,
 )
 
-from .knowledge_base import (
-    search_knowledge_base,
-    format_knowledge_base_results
-)
+from .knowledge_base import search_knowledge_base, format_knowledge_base_results
 
 __all__ = [
     # Conversation RAG functions
-    'search_conversation_history',
-    'format_conversation_results',
-    'get_context_messages',
-    'format_conversation_message',
-    'merge_and_deduplicate_messages',
-
+    "search_conversation_history",
+    "format_conversation_results",
+    "get_context_messages",
+    "format_conversation_message",
+    "merge_and_deduplicate_messages",
     # Knowledge Base RAG functions
-    'search_knowledge_base',
-    'format_knowledge_base_results',
+    "search_knowledge_base",
+    "format_knowledge_base_results",
 ]

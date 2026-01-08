@@ -17,26 +17,24 @@ from .logger import logger
 
 # Derived constants from settings
 MAX_FILE_SIZE_BYTES = settings.stt_max_file_size_mb * 1024 * 1024
-SUPPORTED_FORMATS = settings.stt_supported_formats.split(',')
+SUPPORTED_FORMATS = settings.stt_supported_formats.split(",")
 
 # MIME type mappings for validation
 AUDIO_MIME_TYPES = {
-    'mp3': ['audio/mpeg', 'audio/mp3'],
-    'mp4': ['audio/mp4', 'audio/x-m4a'],
-    'mpeg': ['audio/mpeg'],
-    'mpga': ['audio/mpeg'],
-    'm4a': ['audio/mp4', 'audio/x-m4a', 'audio/m4a'],
-    'wav': ['audio/wav', 'audio/x-wav', 'audio/wave'],
-    'webm': ['audio/webm'],
-    'ogg': ['audio/ogg', 'audio/opus'],
-    'flac': ['audio/flac', 'audio/x-flac']
+    "mp3": ["audio/mpeg", "audio/mp3"],
+    "mp4": ["audio/mp4", "audio/x-m4a"],
+    "mpeg": ["audio/mpeg"],
+    "mpga": ["audio/mpeg"],
+    "m4a": ["audio/mp4", "audio/x-m4a", "audio/m4a"],
+    "wav": ["audio/wav", "audio/x-wav", "audio/wave"],
+    "webm": ["audio/webm"],
+    "ogg": ["audio/ogg", "audio/opus"],
+    "flac": ["audio/flac", "audio/x-flac"],
 }
 
 
 def validate_audio_file(
-    filename: str,
-    content_type: Optional[str],
-    file_size: int
+    filename: str, content_type: Optional[str], file_size: int
 ) -> Tuple[bool, Optional[str], Optional[str]]:
     """
     Validate audio file format, size, and MIME type.
@@ -60,23 +58,31 @@ def validate_audio_file(
 
     if file_size > MAX_FILE_SIZE_BYTES:
         size_mb = file_size / (1024 * 1024)
-        return False, f"File too large ({size_mb:.1f} MB). Maximum: {settings.stt_max_file_size_mb} MB", None
+        return (
+            False,
+            f"File too large ({size_mb:.1f} MB). Maximum: {settings.stt_max_file_size_mb} MB",
+            None,
+        )
 
     # Extract format from filename
     file_format = None
-    if '.' in filename:
-        extension = filename.rsplit('.', 1)[1].lower()
+    if "." in filename:
+        extension = filename.rsplit(".", 1)[1].lower()
         if extension in SUPPORTED_FORMATS:
             file_format = extension
 
     # Validate format
     if not file_format:
-        return False, f"Unsupported or missing file extension. Supported: {', '.join(SUPPORTED_FORMATS)}", None
+        return (
+            False,
+            f"Unsupported or missing file extension. Supported: {', '.join(SUPPORTED_FORMATS)}",
+            None,
+        )
 
     # Validate MIME type if provided
     if content_type:
         # Normalize MIME type (remove parameters like "; codecs=opus")
-        normalized_mime = content_type.split(';')[0].strip().lower()
+        normalized_mime = content_type.split(";")[0].strip().lower()
 
         # Check if MIME type matches the file extension
         expected_mimes = AUDIO_MIME_TYPES.get(file_format, [])
@@ -86,7 +92,9 @@ def validate_audio_file(
                 f"expected one of {expected_mimes}. Proceeding anyway."
             )
 
-    logger.debug(f"Audio file validated: {filename} ({file_size} bytes, format: {file_format})")
+    logger.debug(
+        f"Audio file validated: {filename} ({file_size} bytes, format: {file_format})"
+    )
     return True, None, file_format
 
 
@@ -117,10 +125,7 @@ def create_groq_client(api_key: Optional[str]) -> Optional[Groq]:
 
 
 async def transcribe_audio(
-    client: Groq,
-    audio_file: BinaryIO,
-    filename: str,
-    language: Optional[str] = None
+    client: Groq, audio_file: BinaryIO, filename: str, language: Optional[str] = None
 ) -> Tuple[Optional[str], Optional[str]]:
     """
     Transcribe audio file using Groq's Whisper API.
@@ -146,19 +151,21 @@ async def transcribe_audio(
 
         # Build parameters
         params = {
-            'file': (filename, audio_content),
-            'model': settings.stt_model,
-            'response_format': 'json',  # Simple JSON with just text
-            'temperature': 0.0  # Deterministic output
+            "file": (filename, audio_content),
+            "model": settings.stt_model,
+            "response_format": "json",  # Simple JSON with just text
+            "temperature": 0.0,  # Deterministic output
         }
 
         # Add language if provided (improves accuracy)
         if language:
-            params['language'] = language
+            params["language"] = language
             logger.debug(f"Transcribing with language hint: {language}")
 
         # Call Groq Whisper API
-        logger.info(f"Transcribing audio with {settings.stt_model} (size: {len(audio_content)} bytes)")
+        logger.info(
+            f"Transcribing audio with {settings.stt_model} (size: {len(audio_content)} bytes)"
+        )
         transcription = client.audio.transcriptions.create(**params)
 
         # Extract text from response
@@ -166,7 +173,10 @@ async def transcribe_audio(
 
         if not transcription_text:
             logger.warning("Transcription returned empty text")
-            return None, "Transcription produced no text (audio may be silent or unclear)"
+            return (
+                None,
+                "Transcription produced no text (audio may be silent or unclear)",
+            )
 
         logger.info(f"Transcription successful ({len(transcription_text)} characters)")
         return transcription_text, None

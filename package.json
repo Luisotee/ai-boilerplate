@@ -9,10 +9,10 @@
     "dev:whatsapp": "pnpm --filter @ai-boilerplate/whatsapp-client dev",
     "dev:queue": "cd packages/ai-api && uv run python -m ai_api.scripts.run_stream_worker",
     "install:all": "pnpm install && cd packages/ai-api && uv sync",
-    "lint": "eslint packages/whatsapp-client/src",
-    "lint:fix": "eslint packages/whatsapp-client/src --fix",
-    "format": "prettier --write packages/whatsapp-client/src",
-    "format:check": "prettier --check packages/whatsapp-client/src"
+    "lint": "eslint packages/whatsapp-client/src && cd packages/ai-api && uv run ruff check .",
+    "lint:fix": "eslint packages/whatsapp-client/src --fix && cd packages/ai-api && uv run ruff check . --fix",
+    "format": "prettier --write packages/whatsapp-client/src && cd packages/ai-api && uv run ruff format .",
+    "format:check": "prettier --check packages/whatsapp-client/src && cd packages/ai-api && uv run ruff format . --check"
   },
   "keywords": [],
   "author": "",

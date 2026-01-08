@@ -21,7 +21,7 @@ async def main():
         port=settings.redis_port,
         db=settings.redis_db,
         password=settings.redis_password,
-        decode_responses=False
+        decode_responses=False,
     )
 
     try:
@@ -31,5 +31,5 @@ async def main():
         logger.info("Redis connection closed")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     asyncio.run(main())

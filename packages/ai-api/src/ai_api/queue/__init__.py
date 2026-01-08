@@ -12,10 +12,10 @@ from .connection import get_arq_redis, create_arq_pool
 from .utils import save_job_chunk, get_job_chunks, set_job_metadata, get_job_metadata
 
 __all__ = [
-    'get_arq_redis',
-    'create_arq_pool',
-    'save_job_chunk',
-    'get_job_chunks',
-    'set_job_metadata',
-    'get_job_metadata',
+    "get_arq_redis",
+    "create_arq_pool",
+    "save_job_chunk",
+    "get_job_chunks",
+    "set_job_metadata",
+    "get_job_metadata",
 ]

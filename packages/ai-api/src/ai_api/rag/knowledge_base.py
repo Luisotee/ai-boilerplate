@@ -19,7 +19,7 @@ async def search_knowledge_base(
     query_text: str = None,
     limit: int = None,
     similarity_threshold: float = None,
-    **kwargs
+    **kwargs,
 ) -> List[dict]:
     """
     Search for semantically similar document chunks.
@@ -80,42 +80,51 @@ async def search_knowledge_base(
         LIMIT :limit
     """)
 
-    result = db.execute(query_sql, {
-        'embedding': query_embedding,
-        'threshold': similarity_threshold,
-        'limit': limit
-    })
+    result = db.execute(
+        query_sql,
+        {
+            "embedding": query_embedding,
+            "threshold": similarity_threshold,
+            "limit": limit,
+        },
+    )
     rows = result.fetchall()
 
-    logger.info(f"Knowledge base search found {len(rows)} results "
-                f"(threshold: {similarity_threshold})")
+    logger.info(
+        f"Knowledge base search found {len(rows)} results "
+        f"(threshold: {similarity_threshold})"
+    )
 
     # Convert to structured results
     results = []
     for row in rows:
-        results.append({
-            'chunk': {
-                'id': str(row.id),
-                'content': row.content,
-                'content_type': row.content_type,
-                'page_number': row.page_number,
-                'heading': row.heading,
-                'chunk_index': row.chunk_index,
-                'token_count': row.token_count,
-                'metadata': row.chunk_metadata
-            },
-            'document': {
-                'document_id': str(row.document_id),
-                'filename': row.filename,
-                'original_filename': row.original_filename,
-                'upload_date': row.upload_date,
-                'metadata': row.document_metadata
-            },
-            'similarity_score': float(row.similarity)
-        })
+        results.append(
+            {
+                "chunk": {
+                    "id": str(row.id),
+                    "content": row.content,
+                    "content_type": row.content_type,
+                    "page_number": row.page_number,
+                    "heading": row.heading,
+                    "chunk_index": row.chunk_index,
+                    "token_count": row.token_count,
+                    "metadata": row.chunk_metadata,
+                },
+                "document": {
+                    "document_id": str(row.document_id),
+                    "filename": row.filename,
+                    "original_filename": row.original_filename,
+                    "upload_date": row.upload_date,
+                    "metadata": row.document_metadata,
+                },
+                "similarity_score": float(row.similarity),
+            }
+        )
 
-        logger.debug(f"  - [{row.original_filename}] "
-                    f"(similarity: {row.similarity:.3f})\n{row.content}")
+        logger.debug(
+            f"  - [{row.original_filename}] "
+            f"(similarity: {row.similarity:.3f})\n{row.content}"
+        )
 
     return results
 
@@ -136,50 +145,53 @@ def format_knowledge_base_results(results: List[dict]) -> str:
     formatted_snippets = []
 
     for i, result in enumerate(results, 1):
-        chunk = result['chunk']
-        doc = result['document']
-        similarity = result['similarity_score']
+        chunk = result["chunk"]
+        doc = result["document"]
+        similarity = result["similarity_score"]
 
         # Format source citation
-        source_parts = [doc['original_filename']]
+        source_parts = [doc["original_filename"]]
 
-        if chunk['page_number']:
+        if chunk["page_number"]:
             source_parts.append(f"page {chunk['page_number']}")
 
-        if chunk['heading']:
+        if chunk["heading"]:
             source_parts.append(f"section '{chunk['heading']}'")
 
         source = ", ".join(source_parts)
 
         # Clean the content: remove HTML comments and excessive whitespace
         import re
-        content = chunk['content']
+
+        content = chunk["content"]
 
         # Remove HTML comments
-        content = re.sub(r'<!--.*?-->', '', content, flags=re.DOTALL)
+        content = re.sub(r"<!--.*?-->", "", content, flags=re.DOTALL)
 
         # Remove excessive blank lines (keep max 1 blank line)
-        content = re.sub(r'\n\s*\n\s*\n+', '\n\n', content)
+        content = re.sub(r"\n\s*\n\s*\n+", "\n\n", content)
 
         # Remove leading/trailing whitespace
         content = content.strip()
 
         # Log cleaning results
-        original_len = len(chunk['content'])
+        original_len = len(chunk["content"])
         cleaned_len = len(content)
         if cleaned_len < original_len:
-            logger.debug(f"Cleaned chunk {i}: {original_len} -> {cleaned_len} chars "
-                       f"({original_len - cleaned_len} chars removed)")
+            logger.debug(
+                f"Cleaned chunk {i}: {original_len} -> {cleaned_len} chars "
+                f"({original_len - cleaned_len} chars removed)"
+            )
 
         # Format chunk content
         snippet_lines = [
             f"=== Source {i} (relevance: {similarity:.2f}) ===",
             f"📄 Document: {source}",
-            ""
+            "",
         ]
 
         # Add section heading if available
-        if chunk['heading']:
+        if chunk["heading"]:
             snippet_lines.append(f"## {chunk['heading']}")
             snippet_lines.append("")
 

@@ -42,12 +42,12 @@ class EmbeddingService:
         self.model = EMBEDDING_MODEL
         self.dimensions = EMBEDDING_DIMENSIONS
         self.max_length = MAX_EMBEDDING_LENGTH
-        logger.info(f"EmbeddingService initialized (model: {self.model}, dims: {self.dimensions})")
+        logger.info(
+            f"EmbeddingService initialized (model: {self.model}, dims: {self.dimensions})"
+        )
 
     async def generate(
-        self,
-        text: str,
-        task_type: str = 'RETRIEVAL_DOCUMENT'
+        self, text: str, task_type: str = "RETRIEVAL_DOCUMENT"
     ) -> Optional[List[float]]:
         """
         Generate embedding for a single text string.
@@ -65,19 +65,20 @@ class EmbeddingService:
             return None
 
         # Truncate if too long (prevents API errors)
-        text = text[:self.max_length]
+        text = text[: self.max_length]
 
         try:
             response = self.client.models.embed_content(
                 model=self.model,
                 contents=text,
                 config=types.EmbedContentConfig(
-                    task_type=task_type,
-                    output_dimensionality=self.dimensions
-                )
+                    task_type=task_type, output_dimensionality=self.dimensions
+                ),
             )
             embedding = response.embeddings[0].values
-            logger.debug(f"Generated embedding: {len(embedding)} dimensions (task: {task_type})")
+            logger.debug(
+                f"Generated embedding: {len(embedding)} dimensions (task: {task_type})"
+            )
             return embedding
 
         except Exception as e:

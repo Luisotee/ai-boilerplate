@@ -8,11 +8,11 @@ from .config import settings
 from .logger import logger
 from .rag.conversation import (
     search_conversation_history as search_conversation_fn,
-    format_conversation_results
+    format_conversation_results,
 )
 from .rag.knowledge_base import (
     search_knowledge_base as search_kb_fn,
-    format_knowledge_base_results
+    format_knowledge_base_results,
 )
 from .embeddings import EmbeddingService
 
@@ -169,9 +169,7 @@ async def search_conversation_history(
 
 
 @agent.tool
-async def search_knowledge_base(
-    ctx: RunContext[AgentDeps], search_query: str
-) -> str:
+async def search_knowledge_base(ctx: RunContext[AgentDeps], search_query: str) -> str:
     """
     Search the knowledge base for information from uploaded documents.
 
@@ -208,7 +206,7 @@ async def search_knowledge_base(
         # Generate query embedding
         query_embedding = await deps.embedding_service.generate(
             search_query,
-            task_type="RETRIEVAL_QUERY"  # Different task type for queries
+            task_type="RETRIEVAL_QUERY",  # Different task type for queries
         )
 
         if not query_embedding:
@@ -237,13 +235,15 @@ async def search_knowledge_base(
         # Log detailed results for debugging
         logger.info(f"Knowledge Base RAG returned {len(results)} results:")
         for i, result in enumerate(results, 1):
-            chunk = result['chunk']
-            doc = result['document']
-            similarity = result['similarity_score']
-            logger.info(f"  [{i}] Document: {doc['original_filename']} | "
-                       f"Similarity: {similarity:.3f} | "
-                       f"Page: {chunk.get('page_number', 'N/A')} | "
-                       f"Tokens: {chunk.get('token_count', 'N/A')}")
+            chunk = result["chunk"]
+            doc = result["document"]
+            similarity = result["similarity_score"]
+            logger.info(
+                f"  [{i}] Document: {doc['original_filename']} | "
+                f"Similarity: {similarity:.3f} | "
+                f"Page: {chunk.get('page_number', 'N/A')} | "
+                f"Tokens: {chunk.get('token_count', 'N/A')}"
+            )
             logger.info(f"      Raw content (before cleaning):\n{chunk['content']}")
 
         logger.info(f"Formatted results length: {len(formatted_results)} characters")
@@ -283,10 +283,14 @@ async def get_ai_response(
     logger.info("=" * 80)
     logger.info(f"🤖 AGENT STARTING")
     logger.info(f"   User message: {user_message}")
-    logger.info(f"   History messages: {len(message_history) if message_history else 0}")
+    logger.info(
+        f"   History messages: {len(message_history) if message_history else 0}"
+    )
     logger.info(f"   Has dependencies: {agent_deps is not None}")
     if agent_deps:
-        logger.info(f"   - Embedding service: {agent_deps.embedding_service is not None}")
+        logger.info(
+            f"   - Embedding service: {agent_deps.embedding_service is not None}"
+        )
     logger.info("=" * 80)
 
     # Track full response for logging
@@ -329,12 +333,8 @@ def format_message_history(db_messages):
     formatted = []
     for msg in db_messages:
         if msg.role == "user":
-            formatted.append(
-                ModelRequest(parts=[UserPromptPart(content=msg.content)])
-            )
+            formatted.append(ModelRequest(parts=[UserPromptPart(content=msg.content)]))
         else:
-            formatted.append(
-                ModelResponse(parts=[TextPart(content=msg.content)])
-            )
+            formatted.append(ModelResponse(parts=[TextPart(content=msg.content)]))
 
     return formatted

@@ -31,9 +31,7 @@ Base = declarative_base()
 class User(Base):
     __tablename__ = "users"
 
-    id = Column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True
-    )
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     whatsapp_jid = Column(String, unique=True, index=True, nullable=False)
     phone = Column(String, nullable=True)
     name = Column(String, nullable=True)
@@ -53,9 +51,7 @@ class User(Base):
 class ConversationMessage(Base):
     __tablename__ = "conversation_messages"
 
-    id = Column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True
-    )
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     user_id = Column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
     )
@@ -63,17 +59,13 @@ class ConversationMessage(Base):
     content = Column(Text, nullable=False)
 
     # Group context (nullable for backward compatibility)
-    sender_jid = Column(
-        String, nullable=True, index=True
-    )  # Participant JID in groups
+    sender_jid = Column(String, nullable=True, index=True)  # Participant JID in groups
     sender_name = Column(String, nullable=True)  # Participant name in groups
 
     timestamp = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     # Embeddings for semantic search (nullable)
-    embedding = Column(
-        Vector(3072), nullable=True
-    )  # Google gemini-embedding-001
+    embedding = Column(Vector(3072), nullable=True)  # Google gemini-embedding-001
     embedding_generated_at = Column(DateTime, nullable=True)
 
     # Relationship
@@ -104,9 +96,7 @@ def get_db():
         db.close()
 
 
-def get_or_create_user(
-    db, whatsapp_jid: str, conversation_type: str, name: str = None
-):
+def get_or_create_user(db, whatsapp_jid: str, conversation_type: str, name: str = None):
     """Get existing user or create new one by WhatsApp JID"""
     user = db.query(User).filter(User.whatsapp_jid == whatsapp_jid).first()
     if not user:
@@ -118,9 +108,7 @@ def get_or_create_user(
         db.add(user)
         db.commit()
         db.refresh(user)
-        logger.info(
-            f"Created new user: {whatsapp_jid} (type: {conversation_type})"
-        )
+        logger.info(f"Created new user: {whatsapp_jid} (type: {conversation_type})")
     elif name and user.name != name:
         # Update name if provided and changed
         user.name = name

@@ -14,12 +14,7 @@ from ..config import settings
 from ..logger import logger
 
 
-async def save_job_chunk(
-    redis: Redis,
-    job_id: str,
-    index: int,
-    content: str
-) -> None:
+async def save_job_chunk(redis: Redis, job_id: str, index: int, content: str) -> None:
     """
     Save a streaming chunk to Redis with TTL.
 
@@ -31,11 +26,9 @@ async def save_job_chunk(
     """
     chunk_key = f"job:chunks:{job_id}"
 
-    chunk_data = json.dumps({
-        'index': index,
-        'content': content,
-        'timestamp': datetime.utcnow().isoformat()
-    })
+    chunk_data = json.dumps(
+        {"index": index, "content": content, "timestamp": datetime.utcnow().isoformat()}
+    )
 
     # Append chunk to list
     await redis.rpush(chunk_key, chunk_data)
@@ -45,9 +38,7 @@ async def save_job_chunk(
 
 
 async def get_job_chunks(
-    redis: Redis,
-    job_id: str,
-    start_index: int = 0
+    redis: Redis, job_id: str, start_index: int = 0
 ) -> List[Dict[str, Any]]:
     """
     Retrieve chunks for a job from Redis.
@@ -78,10 +69,7 @@ async def get_job_chunks(
     return chunks
 
 
-async def get_chunk_count(
-    redis: Redis,
-    job_id: str
-) -> int:
+async def get_chunk_count(redis: Redis, job_id: str) -> int:
     """
     Get the total number of chunks for a job.
 
@@ -97,11 +85,7 @@ async def get_chunk_count(
     return count
 
 
-async def set_job_metadata(
-    redis: Redis,
-    job_id: str,
-    metadata: Dict[str, Any]
-) -> None:
+async def set_job_metadata(redis: Redis, job_id: str, metadata: Dict[str, Any]) -> None:
     """
     Store job metadata in Redis.
 
@@ -113,19 +97,16 @@ async def set_job_metadata(
     meta_key = f"job:meta:{job_id}"
 
     # Add timestamp
-    metadata['created_at'] = datetime.utcnow().isoformat()
+    metadata["created_at"] = datetime.utcnow().isoformat()
 
     await redis.set(
         meta_key,
         json.dumps(metadata),
-        ex=settings.arq_keep_result  # Match job result TTL
+        ex=settings.arq_keep_result,  # Match job result TTL
     )
 
 
-async def get_job_metadata(
-    redis: Redis,
-    job_id: str
-) -> Optional[Dict[str, Any]]:
+async def get_job_metadata(redis: Redis, job_id: str) -> Optional[Dict[str, Any]]:
     """
     Retrieve job metadata from Redis.
 
@@ -149,10 +130,7 @@ async def get_job_metadata(
         return None
 
 
-async def delete_job_data(
-    redis: Redis,
-    job_id: str
-) -> None:
+async def delete_job_data(redis: Redis, job_id: str) -> None:
     """
     Delete all job data from Redis (chunks + metadata).
 
