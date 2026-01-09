@@ -4,6 +4,7 @@ from enum import Enum
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
+    Boolean,
     Column,
     DateTime,
     ForeignKey,
@@ -40,10 +41,16 @@ class User(Base):
     conversation_type = Column(String, nullable=False, index=True)  # 'private' or 'group'
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
-    # Relationship
+    # Relationships
     messages = relationship(
         "ConversationMessage",
         back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    preferences = relationship(
+        "ConversationPreferences",
+        back_populates="user",
+        uselist=False,
         cascade="all, delete-orphan",
     )
 
@@ -68,6 +75,30 @@ class ConversationMessage(Base):
 
     # Relationship
     user = relationship("User", back_populates="messages")
+
+
+class ConversationPreferences(Base):
+    """Per-conversation preferences for TTS and STT settings."""
+
+    __tablename__ = "conversation_preferences"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id"), unique=True, nullable=False, index=True
+    )
+
+    # TTS Settings
+    tts_enabled = Column(Boolean, default=False, nullable=False)
+    tts_language = Column(String, default="en", nullable=False)
+
+    # STT Settings
+    stt_language = Column(String, nullable=True)  # null = auto-detect
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    # Relationship
+    user = relationship("User", back_populates="preferences")
 
 
 def init_db():
@@ -167,3 +198,27 @@ def save_message(
         f"Saved {role} message for user {whatsapp_jid} (embedding: {embedding is not None})"
     )
     return message
+
+
+def get_or_create_preferences(db, user_id: str) -> ConversationPreferences:
+    """Get existing preferences or create with defaults."""
+    prefs = (
+        db.query(ConversationPreferences).filter(ConversationPreferences.user_id == user_id).first()
+    )
+
+    if not prefs:
+        prefs = ConversationPreferences(user_id=user_id)
+        db.add(prefs)
+        db.commit()
+        db.refresh(prefs)
+        logger.info(f"Created default preferences for user {user_id}")
+
+    return prefs
+
+
+def get_user_preferences(db, whatsapp_jid: str) -> ConversationPreferences | None:
+    """Get preferences by WhatsApp JID (convenience function)."""
+    user = db.query(User).filter(User.whatsapp_jid == whatsapp_jid).first()
+    if not user:
+        return None
+    return get_or_create_preferences(db, str(user.id))

@@ -56,6 +56,7 @@ pnpm format                             # Format TypeScript (Prettier) + Python 
 - Prefer pure functions over classes
 - Use structured logging (Pino for TS, Python logging) - no console.log/print
 - Keep this file updated with important changes
+- There is no need for you to write tests for this project, the human developer will handle that.
 
 ## References
 

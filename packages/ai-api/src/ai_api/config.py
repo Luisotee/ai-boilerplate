@@ -50,6 +50,11 @@ class Settings(BaseSettings):
     stt_max_file_size_mb: int = 25
     stt_supported_formats: str = "mp3,mp4,mpeg,mpga,m4a,wav,webm,ogg,flac"
 
+    # Text-to-Speech
+    tts_model: str = "gemini-2.5-flash-preview-tts"
+    tts_default_voice: str = "Kore"
+    tts_max_text_length: int = 5000
+
     class Config:
         env_file = ".env"
 

@@ -10,16 +10,19 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Response,
     UploadFile,
 )
 from sqlalchemy.orm import Session
 
 from .agent import AgentDeps, format_message_history, get_ai_response
+from .commands import is_command, parse_and_execute
 from .config import settings
 from .database import (
     get_conversation_history,
     get_db,
     get_or_create_user,
+    get_user_preferences,
     init_db,
     save_message,
 )
@@ -34,13 +37,25 @@ from .schemas import (
     BatchUploadResponse,
     ChatRequest,
     ChatResponse,
+    CommandResponse,
     FileUploadResult,
+    PreferencesResponse,
     SaveMessageRequest,
     TranscribeResponse,
+    TTSRequest,
+    UpdatePreferencesRequest,
     UploadPDFResponse,
 )
 from .streams.manager import add_message_to_stream
 from .transcription import create_groq_client, transcribe_audio, validate_audio_file
+from .tts import (
+    create_genai_client,
+    get_audio_mimetype,
+    get_voice_for_language,
+    pcm_to_audio,
+    synthesize_speech,
+    validate_text_input,
+)
 
 
 @asynccontextmanager
@@ -706,7 +721,11 @@ async def save_message_only(request: SaveMessageRequest, db: Session = Depends(g
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@app.post("/chat/enqueue", response_model=EnqueueResponse, tags=["Chat"])
+@app.post(
+    "/chat/enqueue",
+    response_model=EnqueueResponse | CommandResponse,
+    tags=["Chat"],
+)
 async def enqueue_chat(request: ChatRequest, db: Session = Depends(get_db)):
     """
     Enqueue a chat message for asynchronous processing
@@ -715,23 +734,42 @@ async def enqueue_chat(request: ChatRequest, db: Session = Depends(get_db)):
     and adds it to a Redis Stream for processing. Returns a job ID
     that can be used to poll for status or stream results.
 
+    **Commands:** Messages starting with "/" are treated as commands and return immediately:
+    - `/settings` - Show current preferences
+    - `/tts on|off` - Enable/disable TTS
+    - `/tts lang [code]` - Set TTS language
+    - `/stt lang [code|auto]` - Set STT language
+    - `/help` - Show available commands
+
     **Request Body:**
     - `whatsapp_jid`: WhatsApp JID (e.g., "70253400879283@lid" or "1234567890@s.whatsapp.net")
-    - `message`: User's message text
+    - `message`: User's message text (or command like "/settings")
     - `conversation_type`: 'private' or 'group'
     - `sender_jid`: (Optional) Sender's JID for group messages
     - `sender_name`: (Optional) Sender's name for group messages
 
-    **Response:**
+    **Response (regular message):**
     - `job_id`: Unique identifier for tracking this job
     - `status`: 'queued'
     - `message`: Success message
+
+    **Response (command):**
+    - `is_command`: true
+    - `response`: Command result text
 
     **Next Steps:**
     - Poll `/chat/job/{job_id}` for status and accumulated chunks
     - Or stream from `/chat/stream/{job_id}` via SSE
     """
-    logger.info(f"Enqueueing chat request from {request.whatsapp_jid}")
+    logger.info(f"Received request from {request.whatsapp_jid}: {request.message[:50]}...")
+
+    # Check for commands first (e.g., /settings, /tts on, /help)
+    if is_command(request.message):
+        user = get_or_create_user(db, request.whatsapp_jid, request.conversation_type)
+        result = parse_and_execute(db, str(user.id), request.message)
+        if result.is_command:
+            logger.info(f"Command executed for {request.whatsapp_jid}: {request.message}")
+            return CommandResponse(is_command=True, response=result.response_text)
 
     try:
         # Format message with sender name if provided (group message)
@@ -940,7 +978,10 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
 
 @app.post("/transcribe", response_model=TranscribeResponse, tags=["Speech-to-Text"])
 async def transcribe_audio_endpoint(
-    file: UploadFile = File(...), language: str | None = Form(None)
+    file: UploadFile = File(...),
+    language: str | None = Form(None),
+    whatsapp_jid: str | None = Form(None),
+    db: Session = Depends(get_db),
 ):
     """
     Transcribe audio to text using Groq Whisper API
@@ -956,6 +997,7 @@ async def transcribe_audio_endpoint(
     **Request (multipart/form-data):**
     - `file`: Audio file (mp3, wav, ogg, m4a, webm, flac, etc.)
     - `language`: (Optional) ISO-639-1 language code (e.g., 'en', 'es') for better accuracy
+    - `whatsapp_jid`: (Optional) JID to fetch user's language preferences
 
     **Response:**
     - `transcription`: Transcribed text
@@ -990,7 +1032,15 @@ async def transcribe_audio_endpoint(
             f"Audio validated: {file.filename} ({file_size / 1024:.1f} KB, format: {file_format})"
         )
 
-        # Step 2: Create Groq client
+        # Step 2: Determine language from preferences if not provided
+        effective_language = language
+        if whatsapp_jid and not language:
+            prefs = get_user_preferences(db, whatsapp_jid)
+            if prefs and prefs.stt_language:
+                effective_language = prefs.stt_language
+                logger.info(f"Using STT language from preferences: {effective_language}")
+
+        # Step 3: Create Groq client
         groq_client = create_groq_client(settings.groq_api_key)
         if not groq_client:
             raise HTTPException(
@@ -998,13 +1048,13 @@ async def transcribe_audio_endpoint(
                 detail="Speech-to-text service not configured. Please set GROQ_API_KEY environment variable.",
             )
 
-        # Step 3: Transcribe audio
+        # Step 4: Transcribe audio
         audio_file_obj = BytesIO(audio_content)
         transcription_text, transcription_error = await transcribe_audio(
             groq_client,
             audio_file_obj,
             file.filename or f"audio.{file_format}",
-            language=language,
+            language=effective_language,
         )
 
         if transcription_error:
@@ -1014,7 +1064,7 @@ async def transcribe_audio_endpoint(
             f'Transcription successful: "{transcription_text[:100]}..." ({len(transcription_text)} chars)'
         )
 
-        # Step 4: Return transcription ONLY
+        # Step 5: Return transcription ONLY
         return TranscribeResponse(
             transcription=transcription_text, message="Audio transcribed successfully"
         )
@@ -1023,4 +1073,194 @@ async def transcribe_audio_endpoint(
         raise
     except Exception as e:
         logger.error(f"Error processing audio transcription: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/tts", tags=["Text-to-Speech"])
+async def text_to_speech_endpoint(request: TTSRequest, db: Session = Depends(get_db)):
+    """
+    Convert text to speech using Gemini TTS API
+
+    This endpoint converts text to audio using Google's Gemini TTS model.
+    Returns audio in the requested format (default: OGG/Opus for WhatsApp compatibility).
+
+    **Request Body:**
+    - `text`: Text to convert to speech (max 5000 characters)
+    - `whatsapp_jid`: (Optional) JID to fetch user's language preferences
+    - `format`: Output format - 'ogg' (default), 'mp3', 'wav', or 'flac'
+
+    **Response:**
+    - Audio file in requested format
+
+    **Configuration:**
+    - Voice: Based on user's language preference (default: Kore/English)
+    - Format: Configurable (OGG/Opus default for WhatsApp voice notes)
+
+    **Example:**
+    ```bash
+    curl -X POST http://localhost:8000/tts \\
+      -H "Content-Type: application/json" \\
+      -d '{"text": "Hello!", "format": "mp3"}' \\
+      --output speech.mp3
+    ```
+    """
+    logger.info("Received TTS request")
+
+    try:
+        # Step 1: Validate text input
+        is_valid, error_msg = validate_text_input(request.text)
+        if not is_valid:
+            logger.warning(f"Invalid TTS input: {error_msg}")
+            raise HTTPException(status_code=400, detail=error_msg)
+
+        logger.info(f"Text validated: {len(request.text)} characters")
+
+        # Step 2: Determine voice based on user preferences
+        voice = settings.tts_default_voice
+        if request.whatsapp_jid:
+            prefs = get_user_preferences(db, request.whatsapp_jid)
+            if prefs:
+                voice = get_voice_for_language(prefs.tts_language)
+                logger.info(f"Using voice '{voice}' for language '{prefs.tts_language}'")
+
+        # Step 3: Create Gemini client
+        genai_client = create_genai_client(settings.gemini_api_key)
+        if not genai_client:
+            raise HTTPException(
+                status_code=503,
+                detail="Text-to-speech service not configured. Please set GEMINI_API_KEY environment variable.",
+            )
+
+        # Step 4: Synthesize speech with selected voice
+        pcm_data, synthesis_error = await synthesize_speech(genai_client, request.text, voice)
+
+        if synthesis_error:
+            raise HTTPException(status_code=500, detail=synthesis_error)
+
+        # Step 5: Convert PCM to requested format
+        output_format = request.format
+        audio_data = pcm_to_audio(pcm_data, output_format)
+        mimetype = get_audio_mimetype(output_format)
+
+        logger.info(f"TTS successful: {len(audio_data)} bytes {output_format.upper()} audio generated")
+
+        # Step 6: Return audio file
+        return Response(
+            content=audio_data,
+            media_type=mimetype,
+            headers={"Content-Disposition": f"attachment; filename=speech.{output_format}"},
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error processing TTS request: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/preferences/{whatsapp_jid}", response_model=PreferencesResponse, tags=["Preferences"])
+async def get_preferences_endpoint(whatsapp_jid: str, db: Session = Depends(get_db)):
+    """
+    Get user preferences by WhatsApp JID
+
+    Returns the current preferences for a user. Creates default preferences if none exist.
+
+    **Path Parameters:**
+    - `whatsapp_jid`: WhatsApp JID (e.g., "1234567890@s.whatsapp.net")
+
+    **Response:**
+    - `tts_enabled`: Whether TTS is enabled
+    - `tts_language`: TTS language code (e.g., 'en', 'es')
+    - `stt_language`: STT language code, null for auto-detect
+    """
+    logger.info(f"Getting preferences for {whatsapp_jid}")
+
+    try:
+        prefs = get_user_preferences(db, whatsapp_jid)
+        if not prefs:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        return PreferencesResponse(
+            tts_enabled=prefs.tts_enabled,
+            tts_language=prefs.tts_language,
+            stt_language=prefs.stt_language,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting preferences: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.patch("/preferences/{whatsapp_jid}", response_model=PreferencesResponse, tags=["Preferences"])
+async def update_preferences_endpoint(
+    whatsapp_jid: str, request: UpdatePreferencesRequest, db: Session = Depends(get_db)
+):
+    """
+    Update user preferences
+
+    Updates specific preference fields. Only provided fields are updated.
+
+    **Path Parameters:**
+    - `whatsapp_jid`: WhatsApp JID
+
+    **Request Body (all fields optional):**
+    - `tts_enabled`: Enable/disable TTS
+    - `tts_language`: TTS language code (en, es, pt, fr, de)
+    - `stt_language`: STT language code, or "auto" for auto-detect
+
+    **Response:**
+    - Updated preferences
+    """
+    logger.info(f"Updating preferences for {whatsapp_jid}")
+
+    try:
+        prefs = get_user_preferences(db, whatsapp_jid)
+        if not prefs:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        # Update only provided fields
+        if request.tts_enabled is not None:
+            prefs.tts_enabled = request.tts_enabled
+
+        if request.tts_language is not None:
+            # Validate language code
+            supported = {"en", "es", "pt", "fr", "de"}
+            if request.tts_language not in supported:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid TTS language. Supported: {', '.join(sorted(supported))}",
+                )
+            prefs.tts_language = request.tts_language
+
+        if request.stt_language is not None:
+            # Handle "auto" as null
+            if request.stt_language.lower() == "auto":
+                prefs.stt_language = None
+            else:
+                supported = {"en", "es", "pt", "fr", "de"}
+                if request.stt_language not in supported:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid STT language. Supported: {', '.join(sorted(supported))}, auto",
+                    )
+                prefs.stt_language = request.stt_language
+
+        db.commit()
+        db.refresh(prefs)
+
+        logger.info(f"Preferences updated for {whatsapp_jid}")
+
+        return PreferencesResponse(
+            tts_enabled=prefs.tts_enabled,
+            tts_language=prefs.tts_language,
+            stt_language=prefs.stt_language,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating preferences: {str(e)}", exc_info=True)
+        db.rollback()
         raise HTTPException(status_code=500, detail="Internal server error")

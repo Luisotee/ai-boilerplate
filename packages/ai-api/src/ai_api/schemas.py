@@ -66,3 +66,38 @@ class TranscribeResponse(BaseModel):
     transcription: str = Field(..., description="Transcribed text from audio")
     message: str = Field(..., description="Status message")
     # NOTE: No ai_response field - client will call /chat/enqueue separately
+
+
+class TTSRequest(BaseModel):
+    """Text-to-speech synthesis request"""
+
+    text: str = Field(..., description="Text to convert to speech")
+    whatsapp_jid: str | None = Field(
+        None, description="Optional JID to fetch user language preferences"
+    )
+    format: Literal["ogg", "mp3", "wav", "flac"] = Field(
+        "ogg", description="Output audio format (default: ogg for WhatsApp compatibility)"
+    )
+
+
+class CommandResponse(BaseModel):
+    """Response for command execution (e.g., /settings, /tts on)"""
+
+    is_command: bool = Field(True, description="Always true for command responses")
+    response: str = Field(..., description="Command result message")
+
+
+class PreferencesResponse(BaseModel):
+    """User preferences"""
+
+    tts_enabled: bool = Field(..., description="Whether TTS is enabled")
+    tts_language: str = Field(..., description="TTS language code (e.g., 'en', 'es')")
+    stt_language: str | None = Field(None, description="STT language code, null for auto-detect")
+
+
+class UpdatePreferencesRequest(BaseModel):
+    """Request to update preferences"""
+
+    tts_enabled: bool | None = Field(None, description="Enable/disable TTS")
+    tts_language: str | None = Field(None, description="TTS language code")
+    stt_language: str | None = Field(None, description="STT language code, 'auto' converts to null")
