@@ -3,6 +3,7 @@ import { logger } from '../logger.js';
 import { getUserPreferences, sendMessageToAI, textToSpeech } from '../api-client.js';
 import { stripDeviceSuffix, isGroupChat } from '../utils/jid.js';
 import { getSenderName, shouldRespondInGroup } from '../utils/message.js';
+import { sendFailureReaction } from '../utils/reactions.js';
 
 /**
  * Handle incoming text messages
@@ -59,6 +60,7 @@ export async function handleTextMessage(
     }
   } catch (error) {
     logger.error({ error, whatsappJid }, 'Error processing message');
+    await sendFailureReaction(sock, msg);
     await sock.sendMessage(whatsappJid, {
       text: 'Sorry, I encountered an error processing your message. Please try again.',
     });

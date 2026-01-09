@@ -5,6 +5,7 @@ import { logger } from './logger.js';
 import { setBaileysSocket } from './services/baileys.js';
 import { handleTextMessage } from './handlers/text.js';
 import { transcribeAudioMessage } from './handlers/audio.js';
+import { sendFailureReaction } from './utils/reactions.js';
 
 export async function initializeWhatsApp(): Promise<void> {
   const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
@@ -50,6 +51,10 @@ export async function initializeWhatsApp(): Promise<void> {
 
       if (!text && msg.message?.audioMessage) {
         text = await transcribeAudioMessage(sock, msg);
+        if (!text) {
+          await sendFailureReaction(sock, msg);
+          continue;
+        }
       }
 
       if (text) {
