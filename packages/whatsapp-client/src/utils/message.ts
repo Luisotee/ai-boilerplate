@@ -15,12 +15,15 @@ export function getSenderName(msg: WAMessage): string {
 
 /**
  * Check if bot is mentioned in group message
+ * Supports both phone JID (@s.whatsapp.net) and LID (@lid) formats
  */
-export function isBotMentioned(msg: WAMessage, botJid: string): boolean {
+export function isBotMentioned(msg: WAMessage, botJid: string, botLid?: string): boolean {
   const mentionedJids = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
-  const matches = mentionedJids.includes(botJid);
-  logger.debug({ botJid, mentionedJids, matches }, 'Checking bot mention');
-  return matches;
+  const matchesJid = mentionedJids.includes(botJid);
+  const matchesLid = botLid ? mentionedJids.includes(botLid) : false;
+
+  logger.debug({ botJid, botLid, mentionedJids, matchesJid, matchesLid }, 'Checking bot mention');
+  return matchesJid || matchesLid;
 }
 
 /**
@@ -33,7 +36,8 @@ export function isReplyToBotMessage(msg: WAMessage, botJid: string): boolean {
 
 /**
  * Determine if bot should respond in group chat
+ * Checks for both @mention (JID or LID) and replies to bot messages
  */
-export function shouldRespondInGroup(msg: WAMessage, botJid: string): boolean {
-  return isBotMentioned(msg, botJid) || isReplyToBotMessage(msg, botJid);
+export function shouldRespondInGroup(msg: WAMessage, botJid: string, botLid?: string): boolean {
+  return isBotMentioned(msg, botJid, botLid) || isReplyToBotMessage(msg, botJid);
 }

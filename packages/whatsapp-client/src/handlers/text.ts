@@ -16,9 +16,10 @@ export async function handleTextMessage(
   const whatsappJid = stripDeviceSuffix(msg.key.remoteJid!);
   const conversationType = isGroupChat(whatsappJid) ? 'group' : 'private';
   const botJid = stripDeviceSuffix(sock.user!.id);
+  const botLid = sock.user?.lid ? stripDeviceSuffix(sock.user.lid) : undefined;
 
   // In groups, only respond if mentioned or replied to
-  if (conversationType === 'group' && !shouldRespondInGroup(msg, botJid)) {
+  if (conversationType === 'group' && !shouldRespondInGroup(msg, botJid, botLid)) {
     logger.debug({ whatsappJid }, 'Skipping group message (not mentioned)');
     return;
   }

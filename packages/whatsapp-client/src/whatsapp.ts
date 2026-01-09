@@ -1,4 +1,8 @@
-import makeWASocket, { DisconnectReason, useMultiFileAuthState } from '@whiskeysockets/baileys';
+import makeWASocket, {
+  DisconnectReason,
+  useMultiFileAuthState,
+  normalizeMessageContent,
+} from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import qrcode from 'qrcode-terminal';
 import { logger } from './logger.js';
@@ -42,14 +46,28 @@ export async function initializeWhatsApp(): Promise<void> {
   sock.ev.on('creds.update', saveCreds);
 
   // Message handler
-  sock.ev.on('messages.upsert', async ({ messages }) => {
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
     for (const msg of messages) {
+      // Debug: log all incoming messages
+      logger.debug(
+        {
+          remoteJid: msg.key.remoteJid,
+          fromMe: msg.key.fromMe,
+          type,
+          messageKeys: msg.message ? Object.keys(msg.message) : [],
+        },
+        'Incoming message'
+      );
+
       if (msg.key.fromMe || msg.key.remoteJid === 'status@broadcast') continue;
 
-      // Get text from message or transcribe audio
-      let text = msg.message?.conversation || msg.message?.extendedTextMessage?.text;
+      // Normalize message content to handle wrappers (viewOnce, ephemeral, etc.)
+      const normalizedMessage = normalizeMessageContent(msg.message);
 
-      if (!text && msg.message?.audioMessage) {
+      // Get text from normalized message or transcribe audio
+      let text = normalizedMessage?.conversation || normalizedMessage?.extendedTextMessage?.text;
+
+      if (!text && normalizedMessage?.audioMessage) {
         text = await transcribeAudioMessage(sock, msg);
         if (!text) {
           await sendFailureReaction(sock, msg);

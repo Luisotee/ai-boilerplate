@@ -5,6 +5,7 @@ Handles commands like /settings, /tts on, /stt lang es, etc.
 Commands are intercepted before reaching the AI agent.
 """
 
+import re
 from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
@@ -34,9 +35,19 @@ class CommandResult:
     save_to_history: bool = False  # Commands should NOT be saved to history
 
 
+def strip_leading_mentions(message: str) -> str:
+    """Strip @mentions from the beginning of message for command parsing.
+
+    Handles group chat messages where users mention the bot before commands,
+    e.g., "@BotName /settings" -> "/settings"
+    """
+    return re.sub(r"^(@\S+\s*)+", "", message).strip()
+
+
 def is_command(message: str) -> bool:
-    """Check if message is a command (starts with /)."""
-    return message.strip().startswith("/")
+    """Check if message is a command (starts with / after stripping mentions)."""
+    cleaned = strip_leading_mentions(message)
+    return cleaned.startswith("/")
 
 
 def _format_settings(prefs: ConversationPreferences) -> str:
@@ -167,16 +178,19 @@ def parse_and_execute(db: Session, user_id: str, message: str) -> CommandResult:
     Args:
         db: Database session
         user_id: User UUID string
-        message: Raw message text (should start with /)
+        message: Raw message text (may include leading @mentions in groups)
 
     Returns:
         CommandResult with response text
     """
-    if not is_command(message):
+    # Strip leading mentions for command parsing (handles "@BotName /settings")
+    cleaned_message = strip_leading_mentions(message)
+
+    if not cleaned_message.startswith("/"):
         return CommandResult(is_command=False)
 
-    # Parse command parts
-    parts = message.strip().split()
+    # Parse command parts from cleaned message
+    parts = cleaned_message.split()
     command = parts[0].lower()
 
     logger.info(f"Processing command '{command}' for user {user_id}")
