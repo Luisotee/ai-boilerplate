@@ -1,4 +1,22 @@
-from pydantic_settings import BaseSettings
+from pathlib import Path
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def get_env_files() -> tuple[Path, ...]:
+    """Return env files: root .env first, then local .env.local for overrides."""
+    current = Path(__file__).resolve()
+    for parent in current.parents:
+        if (parent / "docker-compose.yml").exists():
+            root_env = parent / ".env"
+            break
+    else:
+        root_env = Path.cwd() / ".env"
+
+    local_env = Path(__file__).resolve().parent.parent.parent.parent / ".env.local"
+
+    files = [f for f in [root_env, local_env] if f.exists()]
+    return tuple(files) if files else (".env",)
 
 
 class Settings(BaseSettings):
@@ -55,8 +73,11 @@ class Settings(BaseSettings):
     tts_default_voice: str = "Kore"
     tts_max_text_length: int = 5000
 
-    class Config:
-        env_file = ".env"
+    model_config = SettingsConfigDict(
+        env_file=get_env_files(),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
 
 settings = Settings()
