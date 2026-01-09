@@ -5,6 +5,7 @@ This processor can be called directly without arq job context,
 making it compatible with Redis Streams.
 """
 
+import httpx
 from redis.asyncio import Redis
 
 from ..agent import AgentDeps, format_message_history, get_ai_response
@@ -14,6 +15,7 @@ from ..embeddings import create_embedding_service
 from ..logger import logger
 from ..queue.connection import get_redis_client
 from ..queue.utils import save_job_chunk, set_job_metadata
+from ..whatsapp import WhatsAppClient, create_whatsapp_client
 
 
 async def process_chat_job_direct(
@@ -23,6 +25,7 @@ async def process_chat_job_direct(
     conversation_type: str,
     user_message_id: str,
     job_id: str,
+    whatsapp_message_id: str | None = None,
 ) -> dict:
     """
     Process a chat message asynchronously without arq context.
@@ -43,6 +46,7 @@ async def process_chat_job_direct(
         conversation_type: 'private' or 'group'
         user_message_id: UUID of saved user message in PostgreSQL
         job_id: Unique job identifier
+        whatsapp_message_id: WhatsApp message ID for reactions (optional)
 
     Returns:
         Dict with processing result including success status, job_id, chunk count
@@ -53,6 +57,7 @@ async def process_chat_job_direct(
     logger.info(f"[Job {job_id}] Starting chat processing for user {user_id}")
     logger.info(f"[Job {job_id}] WhatsApp JID: {whatsapp_jid}")
     logger.info(f"[Job {job_id}] Conversation type: {conversation_type}")
+    logger.info(f"[Job {job_id}] WhatsApp message ID: {whatsapp_message_id}")
 
     # Get Redis client
     redis: Redis = await get_redis_client()
@@ -60,6 +65,8 @@ async def process_chat_job_direct(
     db = SessionLocal()
     chunk_index = 0
     full_response = ""
+    http_client: httpx.AsyncClient | None = None
+    whatsapp_client: WhatsAppClient | None = None
 
     try:
         # Step 1: Get conversation history from PostgreSQL
@@ -74,6 +81,14 @@ async def process_chat_job_direct(
         logger.info(f"[Job {job_id}] Initializing embedding service...")
         embedding_service = create_embedding_service(settings.gemini_api_key)
 
+        # Step 2.5: Initialize HTTP client and WhatsApp client
+        http_client = httpx.AsyncClient(timeout=settings.whatsapp_client_timeout)
+        whatsapp_client = create_whatsapp_client(
+            http_client=http_client,
+            base_url=settings.whatsapp_client_url,
+        )
+        logger.info(f"[Job {job_id}] WhatsApp client initialized")
+
         # Step 3: Prepare agent dependencies
         agent_deps = AgentDeps(
             db=db,
@@ -81,6 +96,9 @@ async def process_chat_job_direct(
             whatsapp_jid=whatsapp_jid,
             recent_message_ids=[str(msg.id) for msg in history] if history else [],
             embedding_service=embedding_service,
+            http_client=http_client,
+            whatsapp_client=whatsapp_client,
+            current_message_id=whatsapp_message_id,
         )
 
         # Step 4: Get AI response
@@ -166,5 +184,9 @@ async def process_chat_job_direct(
         raise
 
     finally:
+        # Close HTTP client
+        if http_client:
+            await http_client.aclose()
+            logger.info(f"[Job {job_id}] HTTP client closed")
         db.close()
         logger.info(f"[Job {job_id}] Database session closed")

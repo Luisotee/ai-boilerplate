@@ -11,13 +11,16 @@ This worker processes chat messages asynchronously by:
 import os
 from typing import Any
 
+import httpx
 from arq.connections import RedisSettings
 from redis.asyncio import Redis
 
 from ..agent import AgentDeps, format_message_history, get_ai_response
+from ..config import settings
 from ..database import SessionLocal, get_conversation_history, save_message
 from ..embeddings import create_embedding_service
 from ..logger import logger
+from ..whatsapp import WhatsAppClient, create_whatsapp_client
 from .utils import save_job_chunk, set_job_metadata
 
 
@@ -28,6 +31,7 @@ async def process_chat_job(
     message: str,
     conversation_type: str,
     user_message_id: str,
+    whatsapp_message_id: str | None = None,
 ) -> dict[str, Any]:
     """
     Process a chat message asynchronously.
@@ -50,6 +54,7 @@ async def process_chat_job(
         message: User's message (already formatted with sender name if group)
         conversation_type: 'private' or 'group'
         user_message_id: UUID of saved user message in PostgreSQL
+        whatsapp_message_id: WhatsApp message ID for reactions (optional)
 
     Returns:
         Dict with processing result including success status, job_id, chunk count
@@ -63,10 +68,13 @@ async def process_chat_job(
     logger.info(f"[Job {job_id}] Starting chat processing for user {user_id}")
     logger.info(f"[Job {job_id}] WhatsApp JID: {whatsapp_jid}")
     logger.info(f"[Job {job_id}] Conversation type: {conversation_type}")
+    logger.info(f"[Job {job_id}] WhatsApp message ID: {whatsapp_message_id}")
 
     db = SessionLocal()
     chunk_index = 0
     full_response = ""
+    http_client: httpx.AsyncClient | None = None
+    whatsapp_client: WhatsAppClient | None = None
 
     try:
         # Step 1: Get conversation history from PostgreSQL
@@ -81,6 +89,14 @@ async def process_chat_job(
         logger.info(f"[Job {job_id}] Initializing embedding service...")
         embedding_service = create_embedding_service(os.getenv("GEMINI_API_KEY"))
 
+        # Step 2.5: Initialize HTTP client and WhatsApp client
+        http_client = httpx.AsyncClient(timeout=settings.whatsapp_client_timeout)
+        whatsapp_client = create_whatsapp_client(
+            http_client=http_client,
+            base_url=settings.whatsapp_client_url,
+        )
+        logger.info(f"[Job {job_id}] WhatsApp client initialized")
+
         # Step 3: Prepare agent dependencies
         agent_deps = AgentDeps(
             db=db,
@@ -88,6 +104,9 @@ async def process_chat_job(
             whatsapp_jid=whatsapp_jid,
             recent_message_ids=[str(msg.id) for msg in history] if history else [],
             embedding_service=embedding_service,
+            http_client=http_client,
+            whatsapp_client=whatsapp_client,
+            current_message_id=whatsapp_message_id,
         )
 
         # Step 4: Stream tokens from AI agent
@@ -173,6 +192,10 @@ async def process_chat_job(
         raise
 
     finally:
+        # Close HTTP client
+        if http_client:
+            await http_client.aclose()
+            logger.info(f"[Job {job_id}] HTTP client closed")
         db.close()
         logger.info(f"[Job {job_id}] Database session closed")
 

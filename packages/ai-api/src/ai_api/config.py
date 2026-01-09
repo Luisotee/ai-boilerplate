@@ -73,6 +73,10 @@ class Settings(BaseSettings):
     tts_default_voice: str = "Kore"
     tts_max_text_length: int = 5000
 
+    # WhatsApp Client
+    whatsapp_client_url: str = "http://localhost:3001"
+    whatsapp_client_timeout: int = 30
+
     model_config = SettingsConfigDict(
         env_file=get_env_files(),
         env_file_encoding="utf-8",

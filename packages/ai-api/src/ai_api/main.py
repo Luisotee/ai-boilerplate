@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from io import BytesIO
 from pathlib import Path
 
+import httpx
 from fastapi import (
     BackgroundTasks,
     Depends,
@@ -56,6 +57,7 @@ from .tts import (
     synthesize_speech,
     validate_text_input,
 )
+from .whatsapp import create_whatsapp_client
 
 
 @asynccontextmanager
@@ -809,17 +811,22 @@ async def enqueue_chat(request: ChatRequest, db: Session = Depends(get_db)):
         redis_client = await get_redis_client()
         job_id = str(uuid.uuid4())
 
+        # Build job data with optional whatsapp_message_id
+        job_data = {
+            "job_id": job_id,
+            "user_id": str(user.id),
+            "whatsapp_jid": request.whatsapp_jid,
+            "message": content,
+            "conversation_type": request.conversation_type,
+            "user_message_id": str(user_msg.id),
+        }
+        if request.whatsapp_message_id:
+            job_data["whatsapp_message_id"] = request.whatsapp_message_id
+
         await add_message_to_stream(
             redis=redis_client,
             user_id=str(user.id),
-            job_data={
-                "job_id": job_id,
-                "user_id": str(user.id),
-                "whatsapp_jid": request.whatsapp_jid,
-                "message": content,
-                "conversation_type": request.conversation_type,
-                "user_message_id": str(user_msg.id),
-            },
+            job_data=job_data,
         )
 
         logger.info(f"Job {job_id} added to stream for user {user.id}")
@@ -938,18 +945,28 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
         # Initialize embedding service following Pydantic AI best practices
         embedding_service = create_embedding_service(settings.gemini_api_key)
 
-        agent_deps = AgentDeps(
-            db=db,
-            user_id=str(user.id),
-            whatsapp_jid=request.whatsapp_jid,
-            recent_message_ids=[str(msg.id) for msg in history] if history else [],
-            embedding_service=embedding_service,
-        )
+        # Initialize HTTP client and WhatsApp client for agent tools
+        async with httpx.AsyncClient(timeout=settings.whatsapp_client_timeout) as http_client:
+            whatsapp_client = create_whatsapp_client(
+                http_client=http_client,
+                base_url=settings.whatsapp_client_url,
+            )
 
-        # Get AI response (using formatted content) - consume stream into complete response
-        ai_response = ""
-        async for token in get_ai_response(content, message_history, agent_deps=agent_deps):
-            ai_response += token
+            agent_deps = AgentDeps(
+                db=db,
+                user_id=str(user.id),
+                whatsapp_jid=request.whatsapp_jid,
+                recent_message_ids=[str(msg.id) for msg in history] if history else [],
+                embedding_service=embedding_service,
+                http_client=http_client,
+                whatsapp_client=whatsapp_client,
+                current_message_id=request.whatsapp_message_id,
+            )
+
+            # Get AI response (using formatted content) - consume stream into complete response
+            ai_response = ""
+            async for token in get_ai_response(content, message_history, agent_deps=agent_deps):
+                ai_response += token
 
         # Generate embedding for assistant response using embedding service
         assistant_embedding = None

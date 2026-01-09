@@ -33,6 +33,7 @@ export async function handleTextMessage(
       conversationType,
       senderJid: msg.key.participant,
       senderName: getSenderName(msg),
+      messageId: msg.key.id,
     });
 
     // Send text response first

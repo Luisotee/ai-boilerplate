@@ -11,6 +11,7 @@ class ChatRequest(BaseModel):
     )
     sender_jid: str | None = Field(None, description="Sender JID in group chats")
     sender_name: str | None = Field(None, description="Sender name in group chats")
+    whatsapp_message_id: str | None = Field(None, description="WhatsApp message ID for reactions")
 
 
 class ChatResponse(BaseModel):
@@ -27,6 +28,7 @@ class SaveMessageRequest(BaseModel):
     )
     sender_jid: str | None = Field(None, description="Sender JID in group chats")
     sender_name: str | None = Field(None, description="Sender name in group chats")
+    whatsapp_message_id: str | None = Field(None, description="WhatsApp message ID for reactions")
 
 
 class UploadPDFResponse(BaseModel):

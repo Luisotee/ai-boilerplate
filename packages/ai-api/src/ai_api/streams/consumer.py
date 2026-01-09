@@ -93,6 +93,11 @@ async def process_single_message(user_id: str, message_id: str, data: dict):
     job_id = data[b"job_id"].decode()
     logger.info(f"Processing job {job_id} for user {user_id}")
 
+    # Extract optional whatsapp_message_id
+    whatsapp_message_id = None
+    if b"whatsapp_message_id" in data:
+        whatsapp_message_id = data[b"whatsapp_message_id"].decode()
+
     # Call core processor function
     await process_chat_job_direct(
         user_id=data[b"user_id"].decode(),
@@ -101,6 +106,7 @@ async def process_single_message(user_id: str, message_id: str, data: dict):
         conversation_type=data[b"conversation_type"].decode(),
         user_message_id=data[b"user_message_id"].decode(),
         job_id=job_id,
+        whatsapp_message_id=whatsapp_message_id,
     )
 
 

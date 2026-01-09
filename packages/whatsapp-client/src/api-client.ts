@@ -8,6 +8,7 @@ interface MessageOptions {
   senderJid?: string;
   senderName?: string;
   saveOnly?: boolean;
+  messageId?: string;
 }
 
 interface JobStatus {
@@ -38,7 +39,7 @@ export async function sendMessageToAI(
   message: string,
   options: MessageOptions
 ): Promise<string> {
-  const { conversationType, senderJid, senderName, saveOnly } = options;
+  const { conversationType, senderJid, senderName, saveOnly, messageId } = options;
 
   // Handle save-only endpoint separately
   if (saveOnly) {
@@ -53,6 +54,7 @@ export async function sendMessageToAI(
         sender_jid: senderJid,
         sender_name: senderName,
         conversation_type: conversationType,
+        whatsapp_message_id: messageId,
       }),
     });
 
@@ -64,7 +66,7 @@ export async function sendMessageToAI(
   }
 
   // Step 1: Enqueue message
-  logger.info({ whatsappJid, conversationType }, 'Enqueuing message to AI API');
+  logger.info({ whatsappJid, conversationType, messageId }, 'Enqueuing message to AI API');
 
   const enqueueResponse = await fetch(`${config.aiApiUrl}/chat/enqueue`, {
     method: 'POST',
@@ -75,6 +77,7 @@ export async function sendMessageToAI(
       sender_jid: senderJid,
       sender_name: senderName,
       conversation_type: conversationType,
+      whatsapp_message_id: messageId,
     }),
   });
 
