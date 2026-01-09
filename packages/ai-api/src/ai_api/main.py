@@ -1142,7 +1142,9 @@ async def text_to_speech_endpoint(request: TTSRequest, db: Session = Depends(get
         audio_data = pcm_to_audio(pcm_data, output_format)
         mimetype = get_audio_mimetype(output_format)
 
-        logger.info(f"TTS successful: {len(audio_data)} bytes {output_format.upper()} audio generated")
+        logger.info(
+            f"TTS successful: {len(audio_data)} bytes {output_format.upper()} audio generated"
+        )
 
         # Step 6: Return audio file
         return Response(
