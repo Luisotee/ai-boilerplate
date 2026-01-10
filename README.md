@@ -1,260 +1,218 @@
-# AI WhatsApp Agent System
+# AI WhatsApp Agent
 
-A cross-platform AI agent system that enables conversational AI interactions via WhatsApp, with conversation memory maintained across sessions.
+A production-ready AI agent system that brings conversational AI to WhatsApp with persistent memory, RAG-powered knowledge bases, and multi-language speech processing.
+
+## Tech Stack
+
+| Layer | Technologies |
+|-------|-------------|
+| **Client** | Node.js, TypeScript, Fastify, Baileys (WhatsApp Web), Zod |
+| **API** | Python 3.11+, FastAPI, Pydantic AI, SQLAlchemy 2.0 |
+| **AI/ML** | Google Gemini (LLM, Embeddings, TTS), Groq Whisper (STT) |
+| **Database** | PostgreSQL 16 + pgvector (vector similarity search) |
+| **Infrastructure** | Docker Compose, Redis Streams, Background Workers |
+
+## Features
+
+### Conversational AI with Memory
+- Persistent conversation history stored in PostgreSQL
+- Context-aware responses using configurable message windows
+- Separate tracking for private chats and group conversations
+- Semantic search through past conversations using vector embeddings
+
+### RAG Knowledge Base
+- PDF document upload with background processing (Docling)
+- Semantic chunking with token-aware splitting (512 tokens/chunk)
+- Vector similarity search using pgvector (3072-dim embeddings)
+- Auto-generated citations with document name, page number, and section
+
+### Speech Processing
+- **Speech-to-Text:** Groq Whisper v3 large with auto language detection
+- **Text-to-Speech:** Gemini TTS with language-specific voices
+- **5 Languages:** English, Spanish, Portuguese, French, German
+- Per-user language preferences
+
+### Real-time Streaming
+- Server-Sent Events (SSE) for token-by-token streaming
+- Async job queue with polling for background processing
+- Redis Streams for per-user message queuing
+
+### WhatsApp Integration
+- Group chat support with sender attribution and @mention handling
+- Message reactions (status indicators)
+- Media handling: images, audio, video, documents
+- Location sharing and contact cards (vCard)
+- Voice messages with TTS responses
+
+### Command System
+| Command | Description |
+|---------|-------------|
+| `/settings` | Show current TTS/STT preferences |
+| `/tts on\|off` | Enable/disable voice responses |
+| `/tts lang [code]` | Set TTS language (en, es, pt, fr, de) |
+| `/stt lang [code\|auto]` | Set transcription language |
+| `/clean` | Delete all conversation history |
+| `/clean [1h\|7d\|1m]` | Delete messages from time period |
+| `/help` | Show available commands |
 
 ## Architecture
 
-- **WhatsApp Client** (Node.js/TypeScript): Handles WhatsApp messaging using Baileys
-- **AI API** (Python/FastAPI): Manages AI responses using Pydantic AI + Google Gemini
-- **Database** (PostgreSQL): Stores conversation history for context continuity
-
-## Prerequisites
-
-- Node.js 18+ and pnpm
-- Python 3.11+ and uv
-- Docker and Docker Compose
-- Google Gemini API key ([Get one here](https://aistudio.google.com/apikey))
-
-## Quick Start
-
-### 1. Clone and Setup
-
-```bash
-git clone <your-repo>
-cd ai-boilerplate
-cp .env.example .env
+```
+┌─────────────────┐     HTTP/SSE      ┌─────────────────┐
+│   WhatsApp      │◄────────────────►│    AI API       │
+│   Client        │                   │   (FastAPI)     │
+│   (Fastify)     │                   │                 │
+└────────┬────────┘                   └────────┬────────┘
+         │                                     │
+         │ WebSocket                           │ Async
+         │                                     │
+┌────────▼────────┐                   ┌────────▼────────┐
+│   WhatsApp      │                   │   PostgreSQL    │
+│   (Baileys)     │                   │   + pgvector    │
+└─────────────────┘                   └────────┬────────┘
+                                               │
+                              ┌────────────────┼────────────────┐
+                              │                │                │
+                      ┌───────▼──────┐ ┌───────▼──────┐ ┌───────▼──────┐
+                      │   Gemini     │ │    Groq      │ │    Redis     │
+                      │ LLM/Embed/TTS│ │   Whisper    │ │   Streams    │
+                      └──────────────┘ └──────────────┘ └──────────────┘
 ```
 
-### 2. Configure Environment
-
-Edit `.env` and add your Gemini API key:
-```env
-GEMINI_API_KEY=your_actual_api_key_here
-```
-
-### 3. Start Database
-
-```bash
-docker-compose up -d
-```
-
-Wait for PostgreSQL to be healthy:
-```bash
-docker-compose ps
-```
-
-### 4. Setup AI API
-
-```bash
-cd packages/ai-api
-cp .env.example .env
-
-# Edit .env if needed
-
-uv sync
-uv run uvicorn ai_api.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-The API will start on `http://localhost:8000`. Verify with:
-```bash
-curl http://localhost:8000/health
-```
-
-### 5. Setup WhatsApp Client
-
-In a new terminal:
-```bash
-cd packages/whatsapp-client
-cp .env.example .env
-pnpm install
-pnpm dev
-```
-
-### 6. Connect WhatsApp
-
-1. A QR code will appear in the terminal
-2. Open WhatsApp on your phone
-3. Go to Settings → Linked Devices → Link a Device
-4. Scan the QR code
-5. Wait for "WhatsApp connection opened successfully"
-
-### 7. Test the System
-
-Send a message to your WhatsApp number from another phone. The AI agent should respond!
-
-## How It Works
-
-1. **User sends WhatsApp message** → Baileys client receives it
-2. **WhatsApp client** → Sends message to AI API via HTTP POST
-3. **AI API** → Fetches conversation history from PostgreSQL
-4. **AI API** → Sends message + history to Gemini via Pydantic AI
-5. **AI API** → Streams response back via SSE
-6. **WhatsApp client** → Receives streamed response
-7. **WhatsApp client** → Sends AI response to user on WhatsApp
-8. **AI API** → Saves both messages to PostgreSQL
+**Key Patterns:**
+- Pydantic AI agent with tool system (6 tools: search, reactions, location, contacts, etc.)
+- Dependency injection for testable, modular code
+- Graceful degradation when optional APIs unavailable
+- Background job processing with Redis Streams consumer groups
 
 ## Project Structure
 
 ```
-ai-boilerplate/
-├── packages/
-│   ├── whatsapp-client/    # Node.js WhatsApp interface
-│   └── ai-api/             # Python AI service
-├── docker-compose.yml      # PostgreSQL setup
-└── README.md
+packages/
+├── whatsapp-client/           # TypeScript - WhatsApp interface
+│   └── src/
+│       ├── main.ts            # Fastify server (port 3001)
+│       ├── whatsapp.ts        # Baileys connection + message events
+│       ├── handlers/          # Text and audio message processors
+│       ├── routes/            # REST API (messaging, media, operations)
+│       ├── services/          # Baileys abstraction layer
+│       └── utils/             # JID, reactions, vCard utilities
+│
+└── ai-api/                    # Python - AI service
+    └── src/ai_api/
+        ├── main.py            # FastAPI app (port 8000)
+        ├── agent.py           # Pydantic AI agent + tools
+        ├── commands.py        # Command parser
+        ├── database.py        # SQLAlchemy models
+        ├── embeddings.py      # Vector embedding generation
+        ├── transcription.py   # Groq Whisper STT
+        ├── tts.py             # Gemini TTS synthesis
+        ├── processing.py      # PDF parsing (Docling)
+        ├── rag/               # RAG implementations
+        ├── queue/             # Redis job utilities
+        └── streams/           # Background processor
 ```
 
-## Development
+## Quick Start
 
-### View Logs
+### Prerequisites
+- Node.js 18+ and pnpm
+- Python 3.11+ and uv
+- Docker and Docker Compose
+- API Keys: [Google Gemini](https://aistudio.google.com/apikey), [Groq](https://console.groq.com/keys) (optional)
 
-**AI API:**
+### Setup
+
 ```bash
+# Clone and configure
+git clone <repo>
+cd ai-boilerplate
+cp .env.example .env  # Add your GEMINI_API_KEY
+
+# Start infrastructure
+docker-compose up -d
+
+# Terminal 1: AI API
 cd packages/ai-api
-uv run uvicorn ai_api.main:app --reload --host 0.0.0.0 --port 8000
-```
+cp .env.example .env
+uv sync
+uv run uvicorn ai_api.main:app --reload --port 8000
 
-**WhatsApp Client:**
-```bash
+# Terminal 2: WhatsApp Client
 cd packages/whatsapp-client
-pnpm dev
+cp .env.example .env
+pnpm install
+pnpm dev  # Scan QR code when prompted
+
+# Terminal 3: Background Worker (optional, for async processing)
+pnpm dev:queue
 ```
 
-**Database:**
-```bash
-docker-compose logs -f postgres
-```
-
-### Database Access
-
-Connect to PostgreSQL:
-```bash
-docker exec -it aiagent-postgres psql -U aiagent -d aiagent
-```
-
-View users:
-```sql
-SELECT * FROM users ORDER BY created_at DESC;
-```
-
-View messages with user info:
-```sql
-SELECT u.phone, u.name, m.role, m.content, m.timestamp
-FROM conversation_messages m
-JOIN users u ON m.user_id = u.id
-ORDER BY m.timestamp DESC LIMIT 10;
-```
-
-### Database GUI (Adminer)
-
-Adminer provides a web-based interface for managing your database, similar to Prisma Studio:
-
-**Access:** http://localhost:8080
-
-**Login credentials:**
-- System: **PostgreSQL**
-- Server: **postgres**
-- Username: **aiagent**
-- Password: **changeme**
-- Database: **aiagent**
-
-With Adminer you can:
-- Browse tables and view data
-- Run SQL queries
-- Edit records directly
-- Export data (CSV, SQL, etc.)
-
-### API Documentation
-
-The AI API includes auto-generated interactive documentation:
-
-- **Swagger UI**: http://localhost:8000/docs
-- **ReDoc**: http://localhost:8000/redoc
-- **OpenAPI Schema**: http://localhost:8000/openapi.json
-
-### Restart Services
-
-```bash
-# Restart database
-docker-compose restart
-
-# Restart AI API (Ctrl+C then)
-cd packages/ai-api && uv run uvicorn ai_api.main:app --reload --host 0.0.0.0 --port 8000
-
-# Restart WhatsApp Client (Ctrl+C then)
-cd packages/whatsapp-client && pnpm dev
-```
-
-## Troubleshooting
-
-### QR Code Not Showing
-
-- Make sure WhatsApp client is running with `pnpm dev`
-- Check that port 3000 isn't in use
-- Delete `auth_info_baileys/` folder and restart
-
-### AI Not Responding
-
-- Verify AI API is running: `curl http://localhost:8000/health`
-- Check `GEMINI_API_KEY` in `packages/ai-api/.env`
-- Check AI API logs for errors
-
-### Database Connection Failed
-
-- Ensure PostgreSQL is running: `docker-compose ps`
-- Check `DATABASE_URL` in both `.env` files
-- Verify PostgreSQL is healthy: `docker-compose logs postgres`
-
-### Connection Closed/Logged Out
-
-- Baileys session expired
-- Delete `auth_info_baileys/` folder
-- Restart client and scan QR code again
+### Verify
+1. Send a message to your WhatsApp number
+2. The AI agent responds with context-aware replies
+3. API docs available at http://localhost:8000/docs
 
 ## API Endpoints
 
-### Health Check
+### Chat
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/chat` | Synchronous chat response |
+| POST | `/chat/stream` | SSE streaming response |
+| POST | `/chat/enqueue` | Async job (returns job_id) |
+| GET | `/chat/job/{job_id}` | Poll job status + chunks |
 
-`GET /health`
+### Knowledge Base
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/knowledge-base/upload` | Upload single PDF |
+| POST | `/knowledge-base/upload/batch` | Upload multiple PDFs |
+| GET | `/knowledge-base/documents` | List documents (paginated) |
+| GET | `/knowledge-base/status/{id}` | Processing status |
+| DELETE | `/knowledge-base/documents/{id}` | Delete document |
 
-Returns service health status.
+### Speech
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/transcribe` | Speech-to-text (audio file) |
+| POST | `/tts` | Text-to-speech (returns audio) |
 
-### Stream Chat
+### Preferences
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/preferences/{jid}` | Get user settings |
+| PATCH | `/preferences/{jid}` | Update TTS/STT settings |
 
-`POST /chat/stream`
+## Development
 
-Request body:
-```json
-{
-  "phone": "1234567890@s.whatsapp.net",
-  "message": "Hello, how are you?"
-}
+```bash
+# From project root
+pnpm dev:server      # Start AI API
+pnpm dev:whatsapp    # Start WhatsApp client
+pnpm dev:queue       # Start background worker
+pnpm install:all     # Install all dependencies
+pnpm lint            # Check TypeScript + Python
+pnpm format          # Format all code
 ```
 
-Returns: Server-Sent Events stream
+### Database Access
+- **Adminer GUI:** http://localhost:8080 (postgres / aiagent / changeme)
+- **Direct:** `docker exec -it aiagent-postgres psql -U aiagent -d aiagent`
 
-### Non-Streaming Chat
+## Configuration
 
-`POST /chat`
+### Environment Variables
 
-Request body: Same as above
+| Variable | Description |
+|----------|-------------|
+| `GEMINI_API_KEY` | Google Gemini API key (required) |
+| `GROQ_API_KEY` | Groq API key (optional, for STT) |
+| `DATABASE_URL` | PostgreSQL connection string |
+| `REDIS_URL` | Redis connection string |
+| `AI_API_URL` | AI API endpoint for WhatsApp client |
 
-Response:
-```json
-{
-  "response": "I'm doing well, thank you! How can I help you today?"
-}
-```
-
-## Future Features (Post-MVP)
-
-- [ ] Access control (allowlist/blocklist)
-- [ ] Group support (@mention only)
-- [ ] Reaction indicators (🔁 ⚙️ ✅ ⚠️)
-- [ ] Image support (Gemini Vision)
-- [ ] Message queue (prevent race conditions)
-- [ ] Auto-reconnection with backoff
-- [ ] Telegram integration
+See `packages/*/.env.example` for full configuration options.
 
 ## License
 

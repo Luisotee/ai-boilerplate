@@ -7,10 +7,11 @@ Commands are intercepted before reaching the AI agent.
 
 import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
 
-from .database import ConversationPreferences, get_or_create_preferences
+from .database import ConversationMessage, ConversationPreferences, get_or_create_preferences
 from .logger import logger
 
 # Supported language codes
@@ -50,6 +51,32 @@ def is_command(message: str) -> bool:
     return cleaned.startswith("/")
 
 
+def _parse_duration(duration_str: str) -> timedelta | None:
+    """Parse a duration string like '1h', '7d', '1m' into a timedelta.
+
+    Args:
+        duration_str: Duration string (e.g., '1h', '7d', '1m')
+
+    Returns:
+        timedelta object or None if invalid format
+    """
+    match = re.match(r"^(\d+)([hdm])$", duration_str.lower())
+    if not match:
+        return None
+
+    value = int(match.group(1))
+    unit = match.group(2)
+
+    if unit == "h":
+        return timedelta(hours=value)
+    elif unit == "d":
+        return timedelta(days=value)
+    elif unit == "m":
+        return timedelta(days=value * 30)  # Approximate month as 30 days
+
+    return None
+
+
 def _format_settings(prefs: ConversationPreferences) -> str:
     """Format current settings for display."""
     tts_status = "enabled" if prefs.tts_enabled else "disabled"
@@ -79,6 +106,8 @@ def _get_help_text() -> str:
 /tts lang [code] - Set TTS language
 /stt lang [code] - Set transcription language
 /stt lang auto - Use auto-detection for STT
+/clean - Delete all conversation history
+/clean [duration] - Delete messages (e.g., 1h, 7d, 1m)
 /help - Show this message
 
 Language codes: {lang_codes}"""
@@ -171,6 +200,61 @@ def _handle_stt_command(db: Session, prefs: ConversationPreferences, parts: list
         return "Unknown STT command. Use '/stt lang [code]' or '/stt lang auto'."
 
 
+def _handle_clean_command(db: Session, user_id: str, parts: list[str]) -> str:
+    """Handle /clean command to delete conversation history.
+
+    Args:
+        db: Database session
+        user_id: User UUID string
+        parts: Command parts (e.g., ['/clean'], ['/clean', '7d'])
+
+    Returns:
+        Response message
+    """
+    # Determine the time filter
+    duration: timedelta | None = None
+    duration_str: str | None = None
+
+    if len(parts) >= 2:
+        arg = parts[1].lower()
+        if arg == "all":
+            duration = None  # Delete all
+        else:
+            duration = _parse_duration(arg)
+            if duration is None:
+                return (
+                    f"Invalid duration '{parts[1]}'. "
+                    "Use formats like: 1h (hours), 7d (days), 1m (months), or 'all'."
+                )
+            duration_str = arg
+
+    # Build the query
+    query = db.query(ConversationMessage).filter(ConversationMessage.user_id == user_id)
+
+    if duration:
+        cutoff = datetime.utcnow() - duration
+        query = query.filter(ConversationMessage.timestamp >= cutoff)
+
+    # Count messages to delete
+    message_count = query.count()
+
+    if message_count == 0:
+        if duration_str:
+            return f"No messages found from the last {duration_str}."
+        return "No messages found to delete."
+
+    # Delete messages
+    query.delete()
+    db.commit()
+
+    if duration_str:
+        logger.info(f"Cleaned {message_count} messages (last {duration_str}) for user {user_id}")
+        return f"Deleted {message_count} messages from the last {duration_str}."
+    else:
+        logger.info(f"Cleaned all {message_count} messages for user {user_id}")
+        return f"Deleted all {message_count} messages. Conversation history cleared."
+
+
 def parse_and_execute(db: Session, user_id: str, message: str) -> CommandResult:
     """
     Parse and execute a command message.
@@ -198,6 +282,11 @@ def parse_and_execute(db: Session, user_id: str, message: str) -> CommandResult:
     # Handle /help (no preferences needed)
     if command == "/help":
         return CommandResult(is_command=True, response_text=_get_help_text())
+
+    # Handle /clean (no preferences needed)
+    if command == "/clean":
+        response = _handle_clean_command(db, user_id, parts)
+        return CommandResult(is_command=True, response_text=response)
 
     # Get or create preferences for other commands
     prefs = get_or_create_preferences(db, user_id)
