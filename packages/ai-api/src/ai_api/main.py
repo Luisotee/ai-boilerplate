@@ -1,5 +1,7 @@
+import base64
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 
@@ -771,16 +773,30 @@ async def enqueue_chat(request: ChatRequest, db: Session = Depends(get_db)):
     # Check for commands first (e.g., /settings, /tts on, /help)
     if is_command(request.message):
         user = get_or_create_user(db, request.whatsapp_jid, request.conversation_type)
-        result = parse_and_execute(db, str(user.id), request.message)
+        result = parse_and_execute(db, str(user.id), request.whatsapp_jid, request.message)
         if result.is_command:
             logger.info(f"Command executed for {request.whatsapp_jid}: {request.message}")
             return CommandResponse(is_command=True, response=result.response_text)
 
     try:
+        # Check for document
+        has_document = (
+            request.document_data is not None
+            and request.document_mimetype is not None
+            and request.document_filename is not None
+        )
+
         # For image messages, store with [Image] marker for history context
         if has_image:
             # Store as [Image: caption] or [Image] for database history
             content = f"[Image: {request.message}]" if request.message else "[Image]"
+            if request.sender_name:
+                content = f"{request.sender_name}: {content}"
+        elif has_document:
+            # Store as [Document: filename] for database history
+            content = f"[Document: {request.document_filename}]"
+            if request.message:
+                content = f"{content} - {request.message}"
             if request.sender_name:
                 content = f"{request.sender_name}: {content}"
         else:
@@ -842,13 +858,84 @@ async def enqueue_chat(request: ChatRequest, db: Session = Depends(get_db)):
             job_data["image_mimetype"] = request.image_mimetype
             job_data["has_image"] = "true"
 
+        # Handle document (PDF) data if present
+        has_document = (
+            request.document_data is not None
+            and request.document_mimetype is not None
+            and request.document_filename is not None
+        )
+
+        if has_document:
+            # Only support PDFs for now
+            if request.document_mimetype != "application/pdf":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Only PDF documents are supported",
+                )
+
+            # Decode and save PDF file
+            doc_id = uuid.uuid4()
+            stored_filename = f"{doc_id}.pdf"
+            file_path = UPLOAD_DIR / stored_filename
+
+            try:
+                pdf_content = base64.b64decode(request.document_data)
+                file_size = len(pdf_content)
+
+                # Check file size limit
+                max_size_bytes = settings.kb_max_file_size_mb * 1024 * 1024
+                if file_size > max_size_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Document too large ({file_size / 1024 / 1024:.1f} MB). Maximum: {settings.kb_max_file_size_mb} MB",
+                    )
+
+                with open(file_path, "wb") as f:
+                    f.write(pdf_content)
+
+                logger.info(f"Saved conversation PDF to {file_path} ({file_size / 1024:.1f} KB)")
+
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"Error saving document: {str(e)}", exc_info=True)
+                raise HTTPException(status_code=500, detail="Failed to save document")
+
+            # Create database record with conversation scope
+            expires_at = datetime.utcnow() + timedelta(hours=settings.conversation_pdf_ttl_hours)
+            document = KnowledgeBaseDocument(
+                id=doc_id,
+                filename=stored_filename,
+                original_filename=request.document_filename,
+                file_size_bytes=file_size,
+                mime_type=request.document_mimetype,
+                status="pending",
+                whatsapp_jid=request.whatsapp_jid,
+                expires_at=expires_at,
+                is_conversation_scoped=True,
+                whatsapp_message_id=request.whatsapp_message_id,
+            )
+            db.add(document)
+            db.commit()
+            db.refresh(document)
+
+            logger.info(f"Created conversation-scoped document {doc_id} (expires: {expires_at})")
+
+            # Add document info to job data for processing
+            job_data["has_document"] = "true"
+            job_data["document_id"] = str(doc_id)
+            job_data["document_path"] = str(file_path)
+            job_data["document_filename"] = request.document_filename
+
         await add_message_to_stream(
             redis=redis_client,
             user_id=str(user.id),
             job_data=job_data,
         )
 
-        logger.info(f"Job {job_id} added to stream for user {user.id} (has_image={has_image})")
+        logger.info(
+            f"Job {job_id} added to stream for user {user.id} (has_image={has_image}, has_document={has_document})"
+        )
 
         return EnqueueResponse(job_id=job_id, status="queued", message="Job queued successfully")
 

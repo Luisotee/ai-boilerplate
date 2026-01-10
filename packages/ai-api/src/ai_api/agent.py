@@ -46,7 +46,7 @@ class AgentDeps:
 
 # Create Google provider and model with API key from settings
 google_provider = GoogleProvider(api_key=settings.gemini_api_key)
-google_model = GoogleModel("gemini-2.5-flash-lite", provider=google_provider)
+google_model = GoogleModel("gemini-2.5-flash", provider=google_provider)
 
 # Create the AI agent with dependencies
 agent = Agent(
@@ -225,10 +225,12 @@ async def search_knowledge_base(ctx: RunContext[AgentDeps], search_query: str) -
             return "Failed to generate search embedding. Please try again."
 
         # Call pure function for knowledge base search (uses env defaults)
+        # Pass whatsapp_jid to include conversation-scoped documents
         results = await search_kb_fn(
             db=deps.db,
             query_embedding=query_embedding,
             query_text=search_query,
+            whatsapp_jid=deps.whatsapp_jid,
             # Omit limit and similarity_threshold to use env defaults
         )
 

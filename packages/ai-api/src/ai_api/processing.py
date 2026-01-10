@@ -21,7 +21,11 @@ from .kb_models import KnowledgeBaseChunk, KnowledgeBaseDocument
 from .logger import logger
 
 
-async def process_pdf_document(document_id: str, file_path: str):
+async def process_pdf_document(
+    document_id: str,
+    file_path: str,
+    whatsapp_jid: str | None = None,
+):
     """
     Background task to process an uploaded PDF document.
 
@@ -37,6 +41,7 @@ async def process_pdf_document(document_id: str, file_path: str):
     Args:
         document_id: UUID of the document record
         file_path: Absolute path to the PDF file on disk
+        whatsapp_jid: Optional WhatsApp JID for conversation-scoped documents
     """
     db = SessionLocal()
     encoder = tiktoken.get_encoding("cl100k_base")  # Token counter

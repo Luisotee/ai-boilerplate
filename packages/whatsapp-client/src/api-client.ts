@@ -8,6 +8,12 @@ interface ImagePayload {
   mimetype: string;
 }
 
+interface DocumentPayload {
+  data: string; // base64 encoded
+  mimetype: string;
+  filename: string;
+}
+
 interface MessageOptions {
   conversationType: 'private' | 'group';
   senderJid?: string;
@@ -15,6 +21,7 @@ interface MessageOptions {
   saveOnly?: boolean;
   messageId?: string;
   image?: ImagePayload;
+  document?: DocumentPayload;
 }
 
 interface JobStatus {
@@ -45,7 +52,7 @@ export async function sendMessageToAI(
   message: string,
   options: MessageOptions
 ): Promise<string> {
-  const { conversationType, senderJid, senderName, saveOnly, messageId, image } = options;
+  const { conversationType, senderJid, senderName, saveOnly, messageId, image, document } = options;
 
   // Handle save-only endpoint separately
   if (saveOnly) {
@@ -73,7 +80,7 @@ export async function sendMessageToAI(
 
   // Step 1: Enqueue message
   logger.info(
-    { whatsappJid, conversationType, messageId, hasImage: !!image },
+    { whatsappJid, conversationType, messageId, hasImage: !!image, hasDocument: !!document },
     'Enqueuing message to AI API'
   );
 
@@ -90,6 +97,13 @@ export async function sendMessageToAI(
   if (image) {
     requestBody.image_data = image.data;
     requestBody.image_mimetype = image.mimetype;
+  }
+
+  // Add document data if present
+  if (document) {
+    requestBody.document_data = document.data;
+    requestBody.document_mimetype = document.mimetype;
+    requestBody.document_filename = document.filename;
   }
 
   const enqueueResponse = await fetch(`${config.aiApiUrl}/chat/enqueue`, {

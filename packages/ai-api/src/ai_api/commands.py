@@ -8,10 +8,13 @@ Commands are intercepted before reaching the AI agent.
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from sqlalchemy.orm import Session
 
+from .config import settings
 from .database import ConversationMessage, ConversationPreferences, get_or_create_preferences
+from .kb_models import KnowledgeBaseDocument
 from .logger import logger
 
 # Supported language codes
@@ -200,12 +203,13 @@ def _handle_stt_command(db: Session, prefs: ConversationPreferences, parts: list
         return "Unknown STT command. Use '/stt lang [code]' or '/stt lang auto'."
 
 
-def _handle_clean_command(db: Session, user_id: str, parts: list[str]) -> str:
-    """Handle /clean command to delete conversation history.
+def _handle_clean_command(db: Session, user_id: str, whatsapp_jid: str, parts: list[str]) -> str:
+    """Handle /clean command to delete conversation history and documents.
 
     Args:
         db: Database session
         user_id: User UUID string
+        whatsapp_jid: WhatsApp JID for the conversation
         parts: Command parts (e.g., ['/clean'], ['/clean', '7d'])
 
     Returns:
@@ -228,40 +232,75 @@ def _handle_clean_command(db: Session, user_id: str, parts: list[str]) -> str:
                 )
             duration_str = arg
 
-    # Build the query
-    query = db.query(ConversationMessage).filter(ConversationMessage.user_id == user_id)
+    # Calculate cutoff time if duration specified
+    cutoff = datetime.utcnow() - duration if duration else None
 
-    if duration:
-        cutoff = datetime.utcnow() - duration
-        query = query.filter(ConversationMessage.timestamp >= cutoff)
+    # Delete conversation messages
+    msg_query = db.query(ConversationMessage).filter(ConversationMessage.user_id == user_id)
+    if cutoff:
+        msg_query = msg_query.filter(ConversationMessage.timestamp >= cutoff)
 
-    # Count messages to delete
-    message_count = query.count()
+    message_count = msg_query.count()
+    msg_query.delete()
 
-    if message_count == 0:
-        if duration_str:
-            return f"No messages found from the last {duration_str}."
-        return "No messages found to delete."
+    # Delete conversation-scoped documents
+    upload_dir = Path(settings.kb_upload_dir)
+    doc_query = db.query(KnowledgeBaseDocument).filter(
+        KnowledgeBaseDocument.whatsapp_jid == whatsapp_jid,
+        KnowledgeBaseDocument.is_conversation_scoped == True,  # noqa: E712
+    )
+    if cutoff:
+        doc_query = doc_query.filter(KnowledgeBaseDocument.created_at >= cutoff)
 
-    # Delete messages
-    query.delete()
+    docs_to_delete = doc_query.all()
+    doc_count = len(docs_to_delete)
+
+    # Delete PDF files from disk
+    for doc in docs_to_delete:
+        file_path = upload_dir / doc.filename
+        if file_path.exists():
+            try:
+                file_path.unlink()
+                logger.debug(f"Deleted file: {file_path}")
+            except Exception as e:
+                logger.warning(f"Failed to delete file {file_path}: {e}")
+
+    # Delete documents from database (cascades to chunks)
+    for doc in docs_to_delete:
+        db.delete(doc)
+
     db.commit()
 
+    # Build response message
+    if message_count == 0 and doc_count == 0:
+        if duration_str:
+            return f"No messages or documents found from the last {duration_str}."
+        return "No messages or documents found to delete."
+
+    parts_deleted = []
+    if message_count > 0:
+        parts_deleted.append(f"{message_count} messages")
+    if doc_count > 0:
+        parts_deleted.append(f"{doc_count} documents")
+
+    deleted_str = " and ".join(parts_deleted)
+
     if duration_str:
-        logger.info(f"Cleaned {message_count} messages (last {duration_str}) for user {user_id}")
-        return f"Deleted {message_count} messages from the last {duration_str}."
+        logger.info(f"Cleaned {deleted_str} (last {duration_str}) for user {user_id}")
+        return f"Deleted {deleted_str} from the last {duration_str}."
     else:
-        logger.info(f"Cleaned all {message_count} messages for user {user_id}")
-        return f"Deleted all {message_count} messages. Conversation history cleared."
+        logger.info(f"Cleaned all {deleted_str} for user {user_id}")
+        return f"Deleted {deleted_str}. Conversation history cleared."
 
 
-def parse_and_execute(db: Session, user_id: str, message: str) -> CommandResult:
+def parse_and_execute(db: Session, user_id: str, whatsapp_jid: str, message: str) -> CommandResult:
     """
     Parse and execute a command message.
 
     Args:
         db: Database session
         user_id: User UUID string
+        whatsapp_jid: WhatsApp JID for the conversation
         message: Raw message text (may include leading @mentions in groups)
 
     Returns:
@@ -283,9 +322,9 @@ def parse_and_execute(db: Session, user_id: str, message: str) -> CommandResult:
     if command == "/help":
         return CommandResult(is_command=True, response_text=_get_help_text())
 
-    # Handle /clean (no preferences needed)
+    # Handle /clean (needs whatsapp_jid for document cleanup)
     if command == "/clean":
-        response = _handle_clean_command(db, user_id, parts)
+        response = _handle_clean_command(db, user_id, whatsapp_jid, parts)
         return CommandResult(is_command=True, response_text=response)
 
     # Get or create preferences for other commands

@@ -13,6 +13,7 @@ from ..config import settings
 from ..database import SessionLocal, get_conversation_history, save_message
 from ..embeddings import create_embedding_service
 from ..logger import logger
+from ..processing import process_pdf_document
 from ..queue.connection import get_redis_client
 from ..queue.utils import delete_job_image, get_job_image, save_job_chunk, set_job_metadata
 from ..whatsapp import WhatsAppClient, create_whatsapp_client
@@ -28,6 +29,10 @@ async def process_chat_job_direct(
     whatsapp_message_id: str | None = None,
     image_mimetype: str | None = None,
     has_image: bool = False,
+    has_document: bool = False,
+    document_id: str | None = None,
+    document_path: str | None = None,
+    document_filename: str | None = None,
 ) -> dict:
     """
     Process a chat message asynchronously without arq context.
@@ -51,6 +56,10 @@ async def process_chat_job_direct(
         whatsapp_message_id: WhatsApp message ID for reactions (optional)
         image_mimetype: Image MIME type if image is attached (optional)
         has_image: Whether this message has an attached image
+        has_document: Whether this message has an attached document (PDF)
+        document_id: UUID of the document in knowledge base (optional)
+        document_path: Path to the document file (optional)
+        document_filename: Original filename of the document (optional)
 
     Returns:
         Dict with processing result including success status, job_id, chunk count
@@ -63,6 +72,7 @@ async def process_chat_job_direct(
     logger.info(f"[Job {job_id}] Conversation type: {conversation_type}")
     logger.info(f"[Job {job_id}] WhatsApp message ID: {whatsapp_message_id}")
     logger.info(f"[Job {job_id}] Has image: {has_image}")
+    logger.info(f"[Job {job_id}] Has document: {has_document}")
 
     # Get Redis client
     redis: Redis = await get_redis_client()
@@ -93,6 +103,77 @@ async def process_chat_job_direct(
             base_url=settings.whatsapp_client_url,
         )
         logger.info(f"[Job {job_id}] WhatsApp client initialized")
+
+        # Step 2.6: Process document if present
+        if has_document and document_id and document_path:
+            logger.info(f"[Job {job_id}] Processing document {document_id}")
+
+            # Send processing reaction
+            if whatsapp_message_id:
+                try:
+                    await whatsapp_client.send_reaction(whatsapp_jid, whatsapp_message_id, "⏳")
+                    logger.info(f"[Job {job_id}] Sent processing reaction ⏳")
+                except Exception as e:
+                    logger.warning(f"[Job {job_id}] Failed to send processing reaction: {e}")
+
+            # Process the PDF document
+            try:
+                await process_pdf_document(
+                    document_id=document_id,
+                    file_path=document_path,
+                    whatsapp_jid=whatsapp_jid,
+                )
+                logger.info(f"[Job {job_id}] Document processing completed")
+
+                # Send success reaction
+                if whatsapp_message_id:
+                    try:
+                        await whatsapp_client.send_reaction(whatsapp_jid, whatsapp_message_id, "✅")
+                        logger.info(f"[Job {job_id}] Sent success reaction ✅")
+                    except Exception as e:
+                        logger.warning(f"[Job {job_id}] Failed to send success reaction: {e}")
+
+            except Exception as e:
+                logger.error(f"[Job {job_id}] Document processing failed: {e}")
+
+                # Send failure reaction
+                if whatsapp_message_id:
+                    try:
+                        await whatsapp_client.send_reaction(whatsapp_jid, whatsapp_message_id, "❌")
+                        logger.info(f"[Job {job_id}] Sent failure reaction ❌")
+                    except Exception as reaction_error:
+                        logger.warning(
+                            f"[Job {job_id}] Failed to send failure reaction: {reaction_error}"
+                        )
+
+                # Continue to send error response to user
+                full_response = f"Sorry, I couldn't process your document '{document_filename}'. Please try uploading it again."
+
+                # Save response and return early
+                await save_job_chunk(redis, job_id, 0, full_response)
+                save_message(db, whatsapp_jid, "assistant", full_response, conversation_type)
+                await set_job_metadata(
+                    redis,
+                    job_id,
+                    {
+                        "user_id": user_id,
+                        "whatsapp_jid": whatsapp_jid,
+                        "message": message,
+                        "conversation_type": conversation_type,
+                        "total_chunks": 1,
+                        "user_message_id": user_message_id,
+                        "error": str(e),
+                    },
+                )
+
+                return {
+                    "success": False,
+                    "job_id": job_id,
+                    "error": str(e),
+                }
+
+            # Update message to indicate document was processed
+            message = f"I have uploaded a document called '{document_filename}'. Please analyze it and let me know what it contains."
 
         # Step 3: Prepare agent dependencies
         agent_deps = AgentDeps(

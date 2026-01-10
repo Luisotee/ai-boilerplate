@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import JSON, Column, DateTime, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import JSON, Boolean, Column, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -41,6 +41,12 @@ class KnowledgeBaseDocument(Base):
     chunk_count = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
+    # Conversation-scoped document fields
+    whatsapp_jid = Column(String, nullable=True)  # Conversation scope (null = global)
+    expires_at = Column(DateTime, nullable=True)  # TTL expiration for conversation docs
+    is_conversation_scoped = Column(Boolean, default=False, nullable=False)
+    whatsapp_message_id = Column(String, nullable=True)  # For sending reactions
+
     # Relationship
     chunks = relationship(
         "KnowledgeBaseChunk", back_populates="document", cascade="all, delete-orphan"
@@ -51,6 +57,9 @@ class KnowledgeBaseDocument(Base):
         Index("idx_kb_docs_status", "status"),
         Index("idx_kb_docs_upload_date", "upload_date"),
         Index("idx_kb_docs_filename", "filename"),
+        Index("idx_kb_docs_whatsapp_jid", "whatsapp_jid"),
+        Index("idx_kb_docs_expires_at", "expires_at"),
+        Index("idx_kb_docs_conversation_scoped", "is_conversation_scoped"),
     )
 
     def __repr__(self):

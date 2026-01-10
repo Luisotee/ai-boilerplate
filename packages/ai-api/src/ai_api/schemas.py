@@ -14,6 +14,11 @@ class ChatRequest(BaseModel):
     whatsapp_message_id: str | None = Field(None, description="WhatsApp message ID for reactions")
     image_data: str | None = Field(None, description="Base64-encoded image data for vision")
     image_mimetype: str | None = Field(None, description="Image MIME type (e.g., image/jpeg)")
+    document_data: str | None = Field(None, description="Base64-encoded PDF document data")
+    document_mimetype: str | None = Field(
+        None, description="Document MIME type (e.g., application/pdf)"
+    )
+    document_filename: str | None = Field(None, description="Original document filename")
 
 
 class ChatResponse(BaseModel):

@@ -104,6 +104,18 @@ async def process_single_message(user_id: str, message_id: str, data: dict):
     if b"image_mimetype" in data:
         image_mimetype = data[b"image_mimetype"].decode()
 
+    # Extract optional document fields
+    has_document = data.get(b"has_document", b"").decode() == "true"
+    document_id = None
+    document_path = None
+    document_filename = None
+    if b"document_id" in data:
+        document_id = data[b"document_id"].decode()
+    if b"document_path" in data:
+        document_path = data[b"document_path"].decode()
+    if b"document_filename" in data:
+        document_filename = data[b"document_filename"].decode()
+
     # Call core processor function
     await process_chat_job_direct(
         user_id=data[b"user_id"].decode(),
@@ -115,6 +127,10 @@ async def process_single_message(user_id: str, message_id: str, data: dict):
         whatsapp_message_id=whatsapp_message_id,
         image_mimetype=image_mimetype,
         has_image=has_image,
+        has_document=has_document,
+        document_id=document_id,
+        document_path=document_path,
+        document_filename=document_filename,
     )
 
 

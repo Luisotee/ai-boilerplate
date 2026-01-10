@@ -18,6 +18,7 @@ async def search_knowledge_base(
     query_text: str = None,
     limit: int = None,
     similarity_threshold: float = None,
+    whatsapp_jid: str = None,
     **kwargs,
 ) -> list[dict]:
     """
@@ -29,6 +30,7 @@ async def search_knowledge_base(
         query_text: Optional query text (for logging only)
         limit: Maximum results to return (default from KB_SEARCH_LIMIT env)
         similarity_threshold: Minimum similarity score (default from KB_SIMILARITY_THRESHOLD env)
+        whatsapp_jid: Optional WhatsApp JID to include conversation-scoped documents
         **kwargs: Additional parameters
 
     Returns:
@@ -54,6 +56,11 @@ async def search_knowledge_base(
     # JOIN with documents to get metadata and filter by status
     # pgvector uses <=> for cosine distance (lower = more similar)
     # We convert to similarity score: 1 - distance
+    #
+    # Conversation scope filtering:
+    # - Global documents (whatsapp_jid IS NULL) are always included
+    # - If whatsapp_jid is provided, also include documents scoped to that conversation
+    # - Exclude expired documents (expires_at < NOW())
     query_sql = text("""
         SELECT
             c.id,
@@ -69,12 +76,15 @@ async def search_knowledge_base(
             d.original_filename,
             d.upload_date,
             d.doc_metadata as document_metadata,
+            d.is_conversation_scoped,
             (1 - (c.embedding <=> CAST(:embedding AS vector))) AS similarity
         FROM knowledge_base_chunks c
         JOIN knowledge_base_documents d ON c.document_id = d.id
         WHERE d.status = 'completed'
           AND c.embedding IS NOT NULL
           AND (1 - (c.embedding <=> CAST(:embedding AS vector))) >= :threshold
+          AND (d.whatsapp_jid IS NULL OR d.whatsapp_jid = :whatsapp_jid)
+          AND (d.expires_at IS NULL OR d.expires_at > NOW())
         ORDER BY similarity DESC
         LIMIT :limit
     """)
@@ -85,6 +95,7 @@ async def search_knowledge_base(
             "embedding": query_embedding,
             "threshold": similarity_threshold,
             "limit": limit,
+            "whatsapp_jid": whatsapp_jid,
         },
     )
     rows = result.fetchall()

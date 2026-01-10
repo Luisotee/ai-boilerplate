@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     kb_similarity_threshold: float = 0.7
     kb_max_chunk_tokens: int = 512
 
+    # Conversation-scoped documents
+    conversation_pdf_ttl_hours: int = 24
+
     # Speech-to-Text
     stt_model: str = "whisper-large-v3"
     stt_max_file_size_mb: int = 25

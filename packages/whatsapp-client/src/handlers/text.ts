@@ -10,14 +10,21 @@ interface ImageData {
   mimetype: string;
 }
 
+interface DocumentData {
+  buffer: Buffer;
+  mimetype: string;
+  filename: string;
+}
+
 /**
- * Handle incoming text messages (with optional image)
+ * Handle incoming text messages (with optional image or document)
  */
 export async function handleTextMessage(
   sock: WASocket,
   msg: WAMessage,
   text: string,
-  image?: ImageData
+  image?: ImageData,
+  document?: DocumentData
 ): Promise<void> {
   const whatsappJid = stripDeviceSuffix(msg.key.remoteJid!);
   const conversationType = isGroupChat(whatsappJid) ? 'group' : 'private';
@@ -30,7 +37,10 @@ export async function handleTextMessage(
     return;
   }
 
-  logger.info({ from: whatsappJid, text, conversationType, hasImage: !!image }, 'Received message');
+  logger.info(
+    { from: whatsappJid, text, conversationType, hasImage: !!image, hasDocument: !!document },
+    'Received message'
+  );
 
   // Send typing indicator
   await sock.sendPresenceUpdate('composing', whatsappJid);
@@ -45,6 +55,13 @@ export async function handleTextMessage(
         ? {
             data: image.buffer.toString('base64'),
             mimetype: image.mimetype,
+          }
+        : undefined,
+      document: document
+        ? {
+            data: document.buffer.toString('base64'),
+            mimetype: document.mimetype,
+            filename: document.filename,
           }
         : undefined,
     });
