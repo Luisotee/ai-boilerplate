@@ -80,6 +80,9 @@ class Settings(BaseSettings):
     whatsapp_client_url: str = "http://localhost:3001"
     whatsapp_client_timeout: int = 30
 
+    # External APIs
+    jina_api_key: str | None = None  # Optional, for higher rate limits (500 vs 20 RPM)
+
     model_config = SettingsConfigDict(
         env_file=get_env_files(),
         env_file_encoding="utf-8",
