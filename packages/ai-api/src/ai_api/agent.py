@@ -45,7 +45,7 @@ class AgentDeps:
 
 # Create Google provider and model with API key from settings
 google_provider = GoogleProvider(api_key=settings.gemini_api_key)
-google_model = GoogleModel("gemini-2.5-flash", provider=google_provider)
+google_model = GoogleModel("gemini-2.5-flash-lite", provider=google_provider)
 
 # Create the AI agent with dependencies
 agent = Agent(
@@ -91,7 +91,9 @@ agent = Agent(
 
 
 @agent.tool
-async def search_conversation_history(ctx: RunContext[AgentDeps], search_query: str) -> str:
+async def search_conversation_history(
+    ctx: RunContext[AgentDeps], search_query: str
+) -> str:
     """
     Search through conversation history for messages related to a specific topic.
 
@@ -148,7 +150,9 @@ async def search_conversation_history(ctx: RunContext[AgentDeps], search_query: 
                 "Either we haven't discussed this topic, or messages are too old/dissimilar."
             )
 
-        logger.info(f"Found {len(messages)} relevant past messages for query: '{search_query}'")
+        logger.info(
+            f"Found {len(messages)} relevant past messages for query: '{search_query}'"
+        )
 
         # Format results with context using pure function
         formatted_results = format_conversation_results(messages)
@@ -156,15 +160,21 @@ async def search_conversation_history(ctx: RunContext[AgentDeps], search_query: 
         # Log detailed results for debugging
         logger.info(f"Conversation RAG returned {len(messages)} results:")
         for i, msg in enumerate(messages, 1):
-            logger.info(f"  [{i}] Similarity: {msg.get('similarity_score', 'N/A'):.3f}")
+            logger.info(
+                f"  [{i}] Similarity: {msg.get('similarity_score', 'N/A'):.3f}"
+            )
             logger.info(f"      Full content: {msg['matched_message'].content}")
 
-        logger.info(f"Formatted results length: {len(formatted_results)} characters")
+        logger.info(
+            f"Formatted results length: {len(formatted_results)} characters"
+        )
         logger.info(f"Full formatted results:\n{formatted_results}")
 
         logger.info("=" * 80)
         logger.info("✅ TOOL RETURNING: search_conversation_history")
-        logger.info(f"   Returning {len(formatted_results)} characters to agent")
+        logger.info(
+            f"   Returning {len(formatted_results)} characters to agent"
+        )
         logger.info("=" * 80)
 
         return formatted_results
@@ -180,7 +190,9 @@ async def search_conversation_history(ctx: RunContext[AgentDeps], search_query: 
 
 
 @agent.tool
-async def search_knowledge_base(ctx: RunContext[AgentDeps], search_query: str) -> str:
+async def search_knowledge_base(
+    ctx: RunContext[AgentDeps], search_query: str
+) -> str:
     """
     Search the knowledge base for information from uploaded documents.
 
@@ -238,7 +250,9 @@ async def search_knowledge_base(ctx: RunContext[AgentDeps], search_query: str) -
                 "This topic may not be covered in uploaded documents."
             )
 
-        logger.info(f"Found {len(results)} relevant passages from knowledge base")
+        logger.info(
+            f"Found {len(results)} relevant passages from knowledge base"
+        )
 
         # Format results with citations using pure function
         formatted_results = format_knowledge_base_results(results)
@@ -255,14 +269,22 @@ async def search_knowledge_base(ctx: RunContext[AgentDeps], search_query: str) -
                 f"Page: {chunk.get('page_number', 'N/A')} | "
                 f"Tokens: {chunk.get('token_count', 'N/A')}"
             )
-            logger.info(f"      Raw content (before cleaning):\n{chunk['content']}")
+            logger.info(
+                f"      Raw content (before cleaning):\n{chunk['content']}"
+            )
 
-        logger.info(f"Formatted results length: {len(formatted_results)} characters")
-        logger.info(f"Full formatted results (after cleaning):\n{formatted_results}")
+        logger.info(
+            f"Formatted results length: {len(formatted_results)} characters"
+        )
+        logger.info(
+            f"Full formatted results (after cleaning):\n{formatted_results}"
+        )
 
         logger.info("=" * 80)
         logger.info("✅ TOOL RETURNING: search_knowledge_base")
-        logger.info(f"   Returning {len(formatted_results)} characters to agent")
+        logger.info(
+            f"   Returning {len(formatted_results)} characters to agent"
+        )
         logger.info("=" * 80)
 
         return formatted_results
@@ -496,7 +518,9 @@ async def send_whatsapp_message(ctx: RunContext[AgentDeps], text: str) -> str:
         return f"Failed to send message: {str(e)}"
 
 
-async def get_ai_response(user_message: str, message_history=None, agent_deps: AgentDeps = None):
+async def get_ai_response(
+    user_message: str, message_history=None, agent_deps: AgentDeps = None
+):
     """
     Stream AI response token by token for a user message with optional history
 
@@ -511,10 +535,14 @@ async def get_ai_response(user_message: str, message_history=None, agent_deps: A
     logger.info("=" * 80)
     logger.info("🤖 AGENT STARTING")
     logger.info(f"   User message: {user_message}")
-    logger.info(f"   History messages: {len(message_history) if message_history else 0}")
+    logger.info(
+        f"   History messages: {len(message_history) if message_history else 0}"
+    )
     logger.info(f"   Has dependencies: {agent_deps is not None}")
     if agent_deps:
-        logger.info(f"   - Embedding service: {agent_deps.embedding_service is not None}")
+        logger.info(
+            f"   - Embedding service: {agent_deps.embedding_service is not None}"
+        )
     logger.info("=" * 80)
 
     # Track full response for logging
@@ -556,8 +584,12 @@ def format_message_history(db_messages):
     formatted = []
     for msg in db_messages:
         if msg.role == "user":
-            formatted.append(ModelRequest(parts=[UserPromptPart(content=msg.content)]))
+            formatted.append(
+                ModelRequest(parts=[UserPromptPart(content=msg.content)])
+            )
         else:
-            formatted.append(ModelResponse(parts=[TextPart(content=msg.content)]))
+            formatted.append(
+                ModelResponse(parts=[TextPart(content=msg.content)])
+            )
 
     return formatted
