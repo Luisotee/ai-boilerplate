@@ -5,13 +5,19 @@ import { stripDeviceSuffix, isGroupChat } from '../utils/jid.js';
 import { getSenderName, shouldRespondInGroup } from '../utils/message.js';
 import { sendFailureReaction } from '../utils/reactions.js';
 
+interface ImageData {
+  buffer: Buffer;
+  mimetype: string;
+}
+
 /**
- * Handle incoming text messages
+ * Handle incoming text messages (with optional image)
  */
 export async function handleTextMessage(
   sock: WASocket,
   msg: WAMessage,
-  text: string
+  text: string,
+  image?: ImageData
 ): Promise<void> {
   const whatsappJid = stripDeviceSuffix(msg.key.remoteJid!);
   const conversationType = isGroupChat(whatsappJid) ? 'group' : 'private';
@@ -24,7 +30,7 @@ export async function handleTextMessage(
     return;
   }
 
-  logger.info({ from: whatsappJid, text, conversationType }, 'Received message');
+  logger.info({ from: whatsappJid, text, conversationType, hasImage: !!image }, 'Received message');
 
   // Send typing indicator
   await sock.sendPresenceUpdate('composing', whatsappJid);
@@ -35,6 +41,12 @@ export async function handleTextMessage(
       senderJid: msg.key.participant,
       senderName: getSenderName(msg),
       messageId: msg.key.id,
+      image: image
+        ? {
+            data: image.buffer.toString('base64'),
+            mimetype: image.mimetype,
+          }
+        : undefined,
     });
 
     // Send text response first

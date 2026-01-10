@@ -3,12 +3,18 @@ import { logger } from './logger.js';
 
 const POLL_INTERVAL_MS = 500;
 
+interface ImagePayload {
+  data: string; // base64 encoded
+  mimetype: string;
+}
+
 interface MessageOptions {
   conversationType: 'private' | 'group';
   senderJid?: string;
   senderName?: string;
   saveOnly?: boolean;
   messageId?: string;
+  image?: ImagePayload;
 }
 
 interface JobStatus {
@@ -39,7 +45,7 @@ export async function sendMessageToAI(
   message: string,
   options: MessageOptions
 ): Promise<string> {
-  const { conversationType, senderJid, senderName, saveOnly, messageId } = options;
+  const { conversationType, senderJid, senderName, saveOnly, messageId, image } = options;
 
   // Handle save-only endpoint separately
   if (saveOnly) {
@@ -66,19 +72,30 @@ export async function sendMessageToAI(
   }
 
   // Step 1: Enqueue message
-  logger.info({ whatsappJid, conversationType, messageId }, 'Enqueuing message to AI API');
+  logger.info(
+    { whatsappJid, conversationType, messageId, hasImage: !!image },
+    'Enqueuing message to AI API'
+  );
+
+  const requestBody: Record<string, unknown> = {
+    whatsapp_jid: whatsappJid,
+    message,
+    sender_jid: senderJid,
+    sender_name: senderName,
+    conversation_type: conversationType,
+    whatsapp_message_id: messageId,
+  };
+
+  // Add image data if present
+  if (image) {
+    requestBody.image_data = image.data;
+    requestBody.image_mimetype = image.mimetype;
+  }
 
   const enqueueResponse = await fetch(`${config.aiApiUrl}/chat/enqueue`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      whatsapp_jid: whatsappJid,
-      message,
-      sender_jid: senderJid,
-      sender_name: senderName,
-      conversation_type: conversationType,
-      whatsapp_message_id: messageId,
-    }),
+    body: JSON.stringify(requestBody),
   });
 
   if (!enqueueResponse.ok) {

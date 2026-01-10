@@ -1,7 +1,8 @@
+import base64
 from dataclasses import dataclass
 
 import httpx
-from pydantic_ai import Agent, RunContext
+from pydantic_ai import Agent, BinaryContent, RunContext
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
 from sqlalchemy.orm import Session
@@ -496,7 +497,13 @@ async def send_whatsapp_message(ctx: RunContext[AgentDeps], text: str) -> str:
         return f"Failed to send message: {str(e)}"
 
 
-async def get_ai_response(user_message: str, message_history=None, agent_deps: AgentDeps = None):
+async def get_ai_response(
+    user_message: str,
+    message_history=None,
+    agent_deps: AgentDeps = None,
+    image_data: str | None = None,
+    image_mimetype: str | None = None,
+):
     """
     Stream AI response token by token for a user message with optional history
 
@@ -504,26 +511,41 @@ async def get_ai_response(user_message: str, message_history=None, agent_deps: A
         user_message: The user's message
         message_history: Optional list of previous messages
         agent_deps: Optional dependencies for agent tools (enables semantic search)
+        image_data: Optional base64-encoded image data for vision
+        image_mimetype: Optional image MIME type (e.g., 'image/jpeg')
 
     Yields:
         str: Text chunks as they arrive from Gemini
     """
+    has_image = image_data is not None and image_mimetype is not None
+
     logger.info("=" * 80)
     logger.info("🤖 AGENT STARTING")
     logger.info(f"   User message: {user_message}")
     logger.info(f"   History messages: {len(message_history) if message_history else 0}")
+    logger.info(f"   Has image: {has_image}")
     logger.info(f"   Has dependencies: {agent_deps is not None}")
     if agent_deps:
         logger.info(f"   - Embedding service: {agent_deps.embedding_service is not None}")
     logger.info("=" * 80)
 
+    # Construct the prompt - either text only or text + image
+    if has_image:
+        # Decode base64 image and create BinaryContent
+        image_bytes = base64.b64decode(image_data)
+        prompt = [
+            user_message,
+            BinaryContent(data=image_bytes, media_type=image_mimetype),
+        ]
+        logger.info(f"   Image size: {len(image_bytes)} bytes, type: {image_mimetype}")
+    else:
+        prompt = user_message
+
     # Track full response for logging
     full_response = ""
 
     # Use async context manager to enter streaming context
-    async with agent.run_stream(
-        user_message, message_history=message_history, deps=agent_deps
-    ) as result:
+    async with agent.run_stream(prompt, message_history=message_history, deps=agent_deps) as result:
         # Call .stream_text(delta=True) to get incremental deltas (NOT cumulative text)
         async for text_chunk in result.stream_text(delta=True):
             full_response += text_chunk

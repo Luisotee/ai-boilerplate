@@ -98,6 +98,12 @@ async def process_single_message(user_id: str, message_id: str, data: dict):
     if b"whatsapp_message_id" in data:
         whatsapp_message_id = data[b"whatsapp_message_id"].decode()
 
+    # Extract optional image fields
+    has_image = data.get(b"has_image", b"").decode() == "true"
+    image_mimetype = None
+    if b"image_mimetype" in data:
+        image_mimetype = data[b"image_mimetype"].decode()
+
     # Call core processor function
     await process_chat_job_direct(
         user_id=data[b"user_id"].decode(),
@@ -107,6 +113,8 @@ async def process_single_message(user_id: str, message_id: str, data: dict):
         user_message_id=data[b"user_message_id"].decode(),
         job_id=job_id,
         whatsapp_message_id=whatsapp_message_id,
+        image_mimetype=image_mimetype,
+        has_image=has_image,
     )
 
 

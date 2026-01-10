@@ -33,7 +33,7 @@ from .logger import logger
 from .processing import process_pdf_document
 from .queue.connection import close_arq_redis, get_arq_redis, get_redis_client
 from .queue.schemas import ChunkData, EnqueueResponse, JobStatusResponse
-from .queue.utils import get_job_chunks, get_job_metadata
+from .queue.utils import get_job_chunks, get_job_metadata, save_job_image
 from .schemas import (
     BatchUploadResponse,
     ChatRequest,
@@ -763,7 +763,10 @@ async def enqueue_chat(request: ChatRequest, db: Session = Depends(get_db)):
     - Poll `/chat/job/{job_id}` for status and accumulated chunks
     - Or stream from `/chat/stream/{job_id}` via SSE
     """
-    logger.info(f"Received request from {request.whatsapp_jid}: {request.message[:50]}...")
+    has_image = request.image_data is not None and request.image_mimetype is not None
+    logger.info(
+        f"Received request from {request.whatsapp_jid}: {request.message[:50]}... (has_image={has_image})"
+    )
 
     # Check for commands first (e.g., /settings, /tts on, /help)
     if is_command(request.message):
@@ -774,10 +777,19 @@ async def enqueue_chat(request: ChatRequest, db: Session = Depends(get_db)):
             return CommandResponse(is_command=True, response=result.response_text)
 
     try:
-        # Format message with sender name if provided (group message)
-        content = (
-            f"{request.sender_name}: {request.message}" if request.sender_name else request.message
-        )
+        # For image messages, store with [Image] marker for history context
+        if has_image:
+            # Store as [Image: caption] or [Image] for database history
+            content = f"[Image: {request.message}]" if request.message else "[Image]"
+            if request.sender_name:
+                content = f"{request.sender_name}: {content}"
+        else:
+            # Format message with sender name if provided (group message)
+            content = (
+                f"{request.sender_name}: {request.message}"
+                if request.sender_name
+                else request.message
+            )
 
         # Get or create user
         user = get_or_create_user(db, request.whatsapp_jid, request.conversation_type)
@@ -816,12 +828,19 @@ async def enqueue_chat(request: ChatRequest, db: Session = Depends(get_db)):
             "job_id": job_id,
             "user_id": str(user.id),
             "whatsapp_jid": request.whatsapp_jid,
-            "message": content,
+            "message": request.message,  # Original message/caption for AI processing
             "conversation_type": request.conversation_type,
             "user_message_id": str(user_msg.id),
         }
         if request.whatsapp_message_id:
             job_data["whatsapp_message_id"] = request.whatsapp_message_id
+
+        # Handle image data if present
+        if has_image:
+            # Store image in Redis separately (to avoid large stream messages)
+            await save_job_image(redis_client, job_id, request.image_data)
+            job_data["image_mimetype"] = request.image_mimetype
+            job_data["has_image"] = "true"
 
         await add_message_to_stream(
             redis=redis_client,
@@ -829,7 +848,7 @@ async def enqueue_chat(request: ChatRequest, db: Session = Depends(get_db)):
             job_data=job_data,
         )
 
-        logger.info(f"Job {job_id} added to stream for user {user.id}")
+        logger.info(f"Job {job_id} added to stream for user {user.id} (has_image={has_image})")
 
         return EnqueueResponse(job_id=job_id, status="queued", message="Job queued successfully")
 

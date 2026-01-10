@@ -14,7 +14,7 @@ from ..database import SessionLocal, get_conversation_history, save_message
 from ..embeddings import create_embedding_service
 from ..logger import logger
 from ..queue.connection import get_redis_client
-from ..queue.utils import save_job_chunk, set_job_metadata
+from ..queue.utils import delete_job_image, get_job_image, save_job_chunk, set_job_metadata
 from ..whatsapp import WhatsAppClient, create_whatsapp_client
 
 
@@ -26,6 +26,8 @@ async def process_chat_job_direct(
     user_message_id: str,
     job_id: str,
     whatsapp_message_id: str | None = None,
+    image_mimetype: str | None = None,
+    has_image: bool = False,
 ) -> dict:
     """
     Process a chat message asynchronously without arq context.
@@ -33,7 +35,7 @@ async def process_chat_job_direct(
     This function:
     1. Retrieves conversation history from PostgreSQL
     2. Initializes embedding service and RAG instances
-    3. Streams tokens from Pydantic AI agent
+    3. Streams tokens from Pydantic AI agent (with optional image for vision)
     4. Saves each token chunk to Redis for real-time client polling
     5. Generates embedding for complete response
     6. Saves final assistant message to PostgreSQL
@@ -47,6 +49,8 @@ async def process_chat_job_direct(
         user_message_id: UUID of saved user message in PostgreSQL
         job_id: Unique job identifier
         whatsapp_message_id: WhatsApp message ID for reactions (optional)
+        image_mimetype: Image MIME type if image is attached (optional)
+        has_image: Whether this message has an attached image
 
     Returns:
         Dict with processing result including success status, job_id, chunk count
@@ -58,6 +62,7 @@ async def process_chat_job_direct(
     logger.info(f"[Job {job_id}] WhatsApp JID: {whatsapp_jid}")
     logger.info(f"[Job {job_id}] Conversation type: {conversation_type}")
     logger.info(f"[Job {job_id}] WhatsApp message ID: {whatsapp_message_id}")
+    logger.info(f"[Job {job_id}] Has image: {has_image}")
 
     # Get Redis client
     redis: Redis = await get_redis_client()
@@ -101,11 +106,30 @@ async def process_chat_job_direct(
             current_message_id=whatsapp_message_id,
         )
 
-        # Step 4: Get AI response
+        # Step 4: Get AI response (with optional image for vision)
         logger.info(f"[Job {job_id}] Getting AI response...")
 
-        async for token in get_ai_response(message, message_history, agent_deps=agent_deps):
+        # Retrieve image data if present
+        image_data = None
+        if has_image:
+            image_data = await get_job_image(redis, job_id)
+            if image_data:
+                logger.info(f"[Job {job_id}] Retrieved image data for vision processing")
+            else:
+                logger.warning(f"[Job {job_id}] Image flag set but no image data found in Redis")
+
+        async for token in get_ai_response(
+            message,
+            message_history,
+            agent_deps=agent_deps,
+            image_data=image_data,
+            image_mimetype=image_mimetype,
+        ):
             full_response += token
+
+        # Clean up image data from Redis after processing
+        if has_image:
+            await delete_job_image(redis, job_id)
 
         # Save complete response as single chunk
         await save_job_chunk(redis, job_id, 0, full_response)

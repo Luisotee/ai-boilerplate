@@ -12,6 +12,8 @@ class ChatRequest(BaseModel):
     sender_jid: str | None = Field(None, description="Sender JID in group chats")
     sender_name: str | None = Field(None, description="Sender name in group chats")
     whatsapp_message_id: str | None = Field(None, description="WhatsApp message ID for reactions")
+    image_data: str | None = Field(None, description="Base64-encoded image data for vision")
+    image_mimetype: str | None = Field(None, description="Image MIME type (e.g., image/jpeg)")
 
 
 class ChatResponse(BaseModel):

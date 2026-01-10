@@ -131,7 +131,7 @@ async def get_job_metadata(redis: Redis, job_id: str) -> dict[str, Any] | None:
 
 async def delete_job_data(redis: Redis, job_id: str) -> None:
     """
-    Delete all job data from Redis (chunks + metadata).
+    Delete all job data from Redis (chunks + metadata + image).
 
     Useful for manual cleanup or testing.
 
@@ -142,6 +142,59 @@ async def delete_job_data(redis: Redis, job_id: str) -> None:
     chunk_key = f"job:chunks:{job_id}"
     meta_key = f"job:meta:{job_id}"
     result_key = f"job:result:{job_id}"
+    image_key = f"job:image:{job_id}"
 
-    await redis.delete(chunk_key, meta_key, result_key)
+    await redis.delete(chunk_key, meta_key, result_key, image_key)
     logger.info(f"Deleted all data for job {job_id}")
+
+
+async def save_job_image(redis: Redis, job_id: str, image_data: str) -> None:
+    """
+    Store image data (base64) in Redis with TTL.
+
+    Args:
+        redis: Redis client instance
+        job_id: Unique job identifier
+        image_data: Base64-encoded image data
+    """
+    image_key = f"job:image:{job_id}"
+
+    await redis.set(
+        image_key,
+        image_data,
+        ex=settings.queue_chunk_ttl,  # Same TTL as chunks
+    )
+    logger.info(f"Stored image for job {job_id} ({len(image_data)} chars base64)")
+
+
+async def get_job_image(redis: Redis, job_id: str) -> str | None:
+    """
+    Retrieve image data from Redis.
+
+    Args:
+        redis: Redis client instance
+        job_id: Unique job identifier
+
+    Returns:
+        Base64-encoded image data or None if not found
+    """
+    image_key = f"job:image:{job_id}"
+
+    data = await redis.get(image_key)
+    if data:
+        logger.info(f"Retrieved image for job {job_id}")
+        return data if isinstance(data, str) else data.decode("utf-8")
+    return None
+
+
+async def delete_job_image(redis: Redis, job_id: str) -> None:
+    """
+    Delete image data from Redis.
+
+    Args:
+        redis: Redis client instance
+        job_id: Unique job identifier
+    """
+    image_key = f"job:image:{job_id}"
+    await redis.delete(image_key)
+    logger.debug(f"Deleted image for job {job_id}")

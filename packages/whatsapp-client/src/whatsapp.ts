@@ -9,7 +9,10 @@ import { logger } from './logger.js';
 import { setBaileysSocket } from './services/baileys.js';
 import { handleTextMessage } from './handlers/text.js';
 import { transcribeAudioMessage } from './handlers/audio.js';
+import { extractImageData } from './handlers/image.js';
 import { sendFailureReaction } from './utils/reactions.js';
+
+const DEFAULT_IMAGE_PROMPT = 'Please describe and analyze this image';
 
 export async function initializeWhatsApp(): Promise<void> {
   const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
@@ -73,6 +76,24 @@ export async function initializeWhatsApp(): Promise<void> {
           await sendFailureReaction(sock, msg);
           continue;
         }
+      }
+
+      // Handle image messages
+      if (normalizedMessage?.imageMessage) {
+        const imageData = await extractImageData(sock, msg);
+        if (!imageData) {
+          await sendFailureReaction(sock, msg);
+          continue;
+        }
+
+        // Use caption if present, otherwise use default prompt
+        const prompt = imageData.caption || DEFAULT_IMAGE_PROMPT;
+
+        await handleTextMessage(sock, msg, prompt, {
+          buffer: imageData.buffer,
+          mimetype: imageData.mimetype,
+        });
+        continue;
       }
 
       if (text) {
