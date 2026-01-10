@@ -19,15 +19,18 @@ dependencies = [
     "litellm>=1.80.7",
     "numpy>=2.3.5",
     "pgvector>=0.3.6",
+    "pint>=0.25.2",
     "psycopg2-binary>=2.9.11",
     "pydantic-ai>=1.25.1",
     "pydantic-settings>=2.12.0",
     "pydub>=0.25.1",
     "python-dotenv>=1.2.1",
     "redis[hiredis]>=5.0.0",
+    "simpleeval>=1.0.3",
     "sqlalchemy>=2.0.44",
     "tiktoken>=0.8.0",
     "uvicorn>=0.38.0",
+    "wikipedia-api>=0.8.1",
 ]
 
 [build-system]
