@@ -76,6 +76,7 @@ class Settings(BaseSettings):
 
     # Conversation-scoped documents
     conversation_pdf_ttl_hours: int = 24
+    cleanup_interval_minutes: int = 15
 
     # Speech-to-Text
     stt_model: str = "whisper-large-v3"

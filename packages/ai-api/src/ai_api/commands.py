@@ -7,7 +7,7 @@ Commands are intercepted before reaching the AI agent.
 
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -233,7 +233,7 @@ def _handle_clean_command(db: Session, user_id: str, whatsapp_jid: str, parts: l
             duration_str = arg
 
     # Calculate cutoff time if duration specified
-    cutoff = datetime.utcnow() - duration if duration else None
+    cutoff = datetime.now(UTC) - duration if duration else None
 
     # Delete conversation messages
     msg_query = db.query(ConversationMessage).filter(ConversationMessage.user_id == user_id)

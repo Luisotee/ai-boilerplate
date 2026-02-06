@@ -39,7 +39,6 @@ pnpm install:all                        # Install Node + Python dependencies
 pnpm lint                               # Check TypeScript (ESLint) + Python (Ruff)
 pnpm lint:fix                           # Auto-fix lint issues
 pnpm format                             # Format TypeScript (Prettier) + Python (Ruff)
-pnpm format:check                       # Check formatting without writing
 ```
 
 ## Security

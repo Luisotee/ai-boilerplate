@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 
 from pgvector.sqlalchemy import Vector
@@ -189,7 +189,7 @@ def save_message(
         sender_jid=sender_jid,
         sender_name=sender_name,
         embedding=embedding,
-        embedding_generated_at=datetime.utcnow() if embedding else None,
+        embedding_generated_at=datetime.now(UTC) if embedding else None,
     )
     db.add(message)
     db.commit()

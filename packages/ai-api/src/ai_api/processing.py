@@ -5,7 +5,7 @@ Handles background processing of uploaded PDFs: parsing, semantic chunking,
 embedding generation, and storage in the database.
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import tiktoken
@@ -77,7 +77,7 @@ async def process_pdf_document(
         if hasattr(result.input, "page_count"):
             metadata["page_count"] = result.input.page_count
         metadata["docling_version"] = "latest"
-        metadata["processing_date"] = datetime.utcnow().isoformat()
+        metadata["processing_date"] = datetime.now(UTC).isoformat()
 
         document.doc_metadata = metadata
         db.commit()
@@ -173,7 +173,7 @@ async def process_pdf_document(
                 page_number=primary_page,  # ✅ FIXED: Extract from provenance
                 heading=primary_heading,  # ✅ FIXED: Extract from doc structure
                 embedding=chunk_embedding,
-                embedding_generated_at=datetime.utcnow(),
+                embedding_generated_at=datetime.now(UTC),
                 token_count=token_count,
                 chunk_metadata=chunk_metadata,  # Store additional metadata
             )
@@ -192,7 +192,7 @@ async def process_pdf_document(
 
         # Step 8: Update document status to completed
         document.status = "completed"
-        document.processed_date = datetime.utcnow()
+        document.processed_date = datetime.now(UTC)
         document.chunk_count = stored_count
         db.commit()
 
@@ -210,7 +210,7 @@ async def process_pdf_document(
             if document:
                 document.status = "failed"
                 document.error_message = str(e)
-                document.processed_date = datetime.utcnow()
+                document.processed_date = datetime.now(UTC)
                 db.commit()
                 logger.info(f"Document {document_id} marked as failed")
         except Exception as update_error:
