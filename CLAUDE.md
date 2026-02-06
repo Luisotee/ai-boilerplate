@@ -1,51 +1,27 @@
 # CLAUDE.md
 
-AI Whatsapp agent system: Node.js/TypeScript client (Baileys) + Python/FastAPI API (Pydantic AI + Gemini).
+AI WhatsApp agent system: Node.js/TypeScript client (Baileys) + Python/FastAPI API (Pydantic AI + Gemini).
+
+See @README.md for setup guide and environment variables.
 
 ## Structure
 
 ```
 packages/
-├── whatsapp-client/              # TypeScript - WhatsApp interface + REST API
-│   └── src/
-│       ├── main.ts               # Fastify server entry point (port 3001)
-│       ├── whatsapp.ts           # Baileys WebSocket connection, QR auth, message events
-│       ├── api-client.ts         # HTTP client for AI API with job polling
-│       ├── config.ts             # Environment configuration loader
-│       ├── logger.ts             # Pino logger setup
-│       ├── types.ts              # TypeScript type definitions
-│       ├── handlers/             # Incoming message processors
-│       │   ├── text.ts           # Text handler with AI integration + TTS
-│       │   ├── audio.ts          # Audio transcription handler
-│       │   ├── image.ts          # Image handler with vision support
-│       │   └── document.ts       # PDF/document handler
-│       ├── routes/               # API endpoints (health, messaging, media, operations)
-│       ├── services/             # Baileys service layer
-│       ├── schemas/              # Zod request/response validation
-│       └── utils/                # Helpers (JID, message extraction, reactions, file validation, vCard)
-│
-└── ai-api/                       # Python - AI service with RAG + transcription + TTS
-    └── src/ai_api/
-        ├── main.py               # FastAPI app entry point (port 8000)
-        ├── agent.py              # Pydantic AI agent + Gemini integration
-        ├── commands.py           # Command parser (/settings, /tts, /stt, /help)
-        ├── config.py             # Settings with pydantic-settings
-        ├── database.py           # SQLAlchemy models (User, ConversationMessage, ConversationPreferences)
-        ├── kb_models.py          # Knowledge base models (KnowledgeBaseDocument, KnowledgeBaseChunk)
-        ├── schemas.py            # Pydantic request/response models
-        ├── embeddings.py         # Vector embedding generation (pgvector)
-        ├── transcription.py      # Groq Whisper speech-to-text
-        ├── tts.py                # Gemini text-to-speech synthesis
-        ├── processing.py         # PDF processing with Docling
-        ├── logger.py             # Structured logging
-        ├── whatsapp/             # WhatsApp REST API client
-        │   ├── client.py         # Async HTTP client for messaging
-        │   └── exceptions.py     # Custom exceptions
-        ├── rag/                   # RAG implementations (history + knowledge base search)
-        ├── queue/                 # Background jobs (arq + Redis)
-        ├── streams/              # Redis Streams job processing
-        └── scripts/              # Worker + cleanup scripts (cleanup_expired_documents.py)
+├── whatsapp-client/   # TypeScript — Fastify server (port 3001) + Baileys WhatsApp connection
+│   └── src/           # handlers/, routes/, services/, schemas/, utils/
+└── ai-api/            # Python — FastAPI server (port 8000) + Pydantic AI agent
+    └── src/ai_api/    # agent.py, rag/, streams/, queue/, whatsapp/, scripts/
 ```
+
+## Tooling
+
+- **Monorepo**: pnpm workspaces (`pnpm-workspace.yaml`), pnpm@10.14.0
+- **TypeScript**: ES2022, NodeNext modules, strict mode
+- **Python**: >=3.11, managed with `uv`
+- **Formatting**: Prettier (TS) + Ruff (Python) — enforced by Husky pre-commit hook (`pnpm format` runs automatically)
+- **Linting**: ESLint flat config (TS) + Ruff (Python)
+- **No test framework configured** — human developer handles testing
 
 ## Commands
 
@@ -59,10 +35,6 @@ pnpm dev:whatsapp                       # Start WhatsApp client (port 3001)
 pnpm dev:queue                          # Start background stream worker
 pnpm install:all                        # Install Node + Python dependencies
 
-# Manual startup
-cd packages/ai-api && uv run uvicorn ai_api.main:app --reload --port 8000
-cd packages/whatsapp-client && pnpm dev # Scan QR code when prompted
-
 # Linting & Formatting
 pnpm lint                               # Check TypeScript (ESLint) + Python (Ruff)
 pnpm lint:fix                           # Auto-fix lint issues
@@ -73,42 +45,58 @@ pnpm format:check                       # Check formatting without writing
 ## Security
 
 - **API Key Auth**: Both servers require `X-API-Key` header on all routes except `/health` and `/docs*`
-  - `AI_API_KEY` — authenticates requests to the Python AI API (required, app fails to start without it)
-  - `WHATSAPP_API_KEY` — authenticates requests to the TypeScript WhatsApp API (required)
-  - Inter-service calls include the key automatically (`api-client.ts`, `handlers/audio.ts`, `whatsapp/client.py`)
-- **CORS**: Configurable via `CORS_ORIGINS` env var (comma-separated). Empty = block all cross-origin requests
-- **Rate Limiting**: `RATE_LIMIT_GLOBAL` req/min (default 30), `RATE_LIMIT_EXPENSIVE` req/min (default 5) on `/chat`, `/chat/enqueue`, `/tts`, `/transcribe`, `/knowledge-base/upload`
-- **Redis Auth**: `REDIS_PASSWORD` required in `.env`, enforced via `--requirepass` in docker-compose
-- **No default passwords**: `POSTGRES_PASSWORD` has no fallback — docker-compose fails if unset
+  - `AI_API_KEY` — Python AI API (required, app fails to start without it)
+  - `WHATSAPP_API_KEY` — TypeScript WhatsApp API (required)
+  - Inter-service calls include the key automatically
+- **CORS**: `CORS_ORIGINS` env var (comma-separated). Empty = block all cross-origin
+- **Rate Limiting**: `RATE_LIMIT_GLOBAL` (default 30/min), `RATE_LIMIT_EXPENSIVE` (default 5/min)
+- **No default passwords**: `POSTGRES_PASSWORD` and `REDIS_PASSWORD` required in `.env`
 
-## Agent Tools
+## Database
 
-The AI agent (`agent.py`, Pydantic AI + Gemini 2.5 Flash) has 12 tools:
+- **PostgreSQL + pgvector** (3072-dim vectors for embeddings)
+- **5 tables**: users, conversation_messages, conversation_preferences, knowledge_base_documents, knowledge_base_chunks
+- **No Alembic migrations** — uses SQLAlchemy `create_all()`. Schema changes require manual migration or table recreation
+- Models: `database.py` (conversations) + `kb_models.py` (knowledge base)
 
-- **RAG**: `search_conversation_history`, `search_knowledge_base`
-- **Web**: `web_search` (DuckDuckGo), `fetch_website` (Jina Reader)
-- **WhatsApp**: `send_whatsapp_reaction`, `send_whatsapp_location`, `send_whatsapp_contact`, `send_whatsapp_message`
-- **Utility**: `calculate`, `get_weather`, `wikipedia_lookup`, `convert_units`
+## Environment Config
 
-## Capabilities
-
-- **Vision**: Images sent via WhatsApp are base64-encoded and passed to Gemini for analysis
-- **Conversation-scoped PDFs**: PDFs sent in chat are processed and available to the agent, auto-expire after `CONVERSATION_PDF_TTL_HOURS`
-- **Knowledge Base**: Persistent PDF uploads via `/knowledge-base/upload` (single) and `/knowledge-base/upload/batch`
-- **Redis Streams**: Per-user sequential processing with concurrent processing across users (supersedes arq queue)
+- Root `.env` loaded first (shared vars) — see @.env.example for all required variables
+- Package-level `.env.local` for overrides (not committed to git)
+- TS config loader: `packages/whatsapp-client/src/config.ts`
+- Python config: pydantic-settings in `packages/ai-api/src/ai_api/config.py`
 
 ## Guidelines
 
-- Use `pnpm add` / `uv add` for dependencies (never edit package.json/pyproject.toml directly)
+- Use `pnpm add` / `uv add` for dependencies — NEVER edit package.json/pyproject.toml directly
 - Prefer pure functions over classes
-- Use structured logging (Pino for TS, Python logging) - no console.log/print
+- Use structured logging (Pino for TS, Python logging) — no console.log/print
+- Do NOT write tests — the human developer handles testing
 - Keep this file updated with important changes
-- There is no need for you to write tests for this project, the human developer will handle that.
 
-## References
+## Common Workflows
 
-- `README.md` - Setup guide and environment variables
-- `.env.example` - Root environment template (all required vars)
-- `packages/*/.env.example` - Per-package environment templates
-- API docs: http://localhost:8000/docs (Swagger UI)
+### Adding a new message handler (whatsapp-client)
+1. Create handler in `src/handlers/` following the pattern in `text.ts`
+2. Register it in `src/whatsapp.ts` message event listener
+3. Add any new routes in `src/routes/` with Zod schemas in `src/schemas/`
+
+### Adding a new agent tool (ai-api)
+1. Add tool function in `agent.py` using the `@agent.tool` decorator (see existing 12 tools)
+2. Tool gets access to `RunContext` with user info and dependencies
+3. WhatsApp-sending tools use the `whatsapp/client.py` HTTP client
+
+### Adding a new API endpoint (ai-api)
+1. Add route in `main.py` with appropriate tag and rate limit
+2. Add Pydantic schemas in `schemas.py`
+3. Rate-limited endpoints: use `@limiter.limit()` decorator with `RATE_LIMIT_EXPENSIVE`
+
+## Gotchas
+
+- Husky pre-commit hook runs `pnpm format` automatically — do NOT run format manually before committing
+- Python CORS middleware must be added AFTER APIKeyMiddleware (Starlette processes middleware LIFO)
+- Python Dockerfile requires system deps: poppler-utils, tesseract-ocr, libmagic1, ffmpeg
+- pgvector IVFFlat index must be created manually for knowledge_base_chunks
+- Redis Streams (per-user sequential processing) supersedes the arq queue — both are in the codebase
+- API docs: http://localhost:8000/docs (AI API) and http://localhost:3001/docs (WhatsApp client)
 - DB GUI: http://localhost:8080 (Adminer)
