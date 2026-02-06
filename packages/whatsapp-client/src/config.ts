@@ -26,4 +26,10 @@ export const config = {
     port: parseInt(process.env.WHATSAPP_API_PORT || '3001', 10),
     host: process.env.WHATSAPP_API_HOST || '0.0.0.0',
   },
+  // Security
+  whatsappApiKey: process.env.WHATSAPP_API_KEY || '',
+  aiApiKey: process.env.AI_API_KEY || '',
+  corsOrigins: process.env.CORS_ORIGINS || '',
+  rateLimitGlobal: parseInt(process.env.RATE_LIMIT_GLOBAL || '30', 10),
+  rateLimitExpensive: parseInt(process.env.RATE_LIMIT_EXPENSIVE || '5', 10),
 } as const;

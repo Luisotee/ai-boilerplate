@@ -5,7 +5,7 @@ services:
     container_name: aiagent-postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-aiagent}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB:-aiagent}
     ports:
       - "5432:5432"
@@ -22,6 +22,8 @@ services:
   redis:
     image: redis:7-alpine
     container_name: aiagent-redis
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
     ports:
       - "6379:6379"
     volumes:
@@ -31,7 +33,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
-    command: redis-server --appendonly yes
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
     networks:
       - aiagent-network
 
@@ -54,12 +56,18 @@ services:
       dockerfile: Dockerfile
     container_name: aiagent-api
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-aiagent}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-aiagent}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-aiagent}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-aiagent}
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_DB: 0
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
       GEMINI_API_KEY: ${GEMINI_API_KEY}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
+      AI_API_KEY: ${AI_API_KEY}
+      WHATSAPP_API_KEY: ${WHATSAPP_API_KEY}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      RATE_LIMIT_GLOBAL: ${RATE_LIMIT_GLOBAL:-30}
+      RATE_LIMIT_EXPENSIVE: ${RATE_LIMIT_EXPENSIVE:-5}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       KB_UPLOAD_DIR: /app/knowledge_base
     ports:
@@ -88,12 +96,15 @@ services:
     container_name: aiagent-worker
     command: ["python", "-m", "ai_api.scripts.run_stream_worker"]
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-aiagent}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-aiagent}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-aiagent}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-aiagent}
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_DB: 0
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
       GEMINI_API_KEY: ${GEMINI_API_KEY}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
+      AI_API_KEY: ${AI_API_KEY}
+      WHATSAPP_API_KEY: ${WHATSAPP_API_KEY}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       KB_UPLOAD_DIR: /app/knowledge_base
     volumes:
@@ -118,6 +129,11 @@ services:
       AI_API_URL: http://api:8000
       WHATSAPP_API_PORT: 3001
       WHATSAPP_API_HOST: 0.0.0.0
+      AI_API_KEY: ${AI_API_KEY}
+      WHATSAPP_API_KEY: ${WHATSAPP_API_KEY}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      RATE_LIMIT_GLOBAL: ${RATE_LIMIT_GLOBAL:-30}
+      RATE_LIMIT_EXPENSIVE: ${RATE_LIMIT_EXPENSIVE:-5}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     ports:
       - "3001:3001"

@@ -37,16 +37,24 @@ class SuccessResponse:
 class WhatsAppClient:
     """Async HTTP client for WhatsApp REST API."""
 
-    def __init__(self, http_client: httpx.AsyncClient, base_url: str):
+    def __init__(self, http_client: httpx.AsyncClient, base_url: str, api_key: str | None = None):
         """
         Initialize WhatsApp client.
 
         Args:
             http_client: Shared httpx.AsyncClient for connection pooling
             base_url: WhatsApp client REST API base URL (e.g., http://localhost:3001)
+            api_key: Optional API key for authenticating requests
         """
         self._client = http_client
         self._base_url = base_url.rstrip("/")
+        self._api_key = api_key
+
+    def _get_headers(self) -> dict[str, str]:
+        """Return auth headers for requests."""
+        if self._api_key:
+            return {"X-API-Key": self._api_key}
+        return {}
 
     async def _handle_response(self, response: httpx.Response) -> dict:
         """Handle HTTP response and raise appropriate errors."""
@@ -93,6 +101,7 @@ class WhatsAppClient:
         response = await self._client.post(
             f"{self._base_url}/whatsapp/send-text",
             json=payload,
+            headers=self._get_headers(),
         )
         data = await self._handle_response(response)
         return SendMessageResponse(
@@ -126,6 +135,7 @@ class WhatsAppClient:
                 "message_id": message_id,
                 "emoji": emoji,
             },
+            headers=self._get_headers(),
         )
         data = await self._handle_response(response)
         return SuccessResponse(success=data.get("success", False))
@@ -166,6 +176,7 @@ class WhatsAppClient:
         response = await self._client.post(
             f"{self._base_url}/whatsapp/send-location",
             json=payload,
+            headers=self._get_headers(),
         )
         data = await self._handle_response(response)
         return SendMessageResponse(
@@ -209,6 +220,7 @@ class WhatsAppClient:
         response = await self._client.post(
             f"{self._base_url}/whatsapp/send-contact",
             json=payload,
+            headers=self._get_headers(),
         )
         data = await self._handle_response(response)
         return SendMessageResponse(
@@ -246,6 +258,7 @@ class WhatsAppClient:
             f"{self._base_url}/whatsapp/send-image",
             files=files,
             data=data,
+            headers=self._get_headers(),
         )
         result = await self._handle_response(response)
         return SendMessageResponse(
@@ -328,6 +341,7 @@ class WhatsAppClient:
                 "message_id": message_id,
                 "new_text": new_text,
             },
+            headers=self._get_headers(),
         )
         data = await self._handle_response(response)
         return SuccessResponse(success=data.get("success", False))
@@ -356,6 +370,7 @@ class WhatsAppClient:
                 "phoneNumber": phone_number,
                 "message_id": message_id,
             },
+            headers=self._get_headers(),
         )
         data = await self._handle_response(response)
         return SuccessResponse(success=data.get("success", False))
@@ -364,6 +379,7 @@ class WhatsAppClient:
 def create_whatsapp_client(
     http_client: httpx.AsyncClient,
     base_url: str,
+    api_key: str | None = None,
 ) -> WhatsAppClient:
     """
     Factory function for creating WhatsApp client.
@@ -371,8 +387,9 @@ def create_whatsapp_client(
     Args:
         http_client: Shared httpx.AsyncClient
         base_url: WhatsApp client REST API base URL
+        api_key: Optional API key for authenticating requests
 
     Returns:
         Configured WhatsAppClient instance
     """
-    return WhatsAppClient(http_client=http_client, base_url=base_url)
+    return WhatsAppClient(http_client=http_client, base_url=base_url, api_key=api_key)

@@ -3,6 +3,12 @@ import { logger } from './logger.js';
 
 const POLL_INTERVAL_MS = 500;
 
+function aiApiHeaders(contentType?: string): Record<string, string> {
+  const headers: Record<string, string> = { 'X-API-Key': config.aiApiKey };
+  if (contentType) headers['Content-Type'] = contentType;
+  return headers;
+}
+
 interface ImagePayload {
   data: string; // base64 encoded
   mimetype: string;
@@ -60,7 +66,7 @@ export async function sendMessageToAI(
 
     const response = await fetch(`${config.aiApiUrl}/chat/save`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: aiApiHeaders('application/json'),
       body: JSON.stringify({
         whatsapp_jid: whatsappJid,
         message,
@@ -108,7 +114,7 @@ export async function sendMessageToAI(
 
   const enqueueResponse = await fetch(`${config.aiApiUrl}/chat/enqueue`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: aiApiHeaders('application/json'),
     body: JSON.stringify(requestBody),
   });
 
@@ -133,7 +139,9 @@ export async function sendMessageToAI(
 
   // Step 2: Poll until complete
   while (true) {
-    const statusResponse = await fetch(`${config.aiApiUrl}/chat/job/${job_id}`);
+    const statusResponse = await fetch(`${config.aiApiUrl}/chat/job/${job_id}`, {
+      headers: aiApiHeaders(),
+    });
 
     if (!statusResponse.ok) {
       throw new Error(`Job status failed: ${statusResponse.status} ${statusResponse.statusText}`);
@@ -153,7 +161,8 @@ export async function sendMessageToAI(
 export async function getUserPreferences(whatsappJid: string): Promise<UserPreferences | null> {
   try {
     const response = await fetch(
-      `${config.aiApiUrl}/preferences/${encodeURIComponent(whatsappJid)}`
+      `${config.aiApiUrl}/preferences/${encodeURIComponent(whatsappJid)}`,
+      { headers: aiApiHeaders() }
     );
     if (!response.ok) {
       logger.debug({ whatsappJid, status: response.status }, 'Failed to fetch preferences');
@@ -172,7 +181,7 @@ export async function textToSpeech(text: string, whatsappJid: string): Promise<B
 
     const response = await fetch(`${config.aiApiUrl}/tts`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: aiApiHeaders('application/json'),
       body: JSON.stringify({ text, whatsapp_jid: whatsappJid }),
     });
 
