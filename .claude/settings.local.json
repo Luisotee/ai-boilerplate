@@ -18,7 +18,9 @@
       "mcp__context7__query-docs",
       "WebFetch(domain:www.humanlayer.dev)",
       "WebFetch(domain:arize.com)",
-      "WebFetch(domain:pyogg.readthedocs.io)"
+      "WebFetch(domain:pyogg.readthedocs.io)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr diff:*)"
     ],
     "deny": [],
     "ask": []

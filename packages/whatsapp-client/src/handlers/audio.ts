@@ -61,6 +61,7 @@ async function transcribeAudio(
 
   const response = await fetch(`${config.aiApiUrl}/transcribe`, {
     method: 'POST',
+    headers: { 'X-API-Key': config.aiApiKey },
     body: formData,
   });
 

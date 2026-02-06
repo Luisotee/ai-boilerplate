@@ -1,9 +1,11 @@
+import crypto from 'node:crypto';
 import { config } from './config.js';
 import Fastify from 'fastify';
 import FastifySwagger from '@fastify/swagger';
 import FastifySwaggerUI from '@fastify/swagger-ui';
 import FastifyMultipart, { ajvFilePlugin } from '@fastify/multipart';
 import FastifyCors from '@fastify/cors';
+import FastifyRateLimit from '@fastify/rate-limit';
 import {
   serializerCompiler,
   validatorCompiler,
@@ -47,6 +49,14 @@ function createMixedSchemaTransform() {
 }
 
 async function start() {
+  // Validate required security config
+  if (!config.whatsappApiKey) {
+    throw new Error('WHATSAPP_API_KEY environment variable is required');
+  }
+  if (!config.aiApiKey) {
+    throw new Error('AI_API_KEY environment variable is required');
+  }
+
   // Initialize Fastify with built-in Pino logger and ZodTypeProvider
   const app = Fastify({
     logger: {
@@ -68,9 +78,40 @@ async function start() {
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);
 
-  // Register CORS
+  // Register CORS — parse allowed origins from env, block all if empty
+  const corsOrigins = config.corsOrigins
+    ? config.corsOrigins
+        .split(',')
+        .map((o) => o.trim())
+        .filter(Boolean)
+    : [];
   await app.register(FastifyCors, {
-    origin: true, // Allow all origins (configure as needed)
+    origin: corsOrigins.length > 0 ? corsOrigins : false,
+  });
+
+  // API Key authentication hook
+  app.addHook('onRequest', async (request, reply) => {
+    if (request.url === '/health' || request.url.startsWith('/docs')) {
+      return;
+    }
+    const apiKey = request.headers['x-api-key'];
+    const expected = config.whatsappApiKey;
+    if (
+      !apiKey ||
+      typeof apiKey !== 'string' ||
+      apiKey.length !== expected.length ||
+      !crypto.timingSafeEqual(Buffer.from(apiKey), Buffer.from(expected))
+    ) {
+      app.log.warn({ url: request.url, ip: request.ip }, 'Unauthorized request');
+      return reply.code(401).send({ error: 'Invalid or missing API key' });
+    }
+  });
+
+  // Register rate limiting
+  await app.register(FastifyRateLimit, {
+    max: config.rateLimitGlobal,
+    timeWindow: '1 minute',
+    allowList: (req) => req.url === '/health',
   });
 
   // Register multipart for file uploads
@@ -97,6 +138,17 @@ async function start() {
         { name: 'Media', description: 'Images, videos, documents, audio' },
         { name: 'Operations', description: 'Edit, delete, forward messages' },
       ],
+      components: {
+        securitySchemes: {
+          ApiKeyAuth: {
+            type: 'apiKey',
+            in: 'header',
+            name: 'X-API-Key',
+            description: 'API key for authentication',
+          },
+        },
+      },
+      security: [{ ApiKeyAuth: [] }],
     },
     transform: createMixedSchemaTransform(),
   });

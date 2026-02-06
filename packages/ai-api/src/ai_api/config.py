@@ -24,9 +24,20 @@ class Settings(BaseSettings):
     database_url: str
     gemini_api_key: str
 
+    # API Authentication
+    ai_api_key: str  # Required — app fails to start if not set
+    whatsapp_api_key: str  # Required — used to authenticate calls to WhatsApp client
+
     # Optional with defaults
     groq_api_key: str | None = None
     log_level: str = "INFO"
+
+    # CORS
+    cors_origins: str = ""  # Comma-separated allowed origins
+
+    # Rate Limiting
+    rate_limit_global: int = 30  # requests per minute
+    rate_limit_expensive: int = 5  # requests per minute for expensive ops
 
     # Redis
     redis_host: str = "localhost"

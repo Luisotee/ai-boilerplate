@@ -1,4 +1,5 @@
 import base64
+import hmac
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -16,7 +17,15 @@ from fastapi import (
     Response,
     UploadFile,
 )
+from fastapi.middleware.cors import CORSMiddleware
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from slowapi.util import get_remote_address
 from sqlalchemy.orm import Session
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from .agent import AgentDeps, format_message_history, get_ai_response
 from .commands import is_command, parse_and_execute
@@ -122,7 +131,101 @@ app = FastAPI(
     - **OpenAPI Schema**: Available at `/openapi.json`
     """,
     lifespan=lifespan,
+    swagger_ui_parameters={"persistAuthorization": True},
 )
+
+
+def custom_openapi():
+    """Add API key security scheme to generated OpenAPI spec."""
+    if app.openapi_schema:
+        return app.openapi_schema
+    from fastapi.openapi.utils import get_openapi
+
+    schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+        tags=[
+            {"name": "Health", "description": "Health check endpoints"},
+            {
+                "name": "Knowledge Base",
+                "description": "PDF upload, processing, and semantic search",
+            },
+            {"name": "Chat", "description": "Synchronous and async chat with the AI agent"},
+            {"name": "Speech-to-Text", "description": "Audio transcription via Whisper"},
+            {"name": "Text-to-Speech", "description": "Speech synthesis via Gemini TTS"},
+            {"name": "Preferences", "description": "Per-user conversation preferences"},
+        ],
+    )
+    schema.setdefault("components", {})["securitySchemes"] = {
+        "ApiKeyAuth": {
+            "type": "apiKey",
+            "in": "header",
+            "name": "X-API-Key",
+            "description": "API key for authentication",
+        }
+    }
+    schema["security"] = [{"ApiKeyAuth": []}]
+    app.openapi_schema = schema
+    return schema
+
+
+app.openapi = custom_openapi  # type: ignore[method-assign]
+
+# --- Security Middleware ---
+
+_AUTH_EXEMPT_PREFIXES = ("/health", "/docs", "/redoc", "/openapi.json")
+
+
+class APIKeyMiddleware(BaseHTTPMiddleware):
+    """Validate X-API-Key header on all requests except health/docs."""
+
+    async def dispatch(self, request: Request, call_next):
+        if any(request.url.path.startswith(p) for p in _AUTH_EXEMPT_PREFIXES):
+            return await call_next(request)
+
+        api_key = request.headers.get("x-api-key")
+        if not api_key or not hmac.compare_digest(api_key, settings.ai_api_key):
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Invalid or missing API key"},
+            )
+        return await call_next(request)
+
+
+app.add_middleware(APIKeyMiddleware)
+
+# CORS — added after APIKeyMiddleware so it runs first (Starlette LIFO order)
+# This ensures preflight OPTIONS requests are handled before auth rejects them
+_cors_origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Rate limiting (slowapi with Redis backend)
+_redis_password_part = f":{settings.redis_password}@" if settings.redis_password else ""
+_rate_limit_storage = (
+    f"redis://{_redis_password_part}{settings.redis_host}:{settings.redis_port}/{settings.redis_db}"
+)
+limiter = Limiter(
+    key_func=get_remote_address,
+    storage_uri=_rate_limit_storage,
+    default_limits=[f"{settings.rate_limit_global}/minute"],
+)
+app.state.limiter = limiter
+app.add_exception_handler(
+    RateLimitExceeded,
+    lambda req, exc: JSONResponse(
+        status_code=429,
+        content={"detail": f"Rate limit exceeded: {exc.detail}"},
+    ),
+)
+app.add_middleware(SlowAPIMiddleware)
 
 # Configure upload directory for knowledge base PDFs
 UPLOAD_DIR = Path(settings.kb_upload_dir)
@@ -157,7 +260,8 @@ async def get_stream_job_status(redis, job_id: str) -> str:
 
 
 @app.get("/health", tags=["Health"])
-async def health_check():
+@limiter.exempt
+async def health_check(request: Request):
     """
     Health check endpoint
 
@@ -167,7 +271,9 @@ async def health_check():
 
 
 @app.post("/knowledge-base/upload", response_model=UploadPDFResponse, tags=["Knowledge Base"])
+@limiter.limit(f"{settings.rate_limit_expensive}/minute")
 async def upload_pdf(
+    request: Request,
     file: UploadFile = File(...),
     background_tasks: BackgroundTasks = BackgroundTasks(),
     db: Session = Depends(get_db),
@@ -272,7 +378,9 @@ async def upload_pdf(
     response_model=BatchUploadResponse,
     tags=["Knowledge Base"],
 )
+@limiter.limit(f"{settings.rate_limit_expensive}/minute")
 async def upload_pdf_batch(
+    request: Request,
     files: list[UploadFile] = File(...),
     background_tasks: BackgroundTasks = BackgroundTasks(),
     db: Session = Depends(get_db),
@@ -730,7 +838,8 @@ async def save_message_only(request: SaveMessageRequest, db: Session = Depends(g
     response_model=EnqueueResponse | CommandResponse,
     tags=["Chat"],
 )
-async def enqueue_chat(request: ChatRequest, db: Session = Depends(get_db)):
+@limiter.limit(f"{settings.rate_limit_expensive}/minute")
+async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session = Depends(get_db)):
     """
     Enqueue a chat message for asynchronous processing
 
@@ -765,50 +874,52 @@ async def enqueue_chat(request: ChatRequest, db: Session = Depends(get_db)):
     - Poll `/chat/job/{job_id}` for status and accumulated chunks
     - Or stream from `/chat/stream/{job_id}` via SSE
     """
-    has_image = request.image_data is not None and request.image_mimetype is not None
+    has_image = chat_request.image_data is not None and chat_request.image_mimetype is not None
     logger.info(
-        f"Received request from {request.whatsapp_jid}: {request.message[:50]}... (has_image={has_image})"
+        f"Received request from {chat_request.whatsapp_jid}: {chat_request.message[:50]}... (has_image={has_image})"
     )
 
     # Check for commands first (e.g., /settings, /tts on, /help)
-    if is_command(request.message):
-        user = get_or_create_user(db, request.whatsapp_jid, request.conversation_type)
-        result = parse_and_execute(db, str(user.id), request.whatsapp_jid, request.message)
+    if is_command(chat_request.message):
+        user = get_or_create_user(db, chat_request.whatsapp_jid, chat_request.conversation_type)
+        result = parse_and_execute(
+            db, str(user.id), chat_request.whatsapp_jid, chat_request.message
+        )
         if result.is_command:
-            logger.info(f"Command executed for {request.whatsapp_jid}: {request.message}")
+            logger.info(f"Command executed for {chat_request.whatsapp_jid}: {chat_request.message}")
             return CommandResponse(is_command=True, response=result.response_text)
 
     try:
         # Check for document
         has_document = (
-            request.document_data is not None
-            and request.document_mimetype is not None
-            and request.document_filename is not None
+            chat_request.document_data is not None
+            and chat_request.document_mimetype is not None
+            and chat_request.document_filename is not None
         )
 
         # For image messages, store with [Image] marker for history context
         if has_image:
             # Store as [Image: caption] or [Image] for database history
-            content = f"[Image: {request.message}]" if request.message else "[Image]"
-            if request.sender_name:
-                content = f"{request.sender_name}: {content}"
+            content = f"[Image: {chat_request.message}]" if chat_request.message else "[Image]"
+            if chat_request.sender_name:
+                content = f"{chat_request.sender_name}: {content}"
         elif has_document:
             # Store as [Document: filename] for database history
-            content = f"[Document: {request.document_filename}]"
-            if request.message:
-                content = f"{content} - {request.message}"
-            if request.sender_name:
-                content = f"{request.sender_name}: {content}"
+            content = f"[Document: {chat_request.document_filename}]"
+            if chat_request.message:
+                content = f"{content} - {chat_request.message}"
+            if chat_request.sender_name:
+                content = f"{chat_request.sender_name}: {content}"
         else:
             # Format message with sender name if provided (group message)
             content = (
-                f"{request.sender_name}: {request.message}"
-                if request.sender_name
-                else request.message
+                f"{chat_request.sender_name}: {chat_request.message}"
+                if chat_request.sender_name
+                else chat_request.message
             )
 
         # Get or create user
-        user = get_or_create_user(db, request.whatsapp_jid, request.conversation_type)
+        user = get_or_create_user(db, chat_request.whatsapp_jid, chat_request.conversation_type)
 
         # Generate embedding for user message
         user_embedding = None
@@ -826,12 +937,12 @@ async def enqueue_chat(request: ChatRequest, db: Session = Depends(get_db)):
         # Save user message immediately
         user_msg = save_message(
             db,
-            request.whatsapp_jid,
+            chat_request.whatsapp_jid,
             "user",
             content,
-            request.conversation_type,
-            sender_jid=request.sender_jid,
-            sender_name=request.sender_name,
+            chat_request.conversation_type,
+            sender_jid=chat_request.sender_jid,
+            sender_name=chat_request.sender_name,
             embedding=user_embedding,
         )
 
@@ -843,31 +954,31 @@ async def enqueue_chat(request: ChatRequest, db: Session = Depends(get_db)):
         job_data = {
             "job_id": job_id,
             "user_id": str(user.id),
-            "whatsapp_jid": request.whatsapp_jid,
-            "message": request.message,  # Original message/caption for AI processing
-            "conversation_type": request.conversation_type,
+            "whatsapp_jid": chat_request.whatsapp_jid,
+            "message": chat_request.message,  # Original message/caption for AI processing
+            "conversation_type": chat_request.conversation_type,
             "user_message_id": str(user_msg.id),
         }
-        if request.whatsapp_message_id:
-            job_data["whatsapp_message_id"] = request.whatsapp_message_id
+        if chat_request.whatsapp_message_id:
+            job_data["whatsapp_message_id"] = chat_request.whatsapp_message_id
 
         # Handle image data if present
         if has_image:
             # Store image in Redis separately (to avoid large stream messages)
-            await save_job_image(redis_client, job_id, request.image_data)
-            job_data["image_mimetype"] = request.image_mimetype
+            await save_job_image(redis_client, job_id, chat_request.image_data)
+            job_data["image_mimetype"] = chat_request.image_mimetype
             job_data["has_image"] = "true"
 
         # Handle document (PDF) data if present
         has_document = (
-            request.document_data is not None
-            and request.document_mimetype is not None
-            and request.document_filename is not None
+            chat_request.document_data is not None
+            and chat_request.document_mimetype is not None
+            and chat_request.document_filename is not None
         )
 
         if has_document:
             # Only support PDFs for now
-            if request.document_mimetype != "application/pdf":
+            if chat_request.document_mimetype != "application/pdf":
                 raise HTTPException(
                     status_code=400,
                     detail="Only PDF documents are supported",
@@ -879,7 +990,7 @@ async def enqueue_chat(request: ChatRequest, db: Session = Depends(get_db)):
             file_path = UPLOAD_DIR / stored_filename
 
             try:
-                pdf_content = base64.b64decode(request.document_data)
+                pdf_content = base64.b64decode(chat_request.document_data)
                 file_size = len(pdf_content)
 
                 # Check file size limit
@@ -906,14 +1017,14 @@ async def enqueue_chat(request: ChatRequest, db: Session = Depends(get_db)):
             document = KnowledgeBaseDocument(
                 id=doc_id,
                 filename=stored_filename,
-                original_filename=request.document_filename,
+                original_filename=chat_request.document_filename,
                 file_size_bytes=file_size,
-                mime_type=request.document_mimetype,
+                mime_type=chat_request.document_mimetype,
                 status="pending",
-                whatsapp_jid=request.whatsapp_jid,
+                whatsapp_jid=chat_request.whatsapp_jid,
                 expires_at=expires_at,
                 is_conversation_scoped=True,
-                whatsapp_message_id=request.whatsapp_message_id,
+                whatsapp_message_id=chat_request.whatsapp_message_id,
             )
             db.add(document)
             db.commit()
@@ -925,7 +1036,7 @@ async def enqueue_chat(request: ChatRequest, db: Session = Depends(get_db)):
             job_data["has_document"] = "true"
             job_data["document_id"] = str(doc_id)
             job_data["document_path"] = str(file_path)
-            job_data["document_filename"] = request.document_filename
+            job_data["document_filename"] = chat_request.document_filename
 
         await add_message_to_stream(
             redis=redis_client,
@@ -995,7 +1106,8 @@ async def get_job_status(job_id: str):
 
 
 @app.post("/chat", response_model=ChatResponse, tags=["Chat"])
-async def chat(request: ChatRequest, db: Session = Depends(get_db)):
+@limiter.limit(f"{settings.rate_limit_expensive}/minute")
+async def chat(request: Request, chat_request: ChatRequest, db: Session = Depends(get_db)):
     """
     Non-streaming chat endpoint
 
@@ -1008,16 +1120,20 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
     **Response:**
     - `response`: Complete AI-generated response text
     """
-    logger.info(f"Received chat request from {request.whatsapp_jid}")
+    logger.info(f"Received chat request from {chat_request.whatsapp_jid}")
 
     try:
         # Get conversation history with type-specific limit
-        history = get_conversation_history(db, request.whatsapp_jid, request.conversation_type)
+        history = get_conversation_history(
+            db, chat_request.whatsapp_jid, chat_request.conversation_type
+        )
         message_history = format_message_history(history) if history else None
 
         # Format message with sender name if provided (group message)
         content = (
-            f"{request.sender_name}: {request.message}" if request.sender_name else request.message
+            f"{chat_request.sender_name}: {chat_request.message}"
+            if chat_request.sender_name
+            else chat_request.message
         )
 
         # Generate embedding for user message using embedding service
@@ -1036,17 +1152,17 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
         # Save user message with group context and embedding
         save_message(
             db,
-            request.whatsapp_jid,
+            chat_request.whatsapp_jid,
             "user",
             content,
-            request.conversation_type,
-            sender_jid=request.sender_jid,
-            sender_name=request.sender_name,
+            chat_request.conversation_type,
+            sender_jid=chat_request.sender_jid,
+            sender_name=chat_request.sender_name,
             embedding=user_embedding,
         )
 
         # Prepare agent dependencies for semantic search tool (dependency injection)
-        user = get_or_create_user(db, request.whatsapp_jid, request.conversation_type)
+        user = get_or_create_user(db, chat_request.whatsapp_jid, chat_request.conversation_type)
 
         # Initialize embedding service following Pydantic AI best practices
         embedding_service = create_embedding_service(settings.gemini_api_key)
@@ -1056,17 +1172,18 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
             whatsapp_client = create_whatsapp_client(
                 http_client=http_client,
                 base_url=settings.whatsapp_client_url,
+                api_key=settings.whatsapp_api_key,
             )
 
             agent_deps = AgentDeps(
                 db=db,
                 user_id=str(user.id),
-                whatsapp_jid=request.whatsapp_jid,
+                whatsapp_jid=chat_request.whatsapp_jid,
                 recent_message_ids=[str(msg.id) for msg in history] if history else [],
                 embedding_service=embedding_service,
                 http_client=http_client,
                 whatsapp_client=whatsapp_client,
-                current_message_id=request.whatsapp_message_id,
+                current_message_id=chat_request.whatsapp_message_id,
             )
 
             # Get AI response (using formatted content) - consume stream into complete response
@@ -1085,10 +1202,10 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
         # Save assistant response (no sender info for bot) with embedding
         save_message(
             db,
-            request.whatsapp_jid,
+            chat_request.whatsapp_jid,
             "assistant",
             ai_response,
-            request.conversation_type,
+            chat_request.conversation_type,
             embedding=assistant_embedding,
         )
 
@@ -1100,7 +1217,9 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
 
 
 @app.post("/transcribe", response_model=TranscribeResponse, tags=["Speech-to-Text"])
+@limiter.limit(f"{settings.rate_limit_expensive}/minute")
 async def transcribe_audio_endpoint(
+    request: Request,
     file: UploadFile = File(...),
     language: str | None = Form(None),
     whatsapp_jid: str | None = Form(None),
@@ -1200,7 +1319,10 @@ async def transcribe_audio_endpoint(
 
 
 @app.post("/tts", tags=["Text-to-Speech"])
-async def text_to_speech_endpoint(request: TTSRequest, db: Session = Depends(get_db)):
+@limiter.limit(f"{settings.rate_limit_expensive}/minute")
+async def text_to_speech_endpoint(
+    request: Request, tts_request: TTSRequest, db: Session = Depends(get_db)
+):
     """
     Convert text to speech using Gemini TTS API
 
@@ -1231,17 +1353,17 @@ async def text_to_speech_endpoint(request: TTSRequest, db: Session = Depends(get
 
     try:
         # Step 1: Validate text input
-        is_valid, error_msg = validate_text_input(request.text)
+        is_valid, error_msg = validate_text_input(tts_request.text)
         if not is_valid:
             logger.warning(f"Invalid TTS input: {error_msg}")
             raise HTTPException(status_code=400, detail=error_msg)
 
-        logger.info(f"Text validated: {len(request.text)} characters")
+        logger.info(f"Text validated: {len(tts_request.text)} characters")
 
         # Step 2: Determine voice based on user preferences
         voice = settings.tts_default_voice
-        if request.whatsapp_jid:
-            prefs = get_user_preferences(db, request.whatsapp_jid)
+        if tts_request.whatsapp_jid:
+            prefs = get_user_preferences(db, tts_request.whatsapp_jid)
             if prefs:
                 voice = get_voice_for_language(prefs.tts_language)
                 logger.info(f"Using voice '{voice}' for language '{prefs.tts_language}'")
@@ -1255,13 +1377,13 @@ async def text_to_speech_endpoint(request: TTSRequest, db: Session = Depends(get
             )
 
         # Step 4: Synthesize speech with selected voice
-        pcm_data, synthesis_error = await synthesize_speech(genai_client, request.text, voice)
+        pcm_data, synthesis_error = await synthesize_speech(genai_client, tts_request.text, voice)
 
         if synthesis_error:
             raise HTTPException(status_code=500, detail=synthesis_error)
 
         # Step 5: Convert PCM to requested format
-        output_format = request.format
+        output_format = tts_request.format
         audio_data = pcm_to_audio(pcm_data, output_format)
         mimetype = get_audio_mimetype(output_format)
 

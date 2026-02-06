@@ -94,6 +94,7 @@ async def process_chat_job(
         whatsapp_client = create_whatsapp_client(
             http_client=http_client,
             base_url=settings.whatsapp_client_url,
+            api_key=settings.whatsapp_api_key,
         )
         logger.info(f"[Job {job_id}] WhatsApp client initialized")
 
