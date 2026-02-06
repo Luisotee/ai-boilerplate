@@ -37,14 +37,14 @@ class SuccessResponse:
 class WhatsAppClient:
     """Async HTTP client for WhatsApp REST API."""
 
-    def __init__(self, http_client: httpx.AsyncClient, base_url: str, api_key: str | None = None):
+    def __init__(self, http_client: httpx.AsyncClient, base_url: str, api_key: str):
         """
         Initialize WhatsApp client.
 
         Args:
             http_client: Shared httpx.AsyncClient for connection pooling
             base_url: WhatsApp client REST API base URL (e.g., http://localhost:3001)
-            api_key: Optional API key for authenticating requests
+            api_key: API key for authenticating requests
         """
         self._client = http_client
         self._base_url = base_url.rstrip("/")
@@ -52,9 +52,7 @@ class WhatsAppClient:
 
     def _get_headers(self) -> dict[str, str]:
         """Return auth headers for requests."""
-        if self._api_key:
-            return {"X-API-Key": self._api_key}
-        return {}
+        return {"X-API-Key": self._api_key}
 
     async def _handle_response(self, response: httpx.Response) -> dict:
         """Handle HTTP response and raise appropriate errors."""
@@ -379,7 +377,7 @@ class WhatsAppClient:
 def create_whatsapp_client(
     http_client: httpx.AsyncClient,
     base_url: str,
-    api_key: str | None = None,
+    api_key: str,
 ) -> WhatsAppClient:
     """
     Factory function for creating WhatsApp client.
@@ -387,7 +385,7 @@ def create_whatsapp_client(
     Args:
         http_client: Shared httpx.AsyncClient
         base_url: WhatsApp client REST API base URL
-        api_key: Optional API key for authenticating requests
+        api_key: API key for authenticating requests
 
     Returns:
         Configured WhatsAppClient instance

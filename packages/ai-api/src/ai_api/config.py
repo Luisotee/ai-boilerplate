@@ -26,7 +26,7 @@ class Settings(BaseSettings):
 
     # API Authentication
     ai_api_key: str  # Required — app fails to start if not set
-    whatsapp_api_key: str | None = None  # For calling back to WhatsApp client
+    whatsapp_api_key: str  # Required — used to authenticate calls to WhatsApp client
 
     # Optional with defaults
     groq_api_key: str | None = None

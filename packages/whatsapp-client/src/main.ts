@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { config } from './config.js';
 import Fastify from 'fastify';
 import FastifySwagger from '@fastify/swagger';
@@ -94,7 +95,13 @@ async function start() {
       return;
     }
     const apiKey = request.headers['x-api-key'];
-    if (!apiKey || apiKey !== config.whatsappApiKey) {
+    const expected = config.whatsappApiKey;
+    if (
+      !apiKey ||
+      typeof apiKey !== 'string' ||
+      apiKey.length !== expected.length ||
+      !crypto.timingSafeEqual(Buffer.from(apiKey), Buffer.from(expected))
+    ) {
       app.log.warn({ url: request.url, ip: request.ip }, 'Unauthorized request');
       return reply.code(401).send({ error: 'Invalid or missing API key' });
     }

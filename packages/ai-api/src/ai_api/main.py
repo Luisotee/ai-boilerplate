@@ -1,4 +1,5 @@
 import base64
+import hmac
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -145,6 +146,17 @@ def custom_openapi():
         version=app.version,
         description=app.description,
         routes=app.routes,
+        tags=[
+            {"name": "Health", "description": "Health check endpoints"},
+            {
+                "name": "Knowledge Base",
+                "description": "PDF upload, processing, and semantic search",
+            },
+            {"name": "Chat", "description": "Synchronous and async chat with the AI agent"},
+            {"name": "Speech-to-Text", "description": "Audio transcription via Whisper"},
+            {"name": "Text-to-Speech", "description": "Speech synthesis via Gemini TTS"},
+            {"name": "Preferences", "description": "Per-user conversation preferences"},
+        ],
     )
     schema.setdefault("components", {})["securitySchemes"] = {
         "ApiKeyAuth": {
@@ -174,7 +186,7 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         api_key = request.headers.get("x-api-key")
-        if not api_key or api_key != settings.ai_api_key:
+        if not api_key or not hmac.compare_digest(api_key, settings.ai_api_key):
             return JSONResponse(
                 status_code=401,
                 content={"detail": "Invalid or missing API key"},
@@ -196,7 +208,7 @@ app.add_middleware(
 )
 
 # Rate limiting (slowapi with Redis backend)
-_redis_password_part = f":{settings.redis_password}@" if settings.redis_password else "@"
+_redis_password_part = f":{settings.redis_password}@" if settings.redis_password else ""
 _rate_limit_storage = (
     f"redis://{_redis_password_part}{settings.redis_host}:{settings.redis_port}/{settings.redis_db}"
 )
