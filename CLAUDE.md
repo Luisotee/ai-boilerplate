@@ -11,7 +11,7 @@ packages/
 ├── whatsapp-client/   # TypeScript — Fastify server (port 3001) + Baileys WhatsApp connection
 │   └── src/           # handlers/, routes/, services/, schemas/, utils/
 └── ai-api/            # Python — FastAPI server (port 8000) + Pydantic AI agent
-    └── src/ai_api/    # agent.py, rag/, streams/, queue/, whatsapp/, scripts/
+    └── src/ai_api/    # agent.py, deps.py, routes/, rag/, streams/, queue/, whatsapp/, scripts/
 ```
 
 ## Tooling
@@ -87,9 +87,10 @@ pnpm format:check                       # Check formatting without writing
 3. WhatsApp-sending tools use the `whatsapp/client.py` HTTP client
 
 ### Adding a new API endpoint (ai-api)
-1. Add route in `main.py` with appropriate tag and rate limit
-2. Add Pydantic schemas in `schemas.py`
-3. Rate-limited endpoints: use `@limiter.limit()` decorator with `RATE_LIMIT_EXPENSIVE`
+1. Add route in the appropriate `routes/*.py` file (or create a new router module)
+2. Use `APIRouter` with appropriate tags; import `limiter` from `deps.py` for rate-limited endpoints
+3. Add Pydantic schemas in `schemas.py`
+4. Register new router in `main.py` via `app.include_router()`
 
 ## Gotchas
 
