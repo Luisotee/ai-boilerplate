@@ -1,17 +1,13 @@
-#!/usr/bin/env python3
 """
 Cleanup expired conversation-scoped documents.
 
-This script deletes documents that have exceeded their TTL (expires_at < NOW()).
-It removes:
-1. Database records (KnowledgeBaseDocument + cascaded chunks)
-2. PDF files from disk
+Deletes documents that have exceeded their TTL (expires_at < NOW()),
+removing both database records (KnowledgeBaseDocument + cascaded chunks)
+and PDF files from disk.
 
-Run periodically via cron or systemd timer:
-    */15 * * * * cd /path/to/project && uv run python -m ai_api.scripts.cleanup_expired_documents
+Called periodically by the background task in main.py.
 """
 
-import asyncio
 from datetime import datetime
 from pathlib import Path
 
@@ -95,19 +91,3 @@ async def cleanup_expired_documents():
 
     finally:
         db.close()
-
-
-async def main():
-    """Main function to run the cleanup."""
-    result = await cleanup_expired_documents()
-
-    if result["errors"]:
-        logger.warning(f"Cleanup completed with {len(result['errors'])} errors")
-        for error in result["errors"]:
-            logger.warning(f"  - {error}")
-    else:
-        logger.info(f"Cleanup completed successfully: {result['deleted_count']} documents deleted")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

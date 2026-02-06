@@ -1,3 +1,4 @@
+import asyncio
 import hmac
 from contextlib import asynccontextmanager
 
@@ -21,6 +22,18 @@ from .routes import (
     preferences_router,
     speech_router,
 )
+from .scripts.cleanup_expired_documents import cleanup_expired_documents
+
+
+async def _cleanup_loop():
+    """Periodically delete expired conversation-scoped documents."""
+    interval = settings.cleanup_interval_minutes * 60
+    while True:
+        try:
+            await cleanup_expired_documents()
+        except Exception:
+            logger.error("Expired document cleanup failed", exc_info=True)
+        await asyncio.sleep(interval)
 
 
 @asynccontextmanager
@@ -39,6 +52,9 @@ async def lifespan(app: FastAPI):
         logger.error(f"❌ Failed to initialize Redis: {e}")
         raise
 
+    # Start periodic expired-document cleanup
+    cleanup_task = asyncio.create_task(_cleanup_loop())
+
     logger.info("=" * 60)
     logger.info("AI API is ready!")
     logger.info("=" * 60)
@@ -54,6 +70,11 @@ async def lifespan(app: FastAPI):
 
     # Cleanup on shutdown
     logger.info("Shutting down AI API service...")
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
     await close_arq_redis()
     logger.info("✅ Redis connection pool closed")
 
