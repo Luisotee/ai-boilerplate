@@ -1,6 +1,6 @@
 import base64
 import uuid
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -287,7 +287,7 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
                 raise HTTPException(status_code=500, detail="Failed to save document")
 
             # Create database record with conversation scope
-            expires_at = datetime.utcnow() + timedelta(hours=settings.conversation_pdf_ttl_hours)
+            expires_at = datetime.now(UTC) + timedelta(hours=settings.conversation_pdf_ttl_hours)
             document = KnowledgeBaseDocument(
                 id=doc_id,
                 filename=stored_filename,

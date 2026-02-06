@@ -8,7 +8,7 @@ and PDF files from disk.
 Called periodically by the background task in main.py.
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from ..config import settings
@@ -20,7 +20,7 @@ from ..logger import logger
 UPLOAD_DIR = Path(settings.kb_upload_dir)
 
 
-async def cleanup_expired_documents():
+def cleanup_expired_documents():
     """
     Delete all documents where expires_at < NOW().
 
@@ -36,7 +36,7 @@ async def cleanup_expired_documents():
         logger.info("Starting expired document cleanup...")
 
         # Find expired documents
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
         expired_docs = (
             db.query(KnowledgeBaseDocument)
             .filter(

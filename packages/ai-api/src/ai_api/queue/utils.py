@@ -6,7 +6,7 @@ and managing job metadata.
 """
 
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from redis.asyncio import Redis
@@ -28,7 +28,7 @@ async def save_job_chunk(redis: Redis, job_id: str, index: int, content: str) ->
     chunk_key = f"job:chunks:{job_id}"
 
     chunk_data = json.dumps(
-        {"index": index, "content": content, "timestamp": datetime.utcnow().isoformat()}
+        {"index": index, "content": content, "timestamp": datetime.now(UTC).isoformat()}
     )
 
     # Append chunk to list
@@ -96,7 +96,7 @@ async def set_job_metadata(redis: Redis, job_id: str, metadata: dict[str, Any]) 
     meta_key = f"job:meta:{job_id}"
 
     # Add timestamp
-    metadata["created_at"] = datetime.utcnow().isoformat()
+    metadata["created_at"] = datetime.now(UTC).isoformat()
 
     await redis.set(
         meta_key,

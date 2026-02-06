@@ -20,7 +20,8 @@
       "WebFetch(domain:arize.com)",
       "WebFetch(domain:pyogg.readthedocs.io)",
       "Bash(gh pr view:*)",
-      "Bash(gh pr diff:*)"
+      "Bash(gh pr diff:*)",
+      "Bash(pnpm lint:*)"
     ],
     "deny": [],
     "ask": []

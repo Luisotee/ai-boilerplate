@@ -30,7 +30,7 @@ async def _cleanup_loop():
     interval = settings.cleanup_interval_minutes * 60
     while True:
         try:
-            await cleanup_expired_documents()
+            await asyncio.to_thread(cleanup_expired_documents)
         except Exception:
             logger.error("Expired document cleanup failed", exc_info=True)
         await asyncio.sleep(interval)
