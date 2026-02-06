@@ -250,13 +250,6 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
             job_data["image_mimetype"] = chat_request.image_mimetype
             job_data["has_image"] = "true"
 
-        # Handle document (PDF) data if present
-        has_document = (
-            chat_request.document_data is not None
-            and chat_request.document_mimetype is not None
-            and chat_request.document_filename is not None
-        )
-
         if has_document:
             # Only support PDFs for now
             if chat_request.document_mimetype != "application/pdf":
