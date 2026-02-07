@@ -207,17 +207,18 @@ async def run_stream_consumer(redis: Redis):
                 # Process each user stream concurrently
                 # But each user's messages are processed sequentially
                 if active_streams:
+                    # Convert set to list ONCE for deterministic ordering
+                    users_list = list(active_streams)
+
                     tasks = [
-                        process_user_stream(redis, user_id, running_flag)
-                        for user_id in active_streams
+                        process_user_stream(redis, user_id, running_flag) for user_id in users_list
                     ]
                     # Use return_exceptions=True to prevent one failure from canceling all
                     results = await asyncio.gather(*tasks, return_exceptions=True)
 
-                    # Log any exceptions
-                    for i, result in enumerate(results):
+                    # Log any exceptions with guaranteed user-result correspondence
+                    for user_id, result in zip(users_list, results):
                         if isinstance(result, Exception):
-                            user_id = list(active_streams)[i]
                             logger.error(
                                 f"Stream processing failed for user {user_id}: {result}",
                                 exc_info=True,

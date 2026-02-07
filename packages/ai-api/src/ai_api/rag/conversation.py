@@ -4,7 +4,7 @@ Conversation history RAG implementation.
 Provides semantic search over user's conversation history using vector similarity.
 """
 
-from sqlalchemy import and_, or_, text
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -84,47 +84,54 @@ def get_batch_context_messages(
 
     user_id = matched_messages[0].user_id
 
-    # Build conditions for fetching context around each matched message
-    # For each match, we need messages within the window before and after
-    conditions = []
-    for msg in matched_messages:
-        # Messages before this match (within window)
-        conditions.append(
-            and_(
-                ConversationMessage.timestamp < msg.timestamp,
-                ConversationMessage.timestamp
-                >= db.query(ConversationMessage.timestamp)
-                .filter(
-                    ConversationMessage.user_id == user_id,
-                    ConversationMessage.timestamp < msg.timestamp,
-                )
-                .order_by(ConversationMessage.timestamp.desc())
-                .limit(window_size)
-                .offset(window_size - 1)
-                .scalar_subquery(),
-            )
-        )
-        # Messages after this match (within window)
-        conditions.append(
-            and_(
-                ConversationMessage.timestamp > msg.timestamp,
-                ConversationMessage.timestamp
-                <= db.query(ConversationMessage.timestamp)
-                .filter(
-                    ConversationMessage.user_id == user_id,
-                    ConversationMessage.timestamp > msg.timestamp,
-                )
-                .order_by(ConversationMessage.timestamp.asc())
-                .limit(window_size)
-                .offset(window_size - 1)
-                .scalar_subquery(),
-            )
-        )
+    # Find the range of timestamps we need context for
+    matched_timestamps = [msg.timestamp for msg in matched_messages]
+    earliest_match = min(matched_timestamps)
+    latest_match = max(matched_timestamps)
 
-    # Fetch all context messages in a single query
+    # Query for boundary timestamps (earliest context start, latest context end)
+    # This avoids fetching the entire conversation history
+    earliest_context_start = (
+        db.query(ConversationMessage.timestamp)
+        .filter(
+            ConversationMessage.user_id == user_id,
+            ConversationMessage.timestamp < earliest_match,
+        )
+        .order_by(ConversationMessage.timestamp.desc())
+        .limit(window_size)
+        .all()
+    )
+
+    latest_context_end = (
+        db.query(ConversationMessage.timestamp)
+        .filter(
+            ConversationMessage.user_id == user_id,
+            ConversationMessage.timestamp > latest_match,
+        )
+        .order_by(ConversationMessage.timestamp.asc())
+        .limit(window_size)
+        .all()
+    )
+
+    # Determine actual boundary timestamps (handle sparse context gracefully)
+    if earliest_context_start:
+        min_timestamp = earliest_context_start[-1].timestamp  # Oldest message in context
+    else:
+        min_timestamp = earliest_match  # No messages before, use earliest match
+
+    if latest_context_end:
+        max_timestamp = latest_context_end[-1].timestamp  # Newest message in context
+    else:
+        max_timestamp = latest_match  # No messages after, use latest match
+
+    # Single query to fetch all context messages in the range
     all_context_messages = (
         db.query(ConversationMessage)
-        .filter(ConversationMessage.user_id == user_id, or_(*conditions))
+        .filter(
+            ConversationMessage.user_id == user_id,
+            ConversationMessage.timestamp >= min_timestamp,
+            ConversationMessage.timestamp <= max_timestamp,
+        )
         .order_by(ConversationMessage.timestamp)
         .all()
     )
@@ -133,13 +140,11 @@ def get_batch_context_messages(
         f"Batch context fetch: {len(all_context_messages)} messages for {len(matched_messages)} matches"
     )
 
-    # Group messages by their matched message
+    # Group messages by their matched message (Python slicing handles exact window_size)
     result = {}
     for msg in matched_messages:
         before = [m for m in all_context_messages if m.timestamp < msg.timestamp][-window_size:]
-
         after = [m for m in all_context_messages if m.timestamp > msg.timestamp][:window_size]
-
         result[str(msg.id)] = {"before": before, "after": after}
 
     return result

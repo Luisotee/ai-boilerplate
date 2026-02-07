@@ -34,10 +34,10 @@ export const config = {
   rateLimitExpensive: parseInt(process.env.RATE_LIMIT_EXPENSIVE || '5', 10),
   // Timeouts
   timeouts: {
-    default: parseInt(process.env.FETCH_TIMEOUT_DEFAULT || '30000', 10),
-    transcription: parseInt(process.env.FETCH_TIMEOUT_TRANSCRIPTION || '60000', 10),
-    tts: parseInt(process.env.FETCH_TIMEOUT_TTS || '45000', 10),
-    polling: parseInt(process.env.FETCH_TIMEOUT_POLLING || '5000', 10),
+    default: parseInt(process.env.FETCH_TIMEOUT_DEFAULT_MS || '30000', 10),
+    transcription: parseInt(process.env.FETCH_TIMEOUT_TRANSCRIPTION_MS || '60000', 10),
+    tts: parseInt(process.env.FETCH_TIMEOUT_TTS_MS || '45000', 10),
+    polling: parseInt(process.env.FETCH_TIMEOUT_POLLING_MS || '5000', 10),
   },
   // Polling
   polling: {

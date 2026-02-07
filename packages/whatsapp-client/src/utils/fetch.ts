@@ -1,3 +1,5 @@
+import { RequestTimeoutError } from '../errors/RequestTimeoutError.js';
+
 /**
  * Fetch with automatic timeout using AbortController
  */
@@ -17,7 +19,7 @@ export async function fetchWithTimeout(
     return response;
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error(`Request timeout after ${timeoutMs}ms: ${url}`);
+      throw new RequestTimeoutError(url, timeoutMs);
     }
     throw error;
   } finally {
