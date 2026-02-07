@@ -5,6 +5,7 @@ Handles background processing of uploaded PDFs: parsing, semantic chunking,
 embedding generation, and storage in the database.
 """
 
+import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -27,24 +28,58 @@ async def process_pdf_document(
     whatsapp_jid: str | None = None,
 ):
     """
-    Background task to process an uploaded PDF document.
+    Background task to process an uploaded PDF document with timeout constraints.
 
-    Steps:
-    1. Update document status to 'processing'
-    2. Parse PDF with Docling
-    3. Extract Markdown content
-    4. Perform semantic chunking
-    5. Generate embeddings for each chunk
-    6. Store chunks in database
-    7. Update document status to 'completed' or 'failed'
+    Applies multi-level timeouts:
+    - Overall processing timeout (300s default)
+    - Docling parsing timeout (180s default)
+    - Per-embedding timeout (10s default)
+    - Batch embedding timeout (240s default)
 
     Args:
         document_id: UUID of the document record
         file_path: Absolute path to the PDF file on disk
         whatsapp_jid: Optional WhatsApp JID for conversation-scoped documents
     """
+    try:
+        # Wrap processing in overall timeout
+        await asyncio.wait_for(
+            _process_pdf_document_impl(document_id, file_path, whatsapp_jid),
+            timeout=settings.kb_processing_timeout_seconds,
+        )
+    except TimeoutError:
+        logger.error(
+            f"❌ Document processing timeout after {settings.kb_processing_timeout_seconds}s: {document_id}"
+        )
+        # Update document status to failed with timeout error
+        db = SessionLocal()
+        try:
+            document = db.query(KnowledgeBaseDocument).filter_by(id=document_id).first()
+            if document:
+                document.status = "failed"
+                document.error_message = (
+                    f"Processing timeout after {settings.kb_processing_timeout_seconds} seconds"
+                )
+                document.processed_date = datetime.now(UTC)
+                db.commit()
+        except Exception as update_error:
+            logger.error(f"Failed to update document status after timeout: {update_error}")
+        finally:
+            db.close()
+
+
+async def _process_pdf_document_impl(
+    document_id: str,
+    file_path: str,
+    whatsapp_jid: str | None = None,
+):
+    """
+    Internal implementation of PDF processing with individual timeouts.
+
+    This is separated from the public function to allow overall timeout wrapping.
+    """
     db = SessionLocal()
-    encoder = tiktoken.get_encoding("cl100k_base")  # Token counter
+    encoder = tiktoken.get_encoding("cl100k_base")
 
     try:
         logger.info(f"Starting processing for document {document_id}")
@@ -63,12 +98,24 @@ async def process_pdf_document(
         if not Path(file_path).exists():
             raise FileNotFoundError(f"PDF file not found: {file_path}")
 
-        # Step 1: Parse PDF with Docling
+        # Step 1: Parse PDF with Docling (with timeout)
         logger.info(f"Parsing PDF with Docling: {file_path}")
-        converter = DocumentConverter()
-        result = converter.convert(file_path)
+        try:
+            # Run CPU-bound Docling in thread pool with timeout
+            def _convert_pdf():
+                converter = DocumentConverter()
+                return converter.convert(file_path)
 
-        # Step 2: Keep DoclingDocument for metadata access (don't export to Markdown!)
+            result = await asyncio.wait_for(
+                asyncio.to_thread(_convert_pdf), timeout=settings.kb_docling_timeout_seconds
+            )
+        except TimeoutError:
+            raise ValueError(
+                f"Docling parsing timeout after {settings.kb_docling_timeout_seconds} seconds. "
+                f"PDF may be corrupt or too complex."
+            )
+
+        # Step 2: Keep DoclingDocument for metadata access
         doc: DoclingDocument = result.document
         logger.info("Docling parsed document successfully")
 
@@ -88,21 +135,19 @@ async def process_pdf_document(
         if not embedding_service:
             raise ValueError("GEMINI_API_KEY not configured - cannot generate embeddings")
 
-        # Step 5: Perform hybrid chunking with token-aware chunker
-        # HybridChunker uses document structure + token limits for optimal RAG chunks
+        # Step 5: Perform hybrid chunking
         logger.info(
             f"Chunking document with HybridChunker (max_tokens: {settings.kb_max_chunk_tokens})"
         )
 
-        # Wrap tiktoken encoder in OpenAITokenizer for HybridChunker compatibility
         tokenizer_wrapper = OpenAITokenizer(
             tokenizer=encoder,
             max_tokens=settings.kb_max_chunk_tokens,
         )
 
         chunker = HybridChunker(
-            tokenizer=tokenizer_wrapper,  # Use wrapped tokenizer
-            merge_peers=True,  # Merge consecutive chunks with same heading
+            tokenizer=tokenizer_wrapper,
+            merge_peers=True,
         )
 
         doc_chunks = list(chunker.chunk(doc))
@@ -111,86 +156,31 @@ async def process_pdf_document(
         if not doc_chunks:
             raise ValueError("HybridChunker produced no valid chunks")
 
-        # Step 6: Generate embeddings and store chunks with metadata
+        # Step 6: Generate embeddings with timeout protection
         logger.info("Generating embeddings and storing chunks...")
         stored_count = 0
 
-        for i, chunk in enumerate(doc_chunks):
-            # Extract text content
-            chunk_text = chunk.text
-
-            # Calculate token count
-            token_count = len(encoder.encode(chunk_text))
-
-            # Extract page numbers from provenance metadata
-            page_numbers = set()
-            headings = []
-
-            # Iterate through doc items in the chunk to collect metadata
-            for doc_item in chunk.meta.doc_items:
-                if hasattr(doc_item, "prov") and doc_item.prov:
-                    for prov in doc_item.prov:
-                        if hasattr(prov, "page_no"):
-                            page_numbers.add(prov.page_no)
-
-                # Extract headings (if item is a section header)
-                if hasattr(doc_item, "label") and "SECTION_HEADER" in str(doc_item.label):
-                    if hasattr(doc_item, "text"):
-                        headings.append(doc_item.text)
-
-            # Determine primary page number (first page in sorted set)
-            primary_page = min(page_numbers) if page_numbers else None
-
-            # Determine primary heading (first heading)
-            primary_heading = headings[0] if headings else None
-
-            # Prepare chunk metadata
-            chunk_metadata = {
-                "all_page_numbers": sorted(list(page_numbers)),  # All pages this chunk spans
-                "all_headings": headings,  # All headings in this chunk
-                "doc_item_count": len(chunk.meta.doc_items),
-            }
-
-            logger.debug(
-                f"Chunk {i}: page={primary_page}, heading={primary_heading}, tokens={token_count}"
+        # Wrap embedding generation in batch timeout
+        try:
+            stored_count = await asyncio.wait_for(
+                _generate_and_store_embeddings(
+                    doc_chunks=doc_chunks,
+                    encoder=encoder,
+                    embedding_service=embedding_service,
+                    document_id=document_id,
+                    db=db,
+                ),
+                timeout=settings.kb_embedding_batch_timeout_seconds,
+            )
+        except TimeoutError:
+            raise ValueError(
+                f"Embedding generation timeout after {settings.kb_embedding_batch_timeout_seconds} seconds. "
+                f"Generated {stored_count}/{len(doc_chunks)} chunks before timeout."
             )
 
-            # Generate embedding for chunk
-            chunk_embedding = await embedding_service.generate(
-                chunk_text, task_type="RETRIEVAL_DOCUMENT"
-            )
-
-            if not chunk_embedding:
-                logger.warning(f"Failed to generate embedding for chunk {i} - skipping")
-                continue
-
-            # Create chunk record with extracted metadata
-            chunk_obj = KnowledgeBaseChunk(
-                document_id=document_id,
-                chunk_index=i,
-                content=chunk_text,
-                content_type="text",
-                page_number=primary_page,  # ✅ FIXED: Extract from provenance
-                heading=primary_heading,  # ✅ FIXED: Extract from doc structure
-                embedding=chunk_embedding,
-                embedding_generated_at=datetime.now(UTC),
-                token_count=token_count,
-                chunk_metadata=chunk_metadata,  # Store additional metadata
-            )
-
-            db.add(chunk_obj)
-            stored_count += 1
-
-            # Commit in batches for efficiency
-            if (i + 1) % 10 == 0:
-                db.commit()
-                logger.debug(f"Committed batch of 10 chunks (up to {i + 1})")
-
-        # Final commit
-        db.commit()
         logger.info(f"Stored {stored_count} chunks with embeddings")
 
-        # Step 8: Update document status to completed
+        # Step 7: Update document status to completed
         document.status = "completed"
         document.processed_date = datetime.now(UTC)
         document.chunk_count = stored_count
@@ -219,3 +209,96 @@ async def process_pdf_document(
     finally:
         db.close()
         logger.info(f"Processing completed for document {document_id}")
+
+
+async def _generate_and_store_embeddings(
+    doc_chunks: list,
+    encoder,
+    embedding_service,
+    document_id: str,
+    db,
+) -> int:
+    """
+    Generate embeddings for chunks with per-chunk timeout.
+
+    Returns:
+        Number of chunks successfully stored
+    """
+    stored_count = 0
+
+    for i, chunk in enumerate(doc_chunks):
+        # Extract text content
+        chunk_text = chunk.text
+
+        # Calculate token count
+        token_count = len(encoder.encode(chunk_text))
+
+        # Extract page numbers and headings from provenance metadata
+        page_numbers = set()
+        headings = []
+
+        for doc_item in chunk.meta.doc_items:
+            if hasattr(doc_item, "prov") and doc_item.prov:
+                for prov in doc_item.prov:
+                    if hasattr(prov, "page_no"):
+                        page_numbers.add(prov.page_no)
+
+            if hasattr(doc_item, "label") and "SECTION_HEADER" in str(doc_item.label):
+                if hasattr(doc_item, "text"):
+                    headings.append(doc_item.text)
+
+        primary_page = min(page_numbers) if page_numbers else None
+        primary_heading = headings[0] if headings else None
+
+        chunk_metadata = {
+            "all_page_numbers": sorted(list(page_numbers)),
+            "all_headings": headings,
+            "doc_item_count": len(chunk.meta.doc_items),
+        }
+
+        logger.debug(
+            f"Chunk {i}: page={primary_page}, heading={primary_heading}, tokens={token_count}"
+        )
+
+        # Generate embedding with timeout
+        try:
+            chunk_embedding = await asyncio.wait_for(
+                embedding_service.generate(chunk_text, task_type="RETRIEVAL_DOCUMENT"),
+                timeout=settings.kb_embedding_timeout_seconds,
+            )
+        except TimeoutError:
+            logger.warning(
+                f"Embedding timeout for chunk {i} after {settings.kb_embedding_timeout_seconds}s - skipping"
+            )
+            continue
+
+        if not chunk_embedding:
+            logger.warning(f"Failed to generate embedding for chunk {i} - skipping")
+            continue
+
+        # Create chunk record
+        chunk_obj = KnowledgeBaseChunk(
+            document_id=document_id,
+            chunk_index=i,
+            content=chunk_text,
+            content_type="text",
+            page_number=primary_page,
+            heading=primary_heading,
+            embedding=chunk_embedding,
+            embedding_generated_at=datetime.now(UTC),
+            token_count=token_count,
+            chunk_metadata=chunk_metadata,
+        )
+
+        db.add(chunk_obj)
+        stored_count += 1
+
+        # Commit in batches for efficiency
+        if (i + 1) % 10 == 0:
+            db.commit()
+            logger.debug(f"Committed batch of 10 chunks (up to {i + 1})")
+
+    # Final commit
+    db.commit()
+
+    return stored_count

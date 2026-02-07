@@ -6,6 +6,7 @@ import makeWASocket, {
 import { Boom } from '@hapi/boom';
 import qrcode from 'qrcode-terminal';
 import { logger } from './logger.js';
+import { config } from './config.js';
 import { setBaileysSocket } from './services/baileys.js';
 import { handleTextMessage } from './handlers/text.js';
 import { transcribeAudioMessage } from './handlers/audio.js';
@@ -15,6 +16,41 @@ import { sendFailureReaction } from './utils/reactions.js';
 
 const DEFAULT_IMAGE_PROMPT = 'Please describe and analyze this image';
 const DEFAULT_DOCUMENT_PROMPT = 'I have uploaded a document for you to analyze';
+
+// Reconnection state
+let reconnectionAttempts = 0;
+let reconnectionTimer: NodeJS.Timeout | null = null;
+let isReconnecting = false;
+
+/**
+ * Calculate exponential backoff delay with jitter
+ */
+function calculateBackoffDelay(attempt: number): number {
+  const { initialDelayMs, maxDelayMs, jitterMs } = config.reconnection;
+
+  // Exponential backoff: initial * 2^attempt
+  const exponentialDelay = initialDelayMs * Math.pow(2, attempt);
+
+  // Cap at maximum delay
+  const cappedDelay = Math.min(exponentialDelay, maxDelayMs);
+
+  // Add random jitter to prevent thundering herd
+  const jitter = Math.random() * jitterMs;
+
+  return cappedDelay + jitter;
+}
+
+/**
+ * Reset reconnection state after successful connection
+ */
+function resetReconnectionState(): void {
+  reconnectionAttempts = 0;
+  isReconnecting = false;
+  if (reconnectionTimer) {
+    clearTimeout(reconnectionTimer);
+    reconnectionTimer = null;
+  }
+}
 
 export async function initializeWhatsApp(): Promise<void> {
   const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
@@ -37,14 +73,65 @@ export async function initializeWhatsApp(): Promise<void> {
       const shouldReconnect =
         (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
 
-      logger.info({ shouldReconnect }, 'Connection closed');
+      logger.info(
+        {
+          shouldReconnect,
+          reconnectionAttempts,
+          statusCode: (lastDisconnect?.error as Boom)?.output?.statusCode,
+        },
+        'Connection closed'
+      );
 
       if (shouldReconnect) {
-        initializeWhatsApp();
+        // Check if max attempts exceeded
+        if (reconnectionAttempts >= config.reconnection.maxAttempts) {
+          logger.error(
+            {
+              attempts: reconnectionAttempts,
+              maxAttempts: config.reconnection.maxAttempts,
+            },
+            '❌ Max reconnection attempts exceeded. Manual restart required.'
+          );
+          return;
+        }
+
+        // Prevent multiple concurrent reconnection attempts
+        if (isReconnecting) {
+          logger.debug('Reconnection already in progress, skipping');
+          return;
+        }
+
+        isReconnecting = true;
+        reconnectionAttempts++;
+
+        // Calculate backoff delay
+        const delayMs = calculateBackoffDelay(reconnectionAttempts - 1);
+
+        logger.info(
+          {
+            attempt: reconnectionAttempts,
+            maxAttempts: config.reconnection.maxAttempts,
+            delayMs: Math.round(delayMs),
+          },
+          `⏳ Reconnecting in ${Math.round(delayMs / 1000)}s...`
+        );
+
+        // Schedule reconnection with exponential backoff
+        reconnectionTimer = setTimeout(() => {
+          logger.info({ attempt: reconnectionAttempts }, 'Attempting reconnection');
+          isReconnecting = false;
+          initializeWhatsApp();
+        }, delayMs);
+      } else {
+        logger.info('Logged out. QR code required for reconnection.');
+        resetReconnectionState();
       }
     } else if (connection === 'open') {
-      logger.info('WhatsApp connection opened successfully');
+      logger.info('✅ WhatsApp connection opened successfully');
       setBaileysSocket(sock);
+
+      // Reset reconnection state on successful connection
+      resetReconnectionState();
     }
   });
 
