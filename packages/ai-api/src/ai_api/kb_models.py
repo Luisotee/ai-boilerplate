@@ -22,6 +22,13 @@ class KnowledgeBaseDocument(Base):
 
     Tracks document metadata, processing status, and provides relationship
     to document chunks.
+
+    Status values:
+    - 'pending': Upload received, queued for processing
+    - 'processing': Currently being parsed and chunked
+    - 'completed': Successfully processed, all chunks generated
+    - 'partial': Partially processed, some chunks created before failure
+    - 'failed': Processing failed, no chunks created
     """
 
     __tablename__ = "knowledge_base_documents"

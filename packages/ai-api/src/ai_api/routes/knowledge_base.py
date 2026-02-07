@@ -425,7 +425,7 @@ async def list_documents(
 
         # Apply status filter if provided
         if status:
-            valid_statuses = ["pending", "processing", "completed", "failed"]
+            valid_statuses = ["pending", "processing", "completed", "partial", "failed"]
             if status not in valid_statuses:
                 raise HTTPException(
                     status_code=400,

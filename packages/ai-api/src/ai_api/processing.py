@@ -15,6 +15,8 @@ from docling.document_converter import DocumentConverter
 from docling_core.transforms.chunker.tokenizer.openai import OpenAITokenizer
 from docling_core.types.doc import DoclingDocument
 
+from sqlalchemy.orm import Session
+
 from .config import settings
 from .database import SessionLocal
 from .embeddings import create_embedding_service
@@ -162,7 +164,7 @@ async def _process_pdf_document_impl(
 
         # Wrap embedding generation in batch timeout
         try:
-            stored_count = await asyncio.wait_for(
+            stored_count, failure_metadata = await asyncio.wait_for(
                 _generate_and_store_embeddings(
                     doc_chunks=doc_chunks,
                     encoder=encoder,
@@ -173,22 +175,69 @@ async def _process_pdf_document_impl(
                 timeout=settings.kb_embedding_batch_timeout_seconds,
             )
         except TimeoutError:
-            raise ValueError(
-                f"Embedding generation timeout after {settings.kb_embedding_batch_timeout_seconds} seconds. "
-                f"Generated {stored_count}/{len(doc_chunks)} chunks before timeout."
+            # Query actual committed chunks
+            actual_count = db.query(KnowledgeBaseChunk).filter_by(document_id=document_id).count()
+
+            logger.warning(
+                f"Embedding timeout after {settings.kb_embedding_batch_timeout_seconds}s. "
+                f"Committed {actual_count}/{len(doc_chunks)} chunks."
             )
 
-        logger.info(f"Stored {stored_count} chunks with embeddings")
+            raise ValueError(
+                f"Embedding generation timeout after {settings.kb_embedding_batch_timeout_seconds} seconds. "
+                f"Successfully committed {actual_count} of {len(doc_chunks)} chunks."
+            )
 
-        # Step 7: Update document status to completed
-        document.status = "completed"
+        logger.info(
+            f"Stored {stored_count}/{failure_metadata['total_chunks_parsed']} chunks "
+            f"(skipped: {failure_metadata['chunks_skipped']})"
+        )
+
+        # Step 7: Update document status based on completeness
+        if stored_count == 0:
+            document.status = "failed"  # Nothing stored
+        elif failure_metadata["chunks_skipped"] > 0:
+            document.status = "partial"  # Some chunks missing
+            logger.warning(
+                f"Document {document_id} partially processed: "
+                f"{stored_count}/{failure_metadata['total_chunks_parsed']} chunks. "
+                f"Skipped {failure_metadata['chunks_skipped']} chunks due to errors."
+            )
+        else:
+            document.status = "completed"  # All chunks stored
+
         document.processed_date = datetime.now(UTC)
         document.chunk_count = stored_count
+
+        # Add failure metadata to document metadata when chunks are skipped
+        if failure_metadata["chunks_skipped"] > 0:
+            if document.doc_metadata is None:
+                document.doc_metadata = {}
+
+            document.doc_metadata["processing_errors"] = {
+                "total_chunks_parsed": failure_metadata["total_chunks_parsed"],
+                "chunks_stored": stored_count,
+                "chunks_skipped": failure_metadata["chunks_skipped"],
+                "skipped_chunk_indices": failure_metadata["skipped_chunk_indices"],
+                "failure_summary": {
+                    "embedding_timeout": sum(
+                        1
+                        for r in failure_metadata["failure_reasons"].values()
+                        if r == "embedding_timeout"
+                    ),
+                    "embedding_generation_failed": sum(
+                        1
+                        for r in failure_metadata["failure_reasons"].values()
+                        if r == "embedding_generation_failed"
+                    ),
+                },
+            }
+
         db.commit()
 
         logger.info(
-            f"✅ Successfully processed document {document_id}: "
-            f"{document.original_filename} ({stored_count} chunks)"
+            f"✅ Processed document {document_id}: {document.original_filename} "
+            f"({stored_count} chunks, status: {document.status})"
         )
 
     except Exception as e:
@@ -198,13 +247,33 @@ async def _process_pdf_document_impl(
         try:
             document = db.query(KnowledgeBaseDocument).filter_by(id=document_id).first()
             if document:
-                document.status = "failed"
+                # Query actual committed chunks
+                actual_chunk_count = (
+                    db.query(KnowledgeBaseChunk).filter_by(document_id=document_id).count()
+                )
+
+                # Determine status based on partial success
+                if actual_chunk_count > 0:
+                    document.status = "partial"  # New status for partial success
+                    logger.info(
+                        f"Document {document_id} partially processed: "
+                        f"{actual_chunk_count} chunks committed before failure"
+                    )
+                else:
+                    document.status = "failed"  # No chunks, complete failure
+
+                document.chunk_count = actual_chunk_count
                 document.error_message = str(e)
                 document.processed_date = datetime.now(UTC)
                 db.commit()
-                logger.info(f"Document {document_id} marked as failed")
+
+                logger.info(
+                    f"Document {document_id} marked as {document.status} "
+                    f"with {actual_chunk_count} chunks"
+                )
         except Exception as update_error:
             logger.error(f"Failed to update document status: {str(update_error)}")
+            db.rollback()
 
     finally:
         db.close()
@@ -217,14 +286,18 @@ async def _generate_and_store_embeddings(
     embedding_service,
     document_id: str,
     db,
-) -> int:
+) -> tuple[int, dict]:
     """
     Generate embeddings for chunks with per-chunk timeout.
 
     Returns:
-        Number of chunks successfully stored
+        Tuple of (stored_count, failure_metadata)
+        - stored_count: Number of chunks successfully stored
+        - failure_metadata: Dict containing failure tracking information
     """
     stored_count = 0
+    skipped_chunks = []
+    failure_reasons = {}
 
     for i, chunk in enumerate(doc_chunks):
         # Extract text content
@@ -270,10 +343,14 @@ async def _generate_and_store_embeddings(
             logger.warning(
                 f"Embedding timeout for chunk {i} after {settings.kb_embedding_timeout_seconds}s - skipping"
             )
+            skipped_chunks.append(i)
+            failure_reasons[i] = "embedding_timeout"
             continue
 
         if not chunk_embedding:
             logger.warning(f"Failed to generate embedding for chunk {i} - skipping")
+            skipped_chunks.append(i)
+            failure_reasons[i] = "embedding_generation_failed"
             continue
 
         # Create chunk record
@@ -301,4 +378,38 @@ async def _generate_and_store_embeddings(
     # Final commit
     db.commit()
 
-    return stored_count
+    # Build failure metadata
+    failure_metadata = {
+        "total_chunks_parsed": len(doc_chunks),
+        "chunks_stored": stored_count,
+        "chunks_skipped": len(skipped_chunks),
+        "skipped_chunk_indices": skipped_chunks,
+        "failure_reasons": failure_reasons,
+    }
+
+    return stored_count, failure_metadata
+
+
+def cleanup_partial_chunks(db: Session, document_id: str) -> int:
+    """
+    Delete all chunks associated with a document.
+
+    Used to clean up partial processing failures if desired.
+
+    Args:
+        db: Database session
+        document_id: UUID of the document
+
+    Returns:
+        Number of chunks deleted
+    """
+    deleted_count = (
+        db.query(KnowledgeBaseChunk)
+        .filter_by(document_id=document_id)
+        .delete(synchronize_session=False)
+    )
+
+    db.commit()
+    logger.info(f"Cleaned up {deleted_count} orphaned chunks for document {document_id}")
+
+    return deleted_count
