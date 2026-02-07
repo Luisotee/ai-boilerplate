@@ -81,24 +81,45 @@ async def close_arq_redis() -> None:
         _arq_pool = None
 
 
-async def get_redis_client() -> Redis:
+class RedisClientManager:
+    """
+    Async context manager for Redis client with automatic cleanup.
+
+    Ensures Redis connections are properly closed when exiting context.
+    """
+
+    def __init__(self):
+        redis_settings = get_redis_settings()
+        self.client = Redis(
+            host=redis_settings.host,
+            port=redis_settings.port,
+            db=redis_settings.database,
+            password=redis_settings.password,
+            decode_responses=False,
+        )
+
+    async def __aenter__(self) -> Redis:
+        """Enter async context - returns Redis client."""
+        return self.client
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Exit async context - closes Redis client."""
+        await self.client.close()
+        return False
+
+
+def get_redis_client() -> RedisClientManager:
     """
     Get a standalone Redis client for custom operations.
 
     This is separate from the arq pool and should be used
     for direct Redis operations (chunk storage, metadata, etc.).
 
+    Usage:
+        async with get_redis_client() as redis:
+            await redis.set("key", "value")
+
     Returns:
-        Redis client instance
+        RedisClientManager that must be used as async context manager
     """
-    redis_settings = get_redis_settings()
-
-    client = Redis(
-        host=redis_settings.host,
-        port=redis_settings.port,
-        db=redis_settings.database,
-        password=redis_settings.password,
-        decode_responses=False,  # Return bytes for compatibility
-    )
-
-    return client
+    return RedisClientManager()

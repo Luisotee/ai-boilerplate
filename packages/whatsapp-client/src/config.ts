@@ -45,4 +45,11 @@ export const config = {
     maxIterations: parseInt(process.env.POLL_MAX_ITERATIONS || '240', 10),
     maxDurationMs: parseInt(process.env.POLL_MAX_DURATION_MS || '120000', 10),
   },
+  // Reconnection strategy
+  reconnection: {
+    initialDelayMs: parseInt(process.env.RECONNECT_INITIAL_DELAY_MS || '1000', 10),
+    maxDelayMs: parseInt(process.env.RECONNECT_MAX_DELAY_MS || '30000', 10),
+    maxAttempts: parseInt(process.env.RECONNECT_MAX_ATTEMPTS || '10', 10),
+    jitterMs: parseInt(process.env.RECONNECT_JITTER_MS || '500', 10),
+  },
 } as const;
