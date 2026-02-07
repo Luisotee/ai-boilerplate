@@ -32,4 +32,17 @@ export const config = {
   corsOrigins: process.env.CORS_ORIGINS || '',
   rateLimitGlobal: parseInt(process.env.RATE_LIMIT_GLOBAL || '30', 10),
   rateLimitExpensive: parseInt(process.env.RATE_LIMIT_EXPENSIVE || '5', 10),
+  // Timeouts
+  timeouts: {
+    default: parseInt(process.env.FETCH_TIMEOUT_DEFAULT || '30000', 10),
+    transcription: parseInt(process.env.FETCH_TIMEOUT_TRANSCRIPTION || '60000', 10),
+    tts: parseInt(process.env.FETCH_TIMEOUT_TTS || '45000', 10),
+    polling: parseInt(process.env.FETCH_TIMEOUT_POLLING || '5000', 10),
+  },
+  // Polling
+  polling: {
+    intervalMs: parseInt(process.env.POLL_INTERVAL_MS || '500', 10),
+    maxIterations: parseInt(process.env.POLL_MAX_ITERATIONS || '240', 10),
+    maxDurationMs: parseInt(process.env.POLL_MAX_DURATION_MS || '120000', 10),
+  },
 } as const;

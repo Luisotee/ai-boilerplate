@@ -2,6 +2,7 @@ import type { WASocket, WAMessage } from '@whiskeysockets/baileys';
 import { downloadMediaMessage } from '@whiskeysockets/baileys';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
+import { fetchWithTimeout } from '../utils/fetch.js';
 
 /**
  * Transcribe audio message to text
@@ -59,11 +60,15 @@ async function transcribeAudio(
   const formData = new FormData();
   formData.append('file', blob, filename);
 
-  const response = await fetch(`${config.aiApiUrl}/transcribe`, {
-    method: 'POST',
-    headers: { 'X-API-Key': config.aiApiKey },
-    body: formData,
-  });
+  const response = await fetchWithTimeout(
+    `${config.aiApiUrl}/transcribe`,
+    {
+      method: 'POST',
+      headers: { 'X-API-Key': config.aiApiKey },
+      body: formData,
+    },
+    config.timeouts.transcription
+  );
 
   if (!response.ok) {
     const contentType = response.headers.get('content-type');

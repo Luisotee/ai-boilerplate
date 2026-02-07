@@ -4,7 +4,7 @@ Conversation history RAG implementation.
 Provides semantic search over user's conversation history using vector similarity.
 """
 
-from sqlalchemy import text
+from sqlalchemy import and_, or_, text
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -63,6 +63,86 @@ def get_context_messages(
         "match": matched_message,
         "after": messages_after,
     }
+
+
+def get_batch_context_messages(
+    db: Session, matched_messages: list[ConversationMessage], window_size: int
+) -> dict[str, dict]:
+    """
+    Retrieve context for multiple messages in a single query (eliminates N+1).
+
+    Args:
+        db: Database session
+        matched_messages: List of semantically matched messages
+        window_size: Number of messages to retrieve before/after each match
+
+    Returns:
+        Dict mapping message_id -> {before: [], after: []}
+    """
+    if not matched_messages or window_size == 0:
+        return {}
+
+    user_id = matched_messages[0].user_id
+
+    # Build conditions for fetching context around each matched message
+    # For each match, we need messages within the window before and after
+    conditions = []
+    for msg in matched_messages:
+        # Messages before this match (within window)
+        conditions.append(
+            and_(
+                ConversationMessage.timestamp < msg.timestamp,
+                ConversationMessage.timestamp
+                >= db.query(ConversationMessage.timestamp)
+                .filter(
+                    ConversationMessage.user_id == user_id,
+                    ConversationMessage.timestamp < msg.timestamp,
+                )
+                .order_by(ConversationMessage.timestamp.desc())
+                .limit(window_size)
+                .offset(window_size - 1)
+                .scalar_subquery(),
+            )
+        )
+        # Messages after this match (within window)
+        conditions.append(
+            and_(
+                ConversationMessage.timestamp > msg.timestamp,
+                ConversationMessage.timestamp
+                <= db.query(ConversationMessage.timestamp)
+                .filter(
+                    ConversationMessage.user_id == user_id,
+                    ConversationMessage.timestamp > msg.timestamp,
+                )
+                .order_by(ConversationMessage.timestamp.asc())
+                .limit(window_size)
+                .offset(window_size - 1)
+                .scalar_subquery(),
+            )
+        )
+
+    # Fetch all context messages in a single query
+    all_context_messages = (
+        db.query(ConversationMessage)
+        .filter(ConversationMessage.user_id == user_id, or_(*conditions))
+        .order_by(ConversationMessage.timestamp)
+        .all()
+    )
+
+    logger.info(
+        f"Batch context fetch: {len(all_context_messages)} messages for {len(matched_messages)} matches"
+    )
+
+    # Group messages by their matched message
+    result = {}
+    for msg in matched_messages:
+        before = [m for m in all_context_messages if m.timestamp < msg.timestamp][-window_size:]
+
+        after = [m for m in all_context_messages if m.timestamp > msg.timestamp][:window_size]
+
+        result[str(msg.id)] = {"before": before, "after": after}
+
+    return result
 
 
 async def search_conversation_history(
@@ -162,8 +242,8 @@ async def search_conversation_history(
 
     logger.info(f"Semantic search found {len(rows)} results (threshold: {similarity_threshold})")
 
-    # Convert to ConversationMessage objects with context
-    results = []
+    # Convert to ConversationMessage objects
+    matched_messages = []
     for row in rows:
         msg = ConversationMessage(
             id=row.id,
@@ -178,12 +258,20 @@ async def search_conversation_history(
         )
         # Attach similarity score as metadata
         msg._similarity_score = float(row.similarity)
+        matched_messages.append(msg)
 
         logger.debug(f"  - [{row.role}] (similarity: {row.similarity:.3f})\n{row.content}")
 
+    # Batch fetch context for all matched messages (eliminates N+1 query)
+    context_map = {}
+    if include_context and context_window > 0:
+        context_map = get_batch_context_messages(db, matched_messages, context_window)
+
+    # Build results with context
+    results = []
+    for msg in matched_messages:
         if include_context and context_window > 0:
-            # Get surrounding context
-            context = get_context_messages(db, msg, context_window)
+            context = context_map.get(str(msg.id), {"before": [], "after": []})
             results.append(
                 {
                     "messages_before": context["before"],

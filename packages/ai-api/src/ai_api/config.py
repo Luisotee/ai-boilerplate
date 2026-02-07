@@ -95,6 +95,14 @@ class Settings(BaseSettings):
     # External APIs
     jina_api_key: str | None = None  # Optional, for higher rate limits (500 vs 20 RPM)
 
+    # Database Connection Pooling
+    db_pool_size: int = 20
+    db_max_overflow: int = 10
+    db_pool_timeout: int = 30
+    db_pool_recycle: int = 3600
+    db_pool_pre_ping: bool = True
+    db_echo_pool: bool = False
+
     model_config = SettingsConfigDict(
         env_file=get_env_files(),
         env_file_encoding="utf-8",
