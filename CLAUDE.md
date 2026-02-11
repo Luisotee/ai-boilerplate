@@ -81,7 +81,7 @@ pnpm format                             # Format TypeScript (Prettier) + Python 
 3. Add any new routes in `src/routes/` with Zod schemas in `src/schemas/`
 
 ### Adding a new agent tool (ai-api)
-1. Add tool function in `agent.py` using the `@agent.tool` decorator (see existing 12 tools)
+1. Add tool function in `agent.py` using the `@agent.tool` decorator (see existing 16 tools)
 2. Tool gets access to `RunContext` with user info and dependencies
 3. WhatsApp-sending tools use the `whatsapp/client.py` HTTP client
 
