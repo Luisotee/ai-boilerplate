@@ -293,7 +293,18 @@ def _handle_clean_command(db: Session, user_id: str, whatsapp_jid: str, parts: l
         return f"Deleted {deleted_str}. Conversation history cleared."
 
 
-def parse_and_execute(db: Session, user_id: str, whatsapp_jid: str, message: str) -> CommandResult:
+# Commands that require group admin privileges
+ADMIN_ONLY_COMMANDS = {"/clean", "/tts", "/stt", "/settings"}
+
+
+def parse_and_execute(
+    db: Session,
+    user_id: str,
+    whatsapp_jid: str,
+    message: str,
+    conversation_type: str = "private",
+    is_group_admin: bool | None = None,
+) -> CommandResult:
     """
     Parse and execute a command message.
 
@@ -302,6 +313,8 @@ def parse_and_execute(db: Session, user_id: str, whatsapp_jid: str, message: str
         user_id: User UUID string
         whatsapp_jid: WhatsApp JID for the conversation
         message: Raw message text (may include leading @mentions in groups)
+        conversation_type: 'private' or 'group'
+        is_group_admin: Whether the sender is a group admin (None if unknown/private)
 
     Returns:
         CommandResult with response text
@@ -318,7 +331,14 @@ def parse_and_execute(db: Session, user_id: str, whatsapp_jid: str, message: str
 
     logger.info(f"Processing command '{command}' for user {user_id}")
 
-    # Handle /help (no preferences needed)
+    # In groups, restrict admin-only commands to group admins
+    if conversation_type == "group" and command in ADMIN_ONLY_COMMANDS and is_group_admin is False:
+        return CommandResult(
+            is_command=True,
+            response_text="Only group admins can use this command.",
+        )
+
+    # Handle /help (no preferences needed, unrestricted)
     if command == "/help":
         return CommandResult(is_command=True, response_text=_get_help_text())
 

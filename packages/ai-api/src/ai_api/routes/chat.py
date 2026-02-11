@@ -164,7 +164,12 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
     if is_command(chat_request.message):
         user = get_or_create_user(db, chat_request.whatsapp_jid, chat_request.conversation_type)
         result = parse_and_execute(
-            db, str(user.id), chat_request.whatsapp_jid, chat_request.message
+            db,
+            str(user.id),
+            chat_request.whatsapp_jid,
+            chat_request.message,
+            conversation_type=chat_request.conversation_type,
+            is_group_admin=chat_request.is_group_admin,
         )
         if result.is_command:
             logger.info(f"Command executed for {chat_request.whatsapp_jid}: {chat_request.message}")
@@ -242,6 +247,8 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
             }
             if chat_request.whatsapp_message_id:
                 job_data["whatsapp_message_id"] = chat_request.whatsapp_message_id
+            if chat_request.sender_name:
+                job_data["sender_name"] = chat_request.sender_name
 
             # Handle image data if present
             if has_image:

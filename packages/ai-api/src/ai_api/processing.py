@@ -15,8 +15,6 @@ from docling.document_converter import DocumentConverter
 from docling_core.transforms.chunker.tokenizer.openai import OpenAITokenizer
 from docling_core.types.doc import DoclingDocument
 
-from sqlalchemy.orm import Session
-
 from .config import settings
 from .database import SessionLocal
 from .embeddings import create_embedding_service
@@ -388,28 +386,3 @@ async def _generate_and_store_embeddings(
     }
 
     return stored_count, failure_metadata
-
-
-def cleanup_partial_chunks(db: Session, document_id: str) -> int:
-    """
-    Delete all chunks associated with a document.
-
-    Used to clean up partial processing failures if desired.
-
-    Args:
-        db: Database session
-        document_id: UUID of the document
-
-    Returns:
-        Number of chunks deleted
-    """
-    deleted_count = (
-        db.query(KnowledgeBaseChunk)
-        .filter_by(document_id=document_id)
-        .delete(synchronize_session=False)
-    )
-
-    db.commit()
-    logger.info(f"Cleaned up {deleted_count} orphaned chunks for document {document_id}")
-
-    return deleted_count
