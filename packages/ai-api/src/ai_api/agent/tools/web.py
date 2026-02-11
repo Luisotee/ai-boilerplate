@@ -41,7 +41,7 @@ async def web_search(ctx: RunContext[AgentDeps], query: str) -> str:
             with DDGS() as ddgs:
                 return ddgs.text(query, max_results=10)
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         results = await loop.run_in_executor(None, _search)
 
         if not results:

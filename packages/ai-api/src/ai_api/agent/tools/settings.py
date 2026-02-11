@@ -3,8 +3,8 @@ from pydantic_ai import RunContext
 from ...commands import (
     LANGUAGE_NAMES,
     SUPPORTED_LANGUAGES,
-    _format_settings,
-    _handle_clean_command,
+    format_settings,
+    handle_clean_command,
 )
 from ...database import get_or_create_preferences
 from ...logger import logger
@@ -32,7 +32,7 @@ async def get_user_settings(ctx: RunContext[AgentDeps]) -> str:
 
     try:
         prefs = get_or_create_preferences(ctx.deps.db, ctx.deps.user_id)
-        result = _format_settings(prefs)
+        result = format_settings(prefs)
 
         logger.info("✅ TOOL RETURNING: get_user_settings")
         logger.info(f"   Returning {len(result)} characters to agent")
@@ -225,15 +225,12 @@ async def clean_conversation_history(
     logger.info("=" * 80)
 
     try:
-        parts = ["/clean"]
-        if duration and duration.lower() != "all":
-            parts.append(duration)
-
-        result = _handle_clean_command(
+        clean_duration = duration if duration and duration.lower() != "all" else None
+        result = handle_clean_command(
             ctx.deps.db,
             ctx.deps.user_id,
             ctx.deps.whatsapp_jid,
-            parts,
+            duration=clean_duration,
         )
 
         logger.info("=" * 80)

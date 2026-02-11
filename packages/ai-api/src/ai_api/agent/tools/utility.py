@@ -203,7 +203,7 @@ async def wikipedia_lookup(ctx: RunContext[AgentDeps], topic: str) -> str:
                 "url": page.fullurl,
             }
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, _lookup)
 
         if not result:
@@ -270,7 +270,7 @@ async def convert_units(
             converted = quantity.to(to_unit)
             return f"{value} {from_unit} = {converted.magnitude:.4g} {to_unit}"
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, _convert)
 
         logger.info(f"Conversion result: {result}")
