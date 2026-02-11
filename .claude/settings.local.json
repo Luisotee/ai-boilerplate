@@ -21,7 +21,8 @@
       "WebFetch(domain:pyogg.readthedocs.io)",
       "Bash(gh pr view:*)",
       "Bash(gh pr diff:*)",
-      "Bash(pnpm lint:*)"
+      "Bash(pnpm lint:*)",
+      "Bash(python3:*)"
     ],
     "deny": [],
     "ask": []

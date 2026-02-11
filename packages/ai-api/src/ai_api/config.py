@@ -74,6 +74,12 @@ class Settings(BaseSettings):
     kb_similarity_threshold: float = 0.7
     kb_max_chunk_tokens: int = 512
 
+    # PDF Processing Timeouts
+    kb_processing_timeout_seconds: int = 300  # Overall max processing time (5 minutes)
+    kb_docling_timeout_seconds: int = 180  # Max time for PDF parsing (3 minutes)
+    kb_embedding_timeout_seconds: int = 10  # Max time per embedding API call (10 seconds)
+    kb_embedding_batch_timeout_seconds: int = 240  # Max time for all embeddings (4 minutes)
+
     # Conversation-scoped documents
     conversation_pdf_ttl_hours: int = 24
     cleanup_interval_minutes: int = 15

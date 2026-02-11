@@ -228,99 +228,105 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
         )
 
         # Add message to user's Redis Stream for sequential processing
-        redis_client = await get_redis_client()
-        job_id = str(uuid.uuid4())
+        async with get_redis_client() as redis_client:
+            job_id = str(uuid.uuid4())
 
-        # Build job data with optional whatsapp_message_id
-        job_data = {
-            "job_id": job_id,
-            "user_id": str(user.id),
-            "whatsapp_jid": chat_request.whatsapp_jid,
-            "message": chat_request.message,  # Original message/caption for AI processing
-            "conversation_type": chat_request.conversation_type,
-            "user_message_id": str(user_msg.id),
-        }
-        if chat_request.whatsapp_message_id:
-            job_data["whatsapp_message_id"] = chat_request.whatsapp_message_id
+            # Build job data with optional whatsapp_message_id
+            job_data = {
+                "job_id": job_id,
+                "user_id": str(user.id),
+                "whatsapp_jid": chat_request.whatsapp_jid,
+                "message": chat_request.message,  # Original message/caption for AI processing
+                "conversation_type": chat_request.conversation_type,
+                "user_message_id": str(user_msg.id),
+            }
+            if chat_request.whatsapp_message_id:
+                job_data["whatsapp_message_id"] = chat_request.whatsapp_message_id
 
-        # Handle image data if present
-        if has_image:
-            # Store image in Redis separately (to avoid large stream messages)
-            await save_job_image(redis_client, job_id, chat_request.image_data)
-            job_data["image_mimetype"] = chat_request.image_mimetype
-            job_data["has_image"] = "true"
+            # Handle image data if present
+            if has_image:
+                # Store image in Redis separately (to avoid large stream messages)
+                await save_job_image(redis_client, job_id, chat_request.image_data)
+                job_data["image_mimetype"] = chat_request.image_mimetype
+                job_data["has_image"] = "true"
 
-        if has_document:
-            # Only support PDFs for now
-            if chat_request.document_mimetype != "application/pdf":
-                raise HTTPException(
-                    status_code=400,
-                    detail="Only PDF documents are supported",
-                )
-
-            # Decode and save PDF file
-            doc_id = uuid.uuid4()
-            stored_filename = f"{doc_id}.pdf"
-            file_path = UPLOAD_DIR / stored_filename
-
-            try:
-                pdf_content = base64.b64decode(chat_request.document_data)
-                file_size = len(pdf_content)
-
-                # Check file size limit
-                max_size_bytes = settings.kb_max_file_size_mb * 1024 * 1024
-                if file_size > max_size_bytes:
+            if has_document:
+                # Only support PDFs for now
+                if chat_request.document_mimetype != "application/pdf":
                     raise HTTPException(
-                        status_code=413,
-                        detail=f"Document too large ({file_size / 1024 / 1024:.1f} MB). Maximum: {settings.kb_max_file_size_mb} MB",
+                        status_code=400,
+                        detail="Only PDF documents are supported",
                     )
 
-                with open(file_path, "wb") as f:
-                    f.write(pdf_content)
+                # Decode and save PDF file
+                doc_id = uuid.uuid4()
+                stored_filename = f"{doc_id}.pdf"
+                file_path = UPLOAD_DIR / stored_filename
 
-                logger.info(f"Saved conversation PDF to {file_path} ({file_size / 1024:.1f} KB)")
+                try:
+                    pdf_content = base64.b64decode(chat_request.document_data)
+                    file_size = len(pdf_content)
 
-            except HTTPException:
-                raise
-            except Exception as e:
-                logger.error(f"Error saving document: {str(e)}", exc_info=True)
-                raise HTTPException(status_code=500, detail="Failed to save document")
+                    # Check file size limit
+                    max_size_bytes = settings.kb_max_file_size_mb * 1024 * 1024
+                    if file_size > max_size_bytes:
+                        raise HTTPException(
+                            status_code=413,
+                            detail=f"Document too large ({file_size / 1024 / 1024:.1f} MB). Maximum: {settings.kb_max_file_size_mb} MB",
+                        )
 
-            # Create database record with conversation scope
-            expires_at = datetime.now(UTC) + timedelta(hours=settings.conversation_pdf_ttl_hours)
-            document = KnowledgeBaseDocument(
-                id=doc_id,
-                filename=stored_filename,
-                original_filename=chat_request.document_filename,
-                file_size_bytes=file_size,
-                mime_type=chat_request.document_mimetype,
-                status="pending",
-                whatsapp_jid=chat_request.whatsapp_jid,
-                expires_at=expires_at,
-                is_conversation_scoped=True,
-                whatsapp_message_id=chat_request.whatsapp_message_id,
+                    with open(file_path, "wb") as f:
+                        f.write(pdf_content)
+
+                    logger.info(
+                        f"Saved conversation PDF to {file_path} ({file_size / 1024:.1f} KB)"
+                    )
+
+                except HTTPException:
+                    raise
+                except Exception as e:
+                    logger.error(f"Error saving document: {str(e)}", exc_info=True)
+                    raise HTTPException(status_code=500, detail="Failed to save document")
+
+                # Create database record with conversation scope
+                expires_at = datetime.now(UTC) + timedelta(
+                    hours=settings.conversation_pdf_ttl_hours
+                )
+                document = KnowledgeBaseDocument(
+                    id=doc_id,
+                    filename=stored_filename,
+                    original_filename=chat_request.document_filename,
+                    file_size_bytes=file_size,
+                    mime_type=chat_request.document_mimetype,
+                    status="pending",
+                    whatsapp_jid=chat_request.whatsapp_jid,
+                    expires_at=expires_at,
+                    is_conversation_scoped=True,
+                    whatsapp_message_id=chat_request.whatsapp_message_id,
+                )
+                db.add(document)
+                db.commit()
+                db.refresh(document)
+
+                logger.info(
+                    f"Created conversation-scoped document {doc_id} (expires: {expires_at})"
+                )
+
+                # Add document info to job data for processing
+                job_data["has_document"] = "true"
+                job_data["document_id"] = str(doc_id)
+                job_data["document_path"] = str(file_path)
+                job_data["document_filename"] = chat_request.document_filename
+
+            await add_message_to_stream(
+                redis=redis_client,
+                user_id=str(user.id),
+                job_data=job_data,
             )
-            db.add(document)
-            db.commit()
-            db.refresh(document)
 
-            logger.info(f"Created conversation-scoped document {doc_id} (expires: {expires_at})")
-
-            # Add document info to job data for processing
-            job_data["has_document"] = "true"
-            job_data["document_id"] = str(doc_id)
-            job_data["document_path"] = str(file_path)
-            job_data["document_filename"] = chat_request.document_filename
-
-        await add_message_to_stream(
-            redis=redis_client,
-            user_id=str(user.id),
-            job_data=job_data,
-        )
-
-        logger.info(
-            f"Job {job_id} added to stream for user {user.id} (has_image={has_image}, has_document={has_document})"
-        )
+            logger.info(
+                f"Job {job_id} added to stream for user {user.id} (has_image={has_image}, has_document={has_document})"
+            )
 
         return EnqueueResponse(job_id=job_id, status="queued", message="Job queued successfully")
 
@@ -349,30 +355,28 @@ async def get_job_status(job_id: str):
     - `full_response`: (Only when complete) Complete assembled response
     """
     try:
-        redis_client = await get_redis_client()
+        async with get_redis_client() as redis_client:
+            # Infer status from Redis data (no arq)
+            status = await get_stream_job_status(redis_client, job_id)
 
-        # Infer status from Redis data (no arq)
-        status = await get_stream_job_status(redis_client, job_id)
+            # Get chunks
+            chunks = await get_job_chunks(redis_client, job_id)
+            total_chunks = len(chunks)
 
-        # Get chunks
-        chunks = await get_job_chunks(redis_client, job_id)
-        total_chunks = len(chunks)
+            # Build response
+            response = JobStatusResponse(
+                job_id=job_id,
+                status=status,
+                chunks=[ChunkData(**chunk) for chunk in chunks],
+                total_chunks=total_chunks,
+                complete=(status == "complete"),
+            )
 
-        # Build response
-        response = JobStatusResponse(
-            job_id=job_id,
-            status=status,
-            chunks=[ChunkData(**chunk) for chunk in chunks],
-            total_chunks=total_chunks,
-            complete=(status == "complete"),
-        )
+            # If complete, assemble full response
+            if status == "complete" and chunks:
+                response.full_response = "".join(chunk["content"] for chunk in chunks)
 
-        # If complete, assemble full response
-        if status == "complete" and chunks:
-            response.full_response = "".join(chunk["content"] for chunk in chunks)
-
-        await redis_client.close()
-        return response
+            return response
 
     except Exception as e:
         logger.error(f"Error getting job status for {job_id}: {str(e)}", exc_info=True)

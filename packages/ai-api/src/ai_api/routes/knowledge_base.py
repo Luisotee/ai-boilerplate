@@ -55,12 +55,14 @@ async def upload_pdf(
     stored_filename = f"{doc_id}.pdf"
     file_path = UPLOAD_DIR / stored_filename
 
-    # Read and save uploaded file
+    # Validate and stream uploaded file to disk
     try:
-        content = await file.read()
-        file_size = len(content)
+        # Get file size without reading content (efficient for large files)
+        file.file.seek(0, 2)  # Seek to end
+        file_size = file.file.tell()  # Get position (size)
+        file.file.seek(0)  # Reset to beginning
 
-        # Check file size limit
+        # Check file size limit BEFORE reading
         max_size_bytes = settings.kb_max_file_size_mb * 1024 * 1024
 
         if file_size > max_size_bytes:
@@ -69,8 +71,11 @@ async def upload_pdf(
                 detail=f"File too large ({file_size / 1024 / 1024:.1f} MB). Maximum size: {settings.kb_max_file_size_mb} MB",
             )
 
+        # Stream file to disk in chunks (memory-efficient)
+        CHUNK_SIZE = 8192  # 8 KB chunks
         with open(file_path, "wb") as f:
-            f.write(content)
+            while chunk := await file.read(CHUNK_SIZE):
+                f.write(chunk)
 
         logger.info(f"Saved PDF to {file_path} ({file_size / 1024:.1f} KB)")
 
@@ -174,7 +179,6 @@ async def upload_pdf_batch(
 
     for file in files:
         error = None
-        file_content = None
         file_size = 0
         filename = file.filename or "unknown"
 
@@ -189,11 +193,12 @@ async def upload_pdf_batch(
             if file.content_type not in ["application/pdf", "application/x-pdf"]:
                 logger.warning(f"Unexpected content type: {file.content_type} for {filename}")
 
-        # Read file and check size
+        # Check file size without reading content (memory-efficient)
         if not error:
             try:
-                file_content = await file.read()
-                file_size = len(file_content)
+                file.file.seek(0, 2)  # Seek to end
+                file_size = file.file.tell()  # Get size
+                file.file.seek(0)  # Reset to beginning
 
                 if file_size == 0:
                     error = "Empty file"
@@ -201,8 +206,8 @@ async def upload_pdf_batch(
                     error = f"File too large ({file_size / 1024 / 1024:.1f} MB). Maximum: {settings.kb_max_file_size_mb} MB"
 
             except Exception as e:
-                logger.error(f"Error reading file {filename}: {str(e)}", exc_info=True)
-                error = "Failed to read file"
+                logger.error(f"Error checking file size {filename}: {str(e)}", exc_info=True)
+                error = "Failed to read file metadata"
 
         file_validations.append(
             {
@@ -210,7 +215,6 @@ async def upload_pdf_batch(
                 "filename": filename,
                 "size": file_size,
                 "error": error,
-                "content": file_content,
             }
         )
 
@@ -250,7 +254,6 @@ async def upload_pdf_batch(
         # File is valid, save it
         try:
             file = validation["file"]
-            content = validation["content"]
             file_size = validation["size"]
 
             # Generate unique document ID and filename
@@ -258,9 +261,12 @@ async def upload_pdf_batch(
             stored_filename = f"{doc_id}.pdf"
             file_path = UPLOAD_DIR / stored_filename
 
-            # Save file to disk
+            # Stream file to disk in chunks (memory-efficient)
+            CHUNK_SIZE = 8192  # 8 KB chunks
+            file.file.seek(0)  # Ensure at beginning
             with open(file_path, "wb") as f:
-                f.write(content)
+                while chunk := await file.read(CHUNK_SIZE):
+                    f.write(chunk)
 
             logger.info(f"Saved PDF to {file_path} ({file_size / 1024:.1f} KB)")
 
@@ -419,7 +425,7 @@ async def list_documents(
 
         # Apply status filter if provided
         if status:
-            valid_statuses = ["pending", "processing", "completed", "failed"]
+            valid_statuses = ["pending", "processing", "completed", "partial", "failed"]
             if status not in valid_statuses:
                 raise HTTPException(
                     status_code=400,
