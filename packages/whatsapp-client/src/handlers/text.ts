@@ -2,7 +2,7 @@ import type { WASocket, WAMessage } from '@whiskeysockets/baileys';
 import { logger } from '../logger.js';
 import { getUserPreferences, sendMessageToAI, textToSpeech } from '../api-client.js';
 import { stripDeviceSuffix, isGroupChat } from '../utils/jid.js';
-import { getSenderName, shouldRespondInGroup } from '../utils/message.js';
+import { getSenderName } from '../utils/message.js';
 import { sendFailureReaction } from '../utils/reactions.js';
 
 interface ImageData {
@@ -16,6 +16,13 @@ interface DocumentData {
   filename: string;
 }
 
+interface HandleOptions {
+  /** When true, saves message to history without generating a response */
+  saveOnly?: boolean;
+  /** Whether the sender is a group admin (for admin-only commands) */
+  isGroupAdmin?: boolean;
+}
+
 /**
  * Handle incoming text messages (with optional image or document)
  */
@@ -24,16 +31,28 @@ export async function handleTextMessage(
   msg: WAMessage,
   text: string,
   image?: ImageData,
-  document?: DocumentData
+  document?: DocumentData,
+  options?: HandleOptions
 ): Promise<void> {
   const whatsappJid = stripDeviceSuffix(msg.key.remoteJid!);
   const conversationType = isGroupChat(whatsappJid) ? 'group' : 'private';
-  const botJid = stripDeviceSuffix(sock.user!.id);
-  const botLid = sock.user?.lid ? stripDeviceSuffix(sock.user.lid) : undefined;
+  const saveOnly = options?.saveOnly ?? false;
+  const isGroupAdmin = options?.isGroupAdmin;
 
-  // In groups, only respond if mentioned or replied to
-  if (conversationType === 'group' && !shouldRespondInGroup(msg, botJid, botLid)) {
-    logger.debug({ whatsappJid }, 'Skipping group message (not mentioned)');
+  // Save-only mode: persist message to history without generating a response
+  if (saveOnly) {
+    logger.debug({ whatsappJid, text: text.slice(0, 50) }, 'Saving group message to history');
+    try {
+      await sendMessageToAI(whatsappJid, text, {
+        conversationType,
+        senderJid: msg.key.participant ?? undefined,
+        senderName: getSenderName(msg),
+        messageId: msg.key.id ?? undefined,
+        saveOnly: true,
+      });
+    } catch (error) {
+      logger.warn({ error, whatsappJid }, 'Failed to save group message to history');
+    }
     return;
   }
 
@@ -48,9 +67,10 @@ export async function handleTextMessage(
   try {
     const response = await sendMessageToAI(whatsappJid, text, {
       conversationType,
-      senderJid: msg.key.participant,
+      senderJid: msg.key.participant ?? undefined,
       senderName: getSenderName(msg),
-      messageId: msg.key.id,
+      messageId: msg.key.id ?? undefined,
+      isGroupAdmin,
       image: image
         ? {
             data: image.buffer.toString('base64'),

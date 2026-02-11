@@ -27,6 +27,7 @@ interface MessageOptions {
   messageId?: string;
   image?: ImagePayload;
   document?: DocumentPayload;
+  isGroupAdmin?: boolean;
 }
 
 interface JobStatus {
@@ -57,7 +58,16 @@ export async function sendMessageToAI(
   message: string,
   options: MessageOptions
 ): Promise<string> {
-  const { conversationType, senderJid, senderName, saveOnly, messageId, image, document } = options;
+  const {
+    conversationType,
+    senderJid,
+    senderName,
+    saveOnly,
+    messageId,
+    image,
+    document,
+    isGroupAdmin,
+  } = options;
 
   // Handle save-only endpoint separately
   if (saveOnly) {
@@ -101,6 +111,11 @@ export async function sendMessageToAI(
     conversation_type: conversationType,
     whatsapp_message_id: messageId,
   };
+
+  // Add group admin status if available (for admin-only commands)
+  if (isGroupAdmin !== undefined) {
+    requestBody.is_group_admin = isGroupAdmin;
+  }
 
   // Add image data if present
   if (image) {

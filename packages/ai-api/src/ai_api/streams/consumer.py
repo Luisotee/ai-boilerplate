@@ -157,6 +157,9 @@ async def process_single_message(user_id: str, message_id: str, data: dict):
         document_path = safe_decode(data.get(b"document_path")) if has_document else None
         document_filename = safe_decode(data.get(b"document_filename")) if has_document else None
 
+        # Extract optional sender name (for group message attribution)
+        sender_name = safe_decode(data.get(b"sender_name"))
+
         # Call core processor function
         await process_chat_job_direct(
             user_id=safe_decode(data[b"user_id"]),
@@ -172,6 +175,7 @@ async def process_single_message(user_id: str, message_id: str, data: dict):
             document_id=document_id,
             document_path=document_path,
             document_filename=document_filename,
+            sender_name=sender_name,
         )
 
     except Exception as e:

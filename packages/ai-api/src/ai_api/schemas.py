@@ -19,6 +19,9 @@ class ChatRequest(BaseModel):
         None, description="Document MIME type (e.g., application/pdf)"
     )
     document_filename: str | None = Field(None, description="Original document filename")
+    is_group_admin: bool | None = Field(
+        None, description="Whether the sender is a group admin (groups only)"
+    )
 
 
 class ChatResponse(BaseModel):

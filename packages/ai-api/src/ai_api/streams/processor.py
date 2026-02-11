@@ -32,6 +32,7 @@ async def process_chat_job_direct(
     document_id: str | None = None,
     document_path: str | None = None,
     document_filename: str | None = None,
+    sender_name: str | None = None,
 ) -> dict:
     """
     Process a chat message asynchronously without arq context.
@@ -48,7 +49,7 @@ async def process_chat_job_direct(
     Args:
         user_id: User's UUID
         whatsapp_jid: WhatsApp JID (conversation identifier)
-        message: User's message (already formatted with sender name if group)
+        message: User's raw message text
         conversation_type: 'private' or 'group'
         user_message_id: UUID of saved user message in PostgreSQL
         job_id: Unique job identifier
@@ -59,6 +60,7 @@ async def process_chat_job_direct(
         document_id: UUID of the document in knowledge base (optional)
         document_path: Path to the document file (optional)
         document_filename: Original filename of the document (optional)
+        sender_name: Sender's display name for group messages (optional)
 
     Returns:
         Dict with processing result including success status, job_id, chunk count
@@ -190,7 +192,10 @@ async def process_chat_job_direct(
                 current_message_id=whatsapp_message_id,
             )
 
-            # Step 4: Get AI response (with optional image for vision)
+            # Step 4: Format message with sender name for group context
+            ai_message = f"{sender_name}: {message}" if sender_name else message
+
+            # Step 5: Get AI response (with optional image for vision)
             logger.info(f"[Job {job_id}] Getting AI response...")
 
             # Retrieve image data if present
@@ -205,7 +210,7 @@ async def process_chat_job_direct(
                     )
 
             async for token in get_ai_response(
-                message,
+                ai_message,
                 message_history,
                 agent_deps=agent_deps,
                 image_data=image_data,
