@@ -332,7 +332,7 @@ def parse_and_execute(
     logger.info(f"Processing command '{command}' for user {user_id}")
 
     # In groups, restrict admin-only commands to group admins
-    if conversation_type == "group" and command in ADMIN_ONLY_COMMANDS and not is_group_admin:
+    if conversation_type == "group" and command in ADMIN_ONLY_COMMANDS and is_group_admin is False:
         return CommandResult(
             is_command=True,
             response_text="Only group admins can use this command.",
