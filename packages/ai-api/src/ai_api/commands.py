@@ -80,7 +80,7 @@ def _parse_duration(duration_str: str) -> timedelta | None:
     return None
 
 
-def _format_settings(prefs: ConversationPreferences) -> str:
+def format_settings(prefs: ConversationPreferences) -> str:
     """Format current settings for display."""
     tts_status = "enabled" if prefs.tts_enabled else "disabled"
     tts_lang = LANGUAGE_NAMES.get(prefs.tts_language, prefs.tts_language)
@@ -203,37 +203,38 @@ def _handle_stt_command(db: Session, prefs: ConversationPreferences, parts: list
         return "Unknown STT command. Use '/stt lang [code]' or '/stt lang auto'."
 
 
-def _handle_clean_command(db: Session, user_id: str, whatsapp_jid: str, parts: list[str]) -> str:
-    """Handle /clean command to delete conversation history and documents.
+def handle_clean_command(
+    db: Session,
+    user_id: str,
+    whatsapp_jid: str,
+    duration: str | None = None,
+) -> str:
+    """Delete conversation history and associated documents.
 
     Args:
         db: Database session
         user_id: User UUID string
         whatsapp_jid: WhatsApp JID for the conversation
-        parts: Command parts (e.g., ['/clean'], ['/clean', '7d'])
+        duration: Optional time period string (e.g., '1h', '7d', '1m'). None deletes all.
 
     Returns:
         Response message
     """
     # Determine the time filter
-    duration: timedelta | None = None
+    parsed_duration: timedelta | None = None
     duration_str: str | None = None
 
-    if len(parts) >= 2:
-        arg = parts[1].lower()
-        if arg == "all":
-            duration = None  # Delete all
-        else:
-            duration = _parse_duration(arg)
-            if duration is None:
-                return (
-                    f"Invalid duration '{parts[1]}'. "
-                    "Use formats like: 1h (hours), 7d (days), 1m (months), or 'all'."
-                )
-            duration_str = arg
+    if duration:
+        parsed_duration = _parse_duration(duration)
+        if parsed_duration is None:
+            return (
+                f"Invalid duration '{duration}'. "
+                "Use formats like: 1h (hours), 7d (days), 1m (months), or 'all'."
+            )
+        duration_str = duration
 
     # Calculate cutoff time if duration specified
-    cutoff = datetime.now(UTC) - duration if duration else None
+    cutoff = datetime.now(UTC) - parsed_duration if parsed_duration else None
 
     # Delete conversation messages
     msg_query = db.query(ConversationMessage).filter(ConversationMessage.user_id == user_id)
@@ -344,14 +345,15 @@ def parse_and_execute(
 
     # Handle /clean (needs whatsapp_jid for document cleanup)
     if command == "/clean":
-        response = _handle_clean_command(db, user_id, whatsapp_jid, parts)
+        clean_duration = parts[1] if len(parts) >= 2 else None
+        response = handle_clean_command(db, user_id, whatsapp_jid, duration=clean_duration)
         return CommandResult(is_command=True, response_text=response)
 
     # Get or create preferences for other commands
     prefs = get_or_create_preferences(db, user_id)
 
     if command == "/settings":
-        return CommandResult(is_command=True, response_text=_format_settings(prefs))
+        return CommandResult(is_command=True, response_text=format_settings(prefs))
 
     elif command == "/tts":
         response = _handle_tts_command(db, prefs, parts)
