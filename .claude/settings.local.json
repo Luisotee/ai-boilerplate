@@ -22,7 +22,10 @@
       "Bash(gh pr view:*)",
       "Bash(gh pr diff:*)",
       "Bash(pnpm lint:*)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "mcp__plugin_serena_serena__list_dir",
+      "WebFetch(domain:claude.com)",
+      "WebFetch(domain:www.anthropic.com)"
     ],
     "deny": [],
     "ask": []
