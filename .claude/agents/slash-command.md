@@ -110,8 +110,8 @@ If the user wants the AI agent to also handle this functionality conversationall
 
 ## Key architecture details
 
-- `is_command()` checks if message starts with `/` after stripping @mentions via `strip_leading_mentions()`
-- `strip_leading_mentions()` removes leading `@botname` from group messages: `"@BotName /settings"` -> `"/settings"`
+- `is_command()` (defined in `commands.py`) checks if message starts with `/` after stripping @mentions via `strip_leading_mentions()`
+- `strip_leading_mentions()` (defined in `commands.py`) removes leading `@botname` from group messages: `"@BotName /settings"` -> `"/settings"`
 - `CommandResult(is_command=True, response_text=...)` returns immediately without AI processing
 - Commands are NOT saved to conversation history (`save_to_history=False` by default)
 - Duration parsing uses `_parse_duration()` for time-based operations (1h, 7d, 1m)

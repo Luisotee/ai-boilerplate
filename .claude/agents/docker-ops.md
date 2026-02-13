@@ -97,7 +97,7 @@ From root `.env`:
 
 ## Important
 
-- Always run docker commands from the project root: `/home/ubuntu/projects/ai-boilerplate/`
+- Always run docker commands from the project root (where `docker-compose.yml` lives)
 - The docker-compose.yml is at the project root
 - Never expose database passwords or API keys in command output
 - `create_all()` only creates NEW tables — schema changes need manual ALTER TABLE

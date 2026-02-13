@@ -20,6 +20,9 @@ packages/whatsapp-client/auth_info_baileys/
 # Database
 postgres-data/
 
+# Claude Code
+.claude/settings.local.json
+
 # IDE
 .vscode/
 .idea/

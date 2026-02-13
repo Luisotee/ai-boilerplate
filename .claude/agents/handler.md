@@ -138,19 +138,10 @@ CRITICAL rules:
 If the handler needs REST API routes, create in `packages/whatsapp-client/src/routes/`.
 
 ### For JSON routes (standard):
-```typescript
-import { app } from '../main.js';
-import type { ZodTypeProvider } from 'fastify-type-provider-zod';
-import { z } from 'zod';
-
-const schema = z.object({ /* ... */ });
-
-app.withTypeProvider<ZodTypeProvider>().post('/path', {
-  schema: { body: schema },
-}, async (request, reply) => {
-  // handler
-});
-```
+Follow the pattern in `packages/whatsapp-client/src/routes/messaging.ts`:
+- Export an async `registerXxxRoutes(app: FastifyInstance)` function
+- Use `app.withTypeProvider<ZodTypeProvider>()` for Zod schema validation
+- Register the function in `packages/whatsapp-client/src/main.ts`
 
 ### For multipart routes (media upload):
 Use plain JSON Schema for `schema.body` — Zod does NOT work with multipart.

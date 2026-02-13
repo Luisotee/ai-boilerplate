@@ -36,66 +36,14 @@ Schema changes to existing tables require MANUAL SQL via ALTER TABLE.
 
 ### Current Schema
 
-**users**
-- id: UUID PK (default uuid4)
-- whatsapp_jid: String (unique, indexed)
-- phone: String (nullable)
-- name: String (nullable)
-- conversation_type: String (indexed) — 'private' or 'group'
-- created_at: DateTime
+Before making any changes, **always read the model files** to get the current schema:
+- `packages/ai-api/src/ai_api/database.py` — users, conversation_messages, conversation_preferences
+- `packages/ai-api/src/ai_api/kb_models.py` — knowledge_base_documents, knowledge_base_chunks
 
-**conversation_messages**
-- id: UUID PK
-- user_id: UUID FK -> users.id (indexed)
-- role: String — 'user' or 'assistant'
-- content: Text
-- sender_jid: String (nullable, indexed) — participant JID in groups
-- sender_name: String (nullable)
-- timestamp: DateTime
-- embedding: Vector(3072) (nullable)
-- embedding_generated_at: DateTime (nullable)
-
-**conversation_preferences**
-- id: UUID PK
-- user_id: UUID FK -> users.id (unique, indexed)
-- tts_enabled: Boolean (default False)
-- tts_language: String (default "en")
-- stt_language: String (nullable) — null = auto-detect
-- created_at: DateTime
-- updated_at: DateTime (auto-update)
-
-**knowledge_base_documents**
-- id: UUID PK
-- filename: String — stored as UUID.pdf
-- original_filename: String
-- file_size_bytes: Integer
-- mime_type: String (default "application/pdf")
-- upload_date, processed_date, created_at: DateTime
-- status: String — 'pending', 'processing', 'completed', 'partial', 'failed'
-- error_message: Text (nullable)
-- doc_metadata: JSON (nullable)
-- chunk_count: Integer (default 0)
-- whatsapp_jid: String (nullable) — conversation scope
-- expires_at: DateTime (nullable) — TTL for conversation-scoped docs
-- is_conversation_scoped: Boolean (default False)
-- whatsapp_message_id: String (nullable)
-- Indexes: status, upload_date, filename, whatsapp_jid, expires_at, is_conversation_scoped
-
-**knowledge_base_chunks**
-- id: UUID PK
-- document_id: UUID FK -> knowledge_base_documents.id (CASCADE, indexed)
-- chunk_index: Integer
-- content: Text
-- content_type: String (default "text")
-- page_number: Integer (nullable)
-- heading: String (nullable)
-- embedding: Vector(3072) (nullable)
-- embedding_generated_at: DateTime (nullable)
-- token_count: Integer (nullable)
-- chunk_metadata: JSON (nullable)
-- created_at: DateTime
-- Indexes: document_id, page_number
-- IVFFlat index on embedding: MUST be created manually
+Key facts that won't change:
+- Embeddings use `Vector(3072)` from pgvector (gemini-embedding-001)
+- IVFFlat index on `knowledge_base_chunks.embedding` must be created manually
+- `knowledge_base_documents` has CASCADE delete to chunks
 
 ## Workflow for Schema Changes
 

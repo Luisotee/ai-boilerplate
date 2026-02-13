@@ -43,7 +43,7 @@ async def tool_name(ctx: RunContext[AgentDeps], param: str) -> str:
         Description of return value
     """
     logger.info("=" * 80)
-    logger.info("EMOJI TOOL CALLED: tool_name")
+    logger.info("TOOL CALLED: tool_name")
     logger.info(f"   Param: '{param}'")
     logger.info("=" * 80)
 
@@ -61,7 +61,7 @@ async def tool_name(ctx: RunContext[AgentDeps], param: str) -> str:
     except Exception as e:
         logger.error(f"Tool_name failed: {str(e)}", exc_info=True)
         logger.info("=" * 80)
-        logger.info("ERROR TOOL ERROR: tool_name")
+        logger.info("TOOL ERROR: tool_name")
         logger.info(f"   Error: {str(e)}")
         logger.info("=" * 80)
         return f"Could not do X: {str(e)}"
@@ -79,12 +79,7 @@ Key rules:
 
 Edit `packages/ai-api/src/ai_api/agent/tools/__init__.py`.
 
-Current content:
-```python
-from . import search, settings, utility, web, whatsapp  # noqa: F401
-```
-
-If creating a new file, add the module name to this import list. The import triggers `@agent.tool` decorator registration — no other registration is needed.
+Read the file to see the current import list, then add the new module name. The import triggers `@agent.tool` decorator registration — no other registration is needed.
 
 ## Step 3: Update the system prompt
 
