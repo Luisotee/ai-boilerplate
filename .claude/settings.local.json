@@ -25,7 +25,9 @@
       "Bash(python3:*)",
       "mcp__plugin_serena_serena__list_dir",
       "WebFetch(domain:claude.com)",
-      "WebFetch(domain:www.anthropic.com)"
+      "WebFetch(domain:www.anthropic.com)",
+      "Bash(wc:*)",
+      "WebFetch(domain:docs.anthropic.com)"
     ],
     "deny": [],
     "ask": []
