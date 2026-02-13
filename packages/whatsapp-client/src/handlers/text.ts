@@ -21,6 +21,10 @@ interface HandleOptions {
   saveOnly?: boolean;
   /** Whether the sender is a group admin (for admin-only commands) */
   isGroupAdmin?: boolean;
+  /** E.164 phone number extracted from JID */
+  phone?: string;
+  /** WhatsApp LID if the message arrived from a LID */
+  whatsappLid?: string;
 }
 
 /**
@@ -38,6 +42,8 @@ export async function handleTextMessage(
   const conversationType = isGroupChat(whatsappJid) ? 'group' : 'private';
   const saveOnly = options?.saveOnly ?? false;
   const isGroupAdmin = options?.isGroupAdmin;
+  const phone = options?.phone;
+  const whatsappLid = options?.whatsappLid;
 
   // Save-only mode: persist message to history without generating a response
   if (saveOnly) {
@@ -49,6 +55,8 @@ export async function handleTextMessage(
         senderName: getSenderName(msg),
         messageId: msg.key.id ?? undefined,
         saveOnly: true,
+        phone,
+        whatsappLid,
       });
     } catch (error) {
       logger.warn({ error, whatsappJid }, 'Failed to save group message to history');
@@ -71,6 +79,8 @@ export async function handleTextMessage(
       senderName: getSenderName(msg),
       messageId: msg.key.id ?? undefined,
       isGroupAdmin,
+      phone,
+      whatsappLid,
       image: image
         ? {
             data: image.buffer.toString('base64'),

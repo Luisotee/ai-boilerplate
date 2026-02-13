@@ -22,6 +22,8 @@ class ChatRequest(BaseModel):
     is_group_admin: bool | None = Field(
         None, description="Whether the sender is a group admin (groups only)"
     )
+    phone: str | None = Field(None, description="E.164 phone number (e.g., +5491126726818)")
+    whatsapp_lid: str | None = Field(None, description="WhatsApp LID if known")
 
 
 class ChatResponse(BaseModel):
@@ -39,6 +41,8 @@ class SaveMessageRequest(BaseModel):
     sender_jid: str | None = Field(None, description="Sender JID in group chats")
     sender_name: str | None = Field(None, description="Sender name in group chats")
     whatsapp_message_id: str | None = Field(None, description="WhatsApp message ID for reactions")
+    phone: str | None = Field(None, description="E.164 phone number (e.g., +5491126726818)")
+    whatsapp_lid: str | None = Field(None, description="WhatsApp LID if known")
 
 
 class UploadPDFResponse(BaseModel):

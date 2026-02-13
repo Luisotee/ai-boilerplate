@@ -28,6 +28,8 @@ interface MessageOptions {
   image?: ImagePayload;
   document?: DocumentPayload;
   isGroupAdmin?: boolean;
+  phone?: string;
+  whatsappLid?: string;
 }
 
 interface JobStatus {
@@ -67,6 +69,8 @@ export async function sendMessageToAI(
     image,
     document,
     isGroupAdmin,
+    phone,
+    whatsappLid,
   } = options;
 
   // Handle save-only endpoint separately
@@ -85,6 +89,8 @@ export async function sendMessageToAI(
           sender_name: senderName,
           conversation_type: conversationType,
           whatsapp_message_id: messageId,
+          phone,
+          whatsapp_lid: whatsappLid,
         }),
       },
       config.timeouts.default
@@ -110,6 +116,8 @@ export async function sendMessageToAI(
     sender_name: senderName,
     conversation_type: conversationType,
     whatsapp_message_id: messageId,
+    phone,
+    whatsapp_lid: whatsappLid,
   };
 
   // Add group admin status if available (for admin-only commands)

@@ -44,7 +44,8 @@ class User(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     whatsapp_jid = Column(String, unique=True, index=True, nullable=False)
-    phone = Column(String, nullable=True)
+    whatsapp_lid = Column(String, unique=True, index=True, nullable=True)
+    phone = Column(String, index=True, nullable=True)
     name = Column(String, nullable=True)
     conversation_type = Column(String, nullable=False, index=True)  # 'private' or 'group'
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -156,24 +157,75 @@ def get_db():
         db.close()
 
 
-def get_or_create_user(db, whatsapp_jid: str, conversation_type: str, name: str = None):
-    """Get existing user or create new one by WhatsApp JID"""
+def phone_from_jid(jid: str) -> str | None:
+    """Extract E.164 phone number from a phone-based JID."""
+    if jid.endswith("@s.whatsapp.net"):
+        return f"+{jid.split('@')[0]}"
+    return None
+
+
+def get_or_create_user(
+    db,
+    whatsapp_jid: str,
+    conversation_type: str,
+    name: str = None,
+    phone: str = None,
+    whatsapp_lid: str = None,
+):
+    """Get existing user or create new one, resolving JID/LID/phone identity."""
+    # Auto-extract phone from phone-based JID if not provided
+    if not phone:
+        phone = phone_from_jid(whatsapp_jid)
+
+    # Step 1: Direct lookup by primary JID (fast path)
     user = db.query(User).filter(User.whatsapp_jid == whatsapp_jid).first()
+
+    # Step 2: Check if this JID matches a known LID
+    if not user:
+        user = db.query(User).filter(User.whatsapp_lid == whatsapp_jid).first()
+
+    # Step 3: Check if we know this phone number under a different JID
+    if not user and phone:
+        user = db.query(User).filter(User.phone == phone).first()
+        if user and user.whatsapp_jid != whatsapp_jid:
+            old_jid = user.whatsapp_jid
+            # Preserve the old JID as LID if it was a LID, or store it if no LID exists
+            if old_jid.endswith("@lid"):
+                user.whatsapp_lid = old_jid
+            elif not user.whatsapp_lid:
+                user.whatsapp_lid = old_jid
+            user.whatsapp_jid = whatsapp_jid
+            logger.info(f"Merged user identity: {old_jid} -> {whatsapp_jid} (phone: {phone})")
+
+    # Step 4: Create new user if not found
     if not user:
         user = User(
             whatsapp_jid=whatsapp_jid,
+            whatsapp_lid=whatsapp_lid,
+            phone=phone,
             name=name,
             conversation_type=conversation_type,
         )
         db.add(user)
         db.commit()
         db.refresh(user)
-        logger.info(f"Created new user: {whatsapp_jid} (type: {conversation_type})")
-    elif name and user.name != name:
-        # Update name if provided and changed
+        logger.info(f"Created new user: {whatsapp_jid} (phone: {phone}, type: {conversation_type})")
+        return user
+
+    # Enrich existing user with new info
+    changed = False
+    if name and user.name != name:
         user.name = name
+        changed = True
+    if phone and not user.phone:
+        user.phone = phone
+        changed = True
+    if whatsapp_lid and not user.whatsapp_lid:
+        user.whatsapp_lid = whatsapp_lid
+        changed = True
+    if changed:
         db.commit()
-        logger.info(f"Updated user name: {whatsapp_jid} -> {name}")
+
     return user
 
 
@@ -210,9 +262,13 @@ def save_message(
     sender_jid: str = None,
     sender_name: str = None,
     embedding: list = None,
+    phone: str = None,
+    whatsapp_lid: str = None,
 ):
     """Save a message to the database with optional group context and embedding"""
-    user = get_or_create_user(db, whatsapp_jid, conversation_type)
+    user = get_or_create_user(
+        db, whatsapp_jid, conversation_type, phone=phone, whatsapp_lid=whatsapp_lid
+    )
     message = ConversationMessage(
         user_id=user.id,
         role=role,
