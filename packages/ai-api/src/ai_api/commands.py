@@ -13,7 +13,12 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from .config import settings
-from .database import ConversationMessage, ConversationPreferences, get_or_create_preferences
+from .database import (
+    ConversationMessage,
+    ConversationPreferences,
+    get_or_create_core_memory,
+    get_or_create_preferences,
+)
 from .kb_models import KnowledgeBaseDocument
 from .logger import logger
 
@@ -111,6 +116,8 @@ def _get_help_text() -> str:
 /stt lang auto - Use auto-detection for STT
 /clean - Delete all conversation history
 /clean [duration] - Delete messages (e.g., 1h, 7d, 1m)
+/memories - Show saved core memories
+/memories clear - Delete all core memories
 /help - Show this message
 
 Language codes: {lang_codes}"""
@@ -294,8 +301,29 @@ def handle_clean_command(
         return f"Deleted {deleted_str}. Conversation history cleared."
 
 
+def _handle_memories_command(db: Session, user_id: str, parts: list[str]) -> str:
+    """Handle /memories commands."""
+    if len(parts) >= 2 and parts[1].lower() == "clear":
+        mem = get_or_create_core_memory(db, user_id)
+        if not mem.content:
+            return "No core memories to clear."
+        mem.content = ""
+        db.commit()
+        logger.info(f"Cleared core memory for user {user_id}")
+        return "Core memories cleared."
+
+    mem = get_or_create_core_memory(db, user_id)
+    if not mem.content:
+        return (
+            "No core memories saved yet.\n\n"
+            "The AI will automatically save important facts about you during conversations."
+        )
+
+    return f"Your core memories:\n\n{mem.content}"
+
+
 # Commands that require group admin privileges
-ADMIN_ONLY_COMMANDS = {"/clean", "/tts", "/stt", "/settings"}
+ADMIN_ONLY_COMMANDS = {"/clean", "/tts", "/stt", "/settings", "/memories"}
 
 
 def parse_and_execute(
@@ -342,6 +370,11 @@ def parse_and_execute(
     # Handle /help (no preferences needed, unrestricted)
     if command == "/help":
         return CommandResult(is_command=True, response_text=_get_help_text())
+
+    # Handle /memories
+    if command == "/memories":
+        response = _handle_memories_command(db, user_id, parts)
+        return CommandResult(is_command=True, response_text=response)
 
     # Handle /clean (needs whatsapp_jid for document cleanup)
     if command == "/clean":

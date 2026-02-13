@@ -61,6 +61,12 @@ class User(Base):
         uselist=False,
         cascade="all, delete-orphan",
     )
+    core_memory = relationship(
+        "CoreMemory",
+        back_populates="user",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
 
 
 class ConversationMessage(Base):
@@ -107,6 +113,23 @@ class ConversationPreferences(Base):
 
     # Relationship
     user = relationship("User", back_populates="preferences")
+
+
+class CoreMemory(Base):
+    """Persistent markdown document with AI's notes about a user."""
+
+    __tablename__ = "core_memories"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id"), unique=True, nullable=False, index=True
+    )
+    content = Column(Text, nullable=False, default="")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    # Relationship
+    user = relationship("User", back_populates="core_memory")
 
 
 def init_db():
@@ -230,3 +253,15 @@ def get_user_preferences(db, whatsapp_jid: str) -> ConversationPreferences | Non
     if not user:
         return None
     return get_or_create_preferences(db, str(user.id))
+
+
+def get_or_create_core_memory(db, user_id: str) -> CoreMemory:
+    """Get existing core memory or create empty one."""
+    mem = db.query(CoreMemory).filter(CoreMemory.user_id == user_id).first()
+    if not mem:
+        mem = CoreMemory(user_id=user_id, content="")
+        db.add(mem)
+        db.commit()
+        db.refresh(mem)
+        logger.info(f"Created empty core memory for user {user_id}")
+    return mem

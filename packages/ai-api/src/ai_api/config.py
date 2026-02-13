@@ -84,6 +84,9 @@ class Settings(BaseSettings):
     conversation_pdf_ttl_hours: int = 24
     cleanup_interval_minutes: int = 15
 
+    # Core Memory
+    core_memory_max_length: int = 2000  # Max characters for the entire core memory document
+
     # Speech-to-Text
     stt_model: str = "whisper-large-v3"
     stt_max_file_size_mb: int = 25
