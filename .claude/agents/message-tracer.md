@@ -39,8 +39,8 @@ When the user describes an issue, determine WHERE in the pipeline it occurs:
 
 ### Receive-side issues (Steps 1-3)
 **File:** `packages/whatsapp-client/src/whatsapp.ts`
-- Is `msg.key.fromMe` filtering out the message? (line ~157)
-- Is `normalizeMessageContent()` being called? (line ~160)
+- Is `msg.key.fromMe` filtering out the message?
+- Is `normalizeMessageContent()` being called?
 - Is the message type being checked correctly on `normalizedMessage`?
 - For groups: is `shouldRespondInGroup()` returning false? Check `utils/message.ts`
 - Is `saveOnly` being set incorrectly? (group messages without @mention)
