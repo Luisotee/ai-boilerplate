@@ -23,11 +23,11 @@ export const config = {
   aiApiUrl: process.env.AI_API_URL || 'http://localhost:8000',
   logLevel: process.env.LOG_LEVEL || 'info',
   server: {
-    port: parseInt(process.env.WHATSAPP_API_PORT || '3001', 10),
-    host: process.env.WHATSAPP_API_HOST || '0.0.0.0',
+    port: parseInt(process.env.WHATSAPP_CLOUD_PORT || '3002', 10),
+    host: process.env.WHATSAPP_CLOUD_HOST || '0.0.0.0',
   },
   // Security
-  whatsappApiKey: process.env.WHATSAPP_API_KEY || '',
+  whatsappApiKey: process.env.WHATSAPP_CLOUD_API_KEY || '',
   aiApiKey: process.env.AI_API_KEY || '',
   corsOrigins: process.env.CORS_ORIGINS || '',
   rateLimitGlobal: parseInt(process.env.RATE_LIMIT_GLOBAL || '30', 10),
@@ -47,11 +47,13 @@ export const config = {
     maxIterations: parseInt(process.env.POLL_MAX_ITERATIONS || '240', 10),
     maxDurationMs: parseInt(process.env.POLL_MAX_DURATION_MS || '120000', 10),
   },
-  // Reconnection strategy
-  reconnection: {
-    initialDelayMs: parseInt(process.env.RECONNECT_INITIAL_DELAY_MS || '1000', 10),
-    maxDelayMs: parseInt(process.env.RECONNECT_MAX_DELAY_MS || '30000', 10),
-    maxAttempts: parseInt(process.env.RECONNECT_MAX_ATTEMPTS || '10', 10),
-    jitterMs: parseInt(process.env.RECONNECT_JITTER_MS || '500', 10),
+  // Meta / WhatsApp Cloud API
+  meta: {
+    phoneNumberId: process.env.META_PHONE_NUMBER_ID || '',
+    accessToken: process.env.META_ACCESS_TOKEN || '',
+    appSecret: process.env.META_APP_SECRET || '',
+    webhookVerifyToken: process.env.META_WEBHOOK_VERIFY_TOKEN || '',
+    graphApiVersion: process.env.META_GRAPH_API_VERSION || 'v21.0',
+    graphApiBaseUrl: 'https://graph.facebook.com',
   },
 } as const;

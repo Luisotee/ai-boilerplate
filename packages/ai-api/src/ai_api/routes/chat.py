@@ -265,6 +265,8 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
                 job_data["whatsapp_message_id"] = chat_request.whatsapp_message_id
             if chat_request.sender_name:
                 job_data["sender_name"] = chat_request.sender_name
+            if chat_request.callback_url:
+                job_data["callback_url"] = chat_request.callback_url
 
             # Handle image data if present
             if has_image:
@@ -477,10 +479,12 @@ async def chat(request: Request, chat_request: ChatRequest, db: Session = Depend
         embedding_service = create_embedding_service(settings.gemini_api_key)
 
         # Initialize HTTP client and WhatsApp client for agent tools
+        # Use per-request callback_url if provided, otherwise fall back to global config
+        whatsapp_base_url = chat_request.callback_url or settings.whatsapp_client_url
         async with httpx.AsyncClient(timeout=settings.whatsapp_client_timeout) as http_client:
             whatsapp_client = create_whatsapp_client(
                 http_client=http_client,
-                base_url=settings.whatsapp_client_url,
+                base_url=whatsapp_base_url,
                 api_key=settings.whatsapp_api_key,
             )
 

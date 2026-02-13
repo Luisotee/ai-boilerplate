@@ -160,6 +160,9 @@ async def process_single_message(user_id: str, message_id: str, data: dict):
         # Extract optional sender name (for group message attribution)
         sender_name = safe_decode(data.get(b"sender_name"))
 
+        # Extract optional callback URL (for multi-client routing)
+        callback_url = safe_decode(data.get(b"callback_url"))
+
         # Call core processor function
         await process_chat_job_direct(
             user_id=safe_decode(data[b"user_id"]),
@@ -176,6 +179,7 @@ async def process_single_message(user_id: str, message_id: str, data: dict):
             document_path=document_path,
             document_filename=document_filename,
             sender_name=sender_name,
+            callback_url=callback_url,
         )
 
     except Exception as e:

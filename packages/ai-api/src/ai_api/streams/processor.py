@@ -33,6 +33,7 @@ async def process_chat_job_direct(
     document_path: str | None = None,
     document_filename: str | None = None,
     sender_name: str | None = None,
+    callback_url: str | None = None,
 ) -> dict:
     """
     Process a chat message asynchronously without arq context.
@@ -97,10 +98,12 @@ async def process_chat_job_direct(
             embedding_service = create_embedding_service(settings.gemini_api_key)
 
             # Step 2.5: Initialize HTTP client and WhatsApp client
+            # Use per-job callback_url if provided, otherwise fall back to global config
+            whatsapp_base_url = callback_url or settings.whatsapp_client_url
             http_client = httpx.AsyncClient(timeout=settings.whatsapp_client_timeout)
             whatsapp_client = create_whatsapp_client(
                 http_client=http_client,
-                base_url=settings.whatsapp_client_url,
+                base_url=whatsapp_base_url,
                 api_key=settings.whatsapp_api_key,
             )
             logger.info(f"[Job {job_id}] WhatsApp client initialized")
