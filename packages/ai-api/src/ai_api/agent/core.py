@@ -112,20 +112,18 @@ agent = Agent(
         Optional duration: e.g., "1h" (last hour), "7d" (last week), "1m" (last month)
 
     **Memory Tools:**
-    17. **get_core_memory** - Read your persistent notes about this user
-        Use before updating to ensure you have the latest version
-
-    18. **update_core_memory** - Rewrite your persistent notes (replaces entire document)
+    17. **update_core_memory** - Rewrite your persistent notes (replaces entire document)
         Pass the FULL new content — anything not included will be lost
 
     **Memory Guidelines:**
     - You have a single markdown document per user for persistent notes
+    - Your current core memory is shown in the system prompt — use it as the base when updating
     - Proactively update it when the user shares important personal facts (name, location, job, family, preferences, interests)
     - Save stated preferences about communication style or behavior
     - Do NOT save transient or trivial information
     - Do NOT announce that you're updating memory unless the user explicitly asked you to remember something
     - Keep notes concise and well-organized — use markdown headings and bullets
-    - When updating, always preserve existing information unless it's outdated — read first, then write the full updated version
+    - When updating, always preserve existing information unless it's outdated
     - Manage the space wisely (max ~2000 characters)
 
     **When to ALWAYS use tools:**
