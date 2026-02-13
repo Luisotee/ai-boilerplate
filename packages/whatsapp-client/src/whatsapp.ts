@@ -13,7 +13,7 @@ import { transcribeAudioMessage } from './handlers/audio.js';
 import { extractImageData } from './handlers/image.js';
 import { extractDocumentData } from './handlers/document.js';
 import { sendFailureReaction } from './utils/reactions.js';
-import { stripDeviceSuffix, isGroupChat } from './utils/jid.js';
+import { stripDeviceSuffix, isGroupChat, phoneFromJid, isLid } from './utils/jid.js';
 import { shouldRespondInGroup } from './utils/message.js';
 
 const DEFAULT_IMAGE_PROMPT = 'Please describe and analyze this image';
@@ -166,6 +166,10 @@ export async function initializeWhatsApp(): Promise<void> {
         const botLid = sock.user?.lid ? stripDeviceSuffix(sock.user.lid) : undefined;
         const saveOnly = isGroup && !shouldRespondInGroup(msg, botJid, botLid);
 
+        // Extract phone number and LID for user identity resolution
+        const phone = phoneFromJid(whatsappJid) ?? undefined;
+        const whatsappLid = isLid(whatsappJid) ? whatsappJid : undefined;
+
         // Get text from normalized message or transcribe audio
         let text = normalizedMessage?.conversation || normalizedMessage?.extendedTextMessage?.text;
 
@@ -183,7 +187,11 @@ export async function initializeWhatsApp(): Promise<void> {
             // Save image context to history without downloading binary data
             const caption = normalizedMessage.imageMessage.caption;
             const marker = caption ? `[Image: ${caption}]` : '[Image]';
-            await handleTextMessage(sock, msg, marker, undefined, undefined, { saveOnly: true });
+            await handleTextMessage(sock, msg, marker, undefined, undefined, {
+              saveOnly: true,
+              phone,
+              whatsappLid,
+            });
           } else {
             const imageData = await extractImageData(sock, msg);
             if (!imageData) {
@@ -194,10 +202,17 @@ export async function initializeWhatsApp(): Promise<void> {
             // Use caption if present, otherwise use default prompt
             const prompt = imageData.caption || DEFAULT_IMAGE_PROMPT;
 
-            await handleTextMessage(sock, msg, prompt, {
-              buffer: imageData.buffer,
-              mimetype: imageData.mimetype,
-            });
+            await handleTextMessage(
+              sock,
+              msg,
+              prompt,
+              {
+                buffer: imageData.buffer,
+                mimetype: imageData.mimetype,
+              },
+              undefined,
+              { phone, whatsappLid }
+            );
           }
           continue;
         }
@@ -211,7 +226,11 @@ export async function initializeWhatsApp(): Promise<void> {
             const marker = caption
               ? `[Document: ${filename}] - ${caption}`
               : `[Document: ${filename}]`;
-            await handleTextMessage(sock, msg, marker, undefined, undefined, { saveOnly: true });
+            await handleTextMessage(sock, msg, marker, undefined, undefined, {
+              saveOnly: true,
+              phone,
+              whatsappLid,
+            });
           } else {
             const documentData = await extractDocumentData(sock, msg);
             if (!documentData) {
@@ -234,11 +253,18 @@ export async function initializeWhatsApp(): Promise<void> {
             // Use caption if present, otherwise use default prompt
             const prompt = documentData.caption || DEFAULT_DOCUMENT_PROMPT;
 
-            await handleTextMessage(sock, msg, prompt, undefined, {
-              buffer: documentData.buffer,
-              mimetype: documentData.mimetype,
-              filename: documentData.filename,
-            });
+            await handleTextMessage(
+              sock,
+              msg,
+              prompt,
+              undefined,
+              {
+                buffer: documentData.buffer,
+                mimetype: documentData.mimetype,
+                filename: documentData.filename,
+              },
+              { phone, whatsappLid }
+            );
           }
           continue;
         }
@@ -273,11 +299,7 @@ export async function initializeWhatsApp(): Promise<void> {
             text,
             undefined,
             undefined,
-            saveOnly
-              ? { saveOnly: true }
-              : isGroupAdmin !== undefined
-                ? { isGroupAdmin }
-                : undefined
+            saveOnly ? { saveOnly: true, phone, whatsappLid } : { isGroupAdmin, phone, whatsappLid }
           );
         }
       } catch (error) {

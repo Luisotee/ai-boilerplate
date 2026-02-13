@@ -23,6 +23,25 @@ export function extractPhoneFromJid(jid: string): string {
 }
 
 /**
+ * Extract E.164 phone number from a phone-based JID.
+ * Returns null for LIDs and group JIDs.
+ * Example: "5491126726818@s.whatsapp.net" -> "+5491126726818"
+ */
+export function phoneFromJid(jid: string): string | null {
+  if (jid.endsWith('@s.whatsapp.net')) {
+    return `+${jid.split('@')[0]}`;
+  }
+  return null;
+}
+
+/**
+ * Check if JID is a LID (anonymized WhatsApp identifier)
+ */
+export function isLid(jid: string): boolean {
+  return jid.endsWith('@lid');
+}
+
+/**
  * Check if string is already a JID
  * JIDs contain @ symbol (e.g., 1234567890@s.whatsapp.net, 123456-789@g.us)
  */

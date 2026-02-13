@@ -105,6 +105,8 @@ async def save_message_only(request: SaveMessageRequest, db: Session = Depends(g
             sender_jid=request.sender_jid,
             sender_name=request.sender_name,
             embedding=user_embedding,
+            phone=request.phone,
+            whatsapp_lid=request.whatsapp_lid,
         )
 
         return {"success": True}
@@ -162,7 +164,13 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
 
     # Check for commands first (e.g., /settings, /tts on, /help)
     if is_command(chat_request.message):
-        user = get_or_create_user(db, chat_request.whatsapp_jid, chat_request.conversation_type)
+        user = get_or_create_user(
+            db,
+            chat_request.whatsapp_jid,
+            chat_request.conversation_type,
+            phone=chat_request.phone,
+            whatsapp_lid=chat_request.whatsapp_lid,
+        )
         result = parse_and_execute(
             db,
             str(user.id),
@@ -205,7 +213,13 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
             )
 
         # Get or create user
-        user = get_or_create_user(db, chat_request.whatsapp_jid, chat_request.conversation_type)
+        user = get_or_create_user(
+            db,
+            chat_request.whatsapp_jid,
+            chat_request.conversation_type,
+            phone=chat_request.phone,
+            whatsapp_lid=chat_request.whatsapp_lid,
+        )
 
         # Generate embedding for user message
         user_embedding = None
@@ -230,6 +244,8 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
             sender_jid=chat_request.sender_jid,
             sender_name=chat_request.sender_name,
             embedding=user_embedding,
+            phone=chat_request.phone,
+            whatsapp_lid=chat_request.whatsapp_lid,
         )
 
         # Add message to user's Redis Stream for sequential processing
@@ -444,10 +460,18 @@ async def chat(request: Request, chat_request: ChatRequest, db: Session = Depend
             sender_jid=chat_request.sender_jid,
             sender_name=chat_request.sender_name,
             embedding=user_embedding,
+            phone=chat_request.phone,
+            whatsapp_lid=chat_request.whatsapp_lid,
         )
 
         # Prepare agent dependencies for semantic search tool (dependency injection)
-        user = get_or_create_user(db, chat_request.whatsapp_jid, chat_request.conversation_type)
+        user = get_or_create_user(
+            db,
+            chat_request.whatsapp_jid,
+            chat_request.conversation_type,
+            phone=chat_request.phone,
+            whatsapp_lid=chat_request.whatsapp_lid,
+        )
 
         # Initialize embedding service following Pydantic AI best practices
         embedding_service = create_embedding_service(settings.gemini_api_key)
