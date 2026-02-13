@@ -1,12 +1,13 @@
 from dataclasses import dataclass
 
 import httpx
-from pydantic_ai import Agent
+from pydantic_ai import Agent, RunContext
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
 from sqlalchemy.orm import Session
 
 from ..config import settings
+from ..database import get_or_create_core_memory
 from ..embeddings import EmbeddingService
 from ..whatsapp import WhatsAppClient
 
@@ -110,6 +111,21 @@ agent = Agent(
         WARNING: This is destructive. Confirm the user's intent before calling this tool.
         Optional duration: e.g., "1h" (last hour), "7d" (last week), "1m" (last month)
 
+    **Memory Tools:**
+    17. **update_core_memory** - Rewrite your persistent notes (replaces entire document)
+        Pass the FULL new content — anything not included will be lost
+
+    **Memory Guidelines:**
+    - You have a single markdown document per user for persistent notes
+    - Your current core memory is shown in the system prompt — use it as the base when updating
+    - Proactively update it when the user shares important personal facts (name, location, job, family, preferences, interests)
+    - Save stated preferences about communication style or behavior
+    - Do NOT save transient or trivial information
+    - Do NOT announce that you're updating memory unless the user explicitly asked you to remember something
+    - Keep notes concise and well-organized — use markdown headings and bullets
+    - When updating, always preserve existing information unless it's outdated
+    - Manage the space wisely (max ~2000 characters)
+
     **When to ALWAYS use tools:**
     - Settings changes (TTS, STT, language) → use settings tools
     - Cleaning/deleting history → use clean_conversation_history
@@ -124,3 +140,16 @@ agent = Agent(
 
     When citing knowledge base sources, ALWAYS include document name, page number, and section heading.""",
 )
+
+
+@agent.system_prompt
+async def inject_core_memory(ctx: RunContext[AgentDeps]) -> str:
+    """Inject the user's core memory document into the system prompt."""
+    mem = get_or_create_core_memory(ctx.deps.db, ctx.deps.user_id)
+    if not mem.content:
+        return ""
+    return (
+        "\n\n== CORE MEMORY (your persistent notes about this user) ==\n"
+        + mem.content
+        + "\n== END CORE MEMORY =="
+    )

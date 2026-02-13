@@ -25,7 +25,7 @@ How a WhatsApp message traverses the system end-to-end:
 3. Type dispatch: text → `handlers/text.ts`, audio → `handlers/audio.ts` (transcribe first), image → `handlers/image.ts`, document → `handlers/document.ts`
 4. All handlers funnel into `handleTextMessage()` with optional base64 image/document
 5. `api-client.ts` sends POST `/chat/enqueue` to AI API → returns `job_id`
-6. `routes/chat.py` intercepts slash commands (`/settings`, `/tts`, `/clean`, etc.) before queuing
+6. `routes/chat.py` intercepts slash commands (`/settings`, `/tts`, `/clean`, `/memories`, etc.) before queuing
 7. Non-command messages: saved to PostgreSQL, enqueued to Redis Stream (`stream:user:{user_id}`)
 8. `streams/processor.py`: fetches conversation history → runs Pydantic AI agent with tools → streams response chunks to Redis
 9. `api-client.ts` polls GET `/chat/job/{id}` (500ms interval, max 120s) until complete
@@ -74,9 +74,10 @@ pnpm format:check                       # Verify formatting without changes (CI)
 ## Database
 
 - **PostgreSQL + pgvector** (3072-dim vectors via `gemini-embedding-001`)
-- **5 tables**: users, conversation_messages, conversation_preferences, knowledge_base_documents, knowledge_base_chunks
+- **6 tables**: users, conversation_messages, conversation_preferences, core_memories, knowledge_base_documents, knowledge_base_chunks
 - **No Alembic migrations** — uses SQLAlchemy `create_all()`. Schema changes require manual `ALTER TABLE` or table recreation; `create_all()` only adds new tables
-- Models: `database.py` (users, messages, preferences) + `kb_models.py` (documents, chunks)
+- Models: `database.py` (users, messages, preferences, core_memories) + `kb_models.py` (documents, chunks)
+- **Core memories**: one markdown document per user (`core_memories` table), injected into system prompt via `@agent.system_prompt` in `agent/core.py`
 - **Conversation-scoped PDFs** expire after 24h (`CONVERSATION_PDF_TTL_HOURS`). Cleanup task runs in `main.py` lifespan
 
 ## Environment Config
@@ -134,7 +135,8 @@ Multipart routes can't use Zod validation directly. Follow the pattern in `route
 - Only PDF documents are accepted for processing; other types return a user-facing error message
 
 ### AI API (Python)
-- Slash commands (`/settings`, `/tts`, `/clean`, `/help`) are intercepted in `routes/chat.py` — they never reach the AI agent
+- Slash commands (`/settings`, `/tts`, `/clean`, `/memories`, `/help`) are intercepted in `routes/chat.py` — they never reach the AI agent
+- Core memory is a single markdown document per user (not individual rows) — the AI reads the whole doc and rewrites it via `update_core_memory` tool
 - CORS middleware must be added AFTER `APIKeyMiddleware` in `main.py` (Starlette processes middleware LIFO — reversing this breaks CORS preflight)
 - pgvector IVFFlat index must be created manually for `knowledge_base_chunks` — without it, similarity search does full table scan
 - Redis Streams (`streams/`) supersedes the arq queue (`queue/worker.py`) — both coexist in the codebase
