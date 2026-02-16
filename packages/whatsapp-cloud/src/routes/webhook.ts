@@ -106,8 +106,12 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
           return reply.code(401).send({ error: 'Missing signature' });
         }
 
-        // Reconstruct raw body from parsed JSON for HMAC verification
-        const rawBody = JSON.stringify(request.body);
+        // Use the raw bytes captured by the custom JSON content type parser in main.ts
+        const rawBody = (request as unknown as { rawBody: Buffer }).rawBody;
+        if (!rawBody) {
+          logger.warn('Missing raw body for signature verification');
+          return reply.code(500).send({ error: 'Internal error' });
+        }
         const isValid = verifyWebhookSignature(rawBody, signature, config.meta.appSecret);
 
         if (!isValid) {

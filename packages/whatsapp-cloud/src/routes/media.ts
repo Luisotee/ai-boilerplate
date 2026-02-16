@@ -125,7 +125,7 @@ export async function registerMediaRoutes(app: FastifyInstance) {
           return reply.code(406).send({ error: 'Request is not multipart' });
         }
 
-        return reply.code(500).send({ error: error.message || 'Failed to send image' });
+        return reply.code(500).send({ error: 'Failed to send image' });
       }
     }
   );
@@ -254,7 +254,7 @@ export async function registerMediaRoutes(app: FastifyInstance) {
           return reply.code(406).send({ error: 'Request is not multipart' });
         }
 
-        return reply.code(500).send({ error: error.message || 'Failed to send document' });
+        return reply.code(500).send({ error: 'Failed to send document' });
       }
     }
   );
@@ -368,7 +368,7 @@ export async function registerMediaRoutes(app: FastifyInstance) {
           return reply.code(406).send({ error: 'Request is not multipart' });
         }
 
-        return reply.code(500).send({ error: error.message || 'Failed to send audio' });
+        return reply.code(500).send({ error: 'Failed to send audio' });
       }
     }
   );
@@ -484,7 +484,7 @@ export async function registerMediaRoutes(app: FastifyInstance) {
           return reply.code(406).send({ error: 'Request is not multipart' });
         }
 
-        return reply.code(500).send({ error: error.message || 'Failed to send video' });
+        return reply.code(500).send({ error: 'Failed to send video' });
       }
     }
   );

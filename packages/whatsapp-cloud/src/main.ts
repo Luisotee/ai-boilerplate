@@ -86,18 +86,28 @@ async function start() {
   if (!config.meta.accessToken) {
     throw new Error('META_ACCESS_TOKEN environment variable is required');
   }
+  if (!config.meta.appSecret) {
+    console.warn(
+      '\u26a0\ufe0f  WARNING: META_APP_SECRET is not set \u2014 webhook signature verification is DISABLED. ' +
+        'Any request to /webhook will be accepted without authentication. ' +
+        'Set META_APP_SECRET before deploying to production.'
+    );
+  }
 
   // Initialize Fastify with built-in Pino logger and ZodTypeProvider
+  const isDev = process.env.NODE_ENV !== 'production';
   const app = Fastify({
     logger: {
       level: config.logLevel,
-      transport: {
-        target: 'pino-pretty',
-        options: {
-          translateTime: 'HH:MM:ss Z',
-          ignore: 'pid,hostname',
+      ...(isDev && {
+        transport: {
+          target: 'pino-pretty',
+          options: {
+            translateTime: 'HH:MM:ss Z',
+            ignore: 'pid,hostname',
+          },
         },
-      },
+      }),
     },
     ajv: {
       plugins: [ajvFilePlugin],
@@ -107,6 +117,19 @@ async function start() {
   // Set Zod validators and serializers
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);
+
+  // Replace default JSON parser to preserve raw body for webhook HMAC verification.
+  // Fastify's default parser discards the original bytes after JSON.parse(), but Meta's
+  // webhook signature is computed over the exact raw bytes — so we store them on the request.
+  app.removeContentTypeParser('application/json');
+  app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (req, body, done) => {
+    (req as unknown as { rawBody: Buffer }).rawBody = body;
+    try {
+      done(null, JSON.parse(body.toString()));
+    } catch (err) {
+      done(err as Error, undefined);
+    }
+  });
 
   // Register CORS — parse allowed origins from env, block all if empty
   const corsOrigins = config.corsOrigins
