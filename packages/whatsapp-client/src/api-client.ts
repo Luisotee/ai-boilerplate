@@ -109,10 +109,6 @@ export async function sendMessageToAI(
     'Enqueuing message to AI API'
   );
 
-  // Build callback URL so the AI API knows which client to call back
-  // Use explicit WHATSAPP_CALLBACK_URL (for Docker) or construct from host:port (for local dev)
-  const callbackUrl = config.callbackUrl || `http://localhost:${config.server.port}`;
-
   const requestBody: Record<string, unknown> = {
     whatsapp_jid: whatsappJid,
     message,
@@ -122,7 +118,7 @@ export async function sendMessageToAI(
     whatsapp_message_id: messageId,
     phone,
     whatsapp_lid: whatsappLid,
-    callback_url: callbackUrl,
+    client_id: 'baileys',
   };
 
   // Add group admin status if available (for admin-only commands)

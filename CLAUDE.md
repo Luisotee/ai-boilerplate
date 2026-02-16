@@ -41,8 +41,8 @@ How a WhatsApp message traverses the system end-to-end:
 2. Extract messages from `entry[].changes[].value.messages[]`
 3. Type dispatch: text → `handlers/text.ts`, audio → `handlers/audio.ts`, image → `handlers/image.ts`, document → `handlers/document.ts`
 4. Handlers download media via Graph API (`services/graph-api.ts`), convert phone→JID for AI API compatibility
-5. Same AI API flow as Baileys: `api-client.ts` sends POST `/chat/enqueue` (includes `callback_url` for routing) → polls for result
-6. AI API routes callbacks to the correct client using per-request `callback_url`
+5. Same AI API flow as Baileys: `api-client.ts` sends POST `/chat/enqueue` (includes `client_id: "cloud"` for routing) → polls for result
+6. AI API resolves `client_id` to a pre-configured URL and routes callbacks to the correct client
 7. Responses sent via Meta Graph API (`POST graph.facebook.com/{phone_number_id}/messages`)
 
 ## Tooling
@@ -163,7 +163,7 @@ Multipart routes can't use Zod validation directly. Follow the pattern in `route
 - **Media URL expiry**: Downloaded media URLs from Graph API expire in 5 minutes — `downloadMedia()` fetches URL and downloads immediately in one call
 - **Webhook routes exempt from API key auth**: `/webhook` GET/POST use HMAC signature verification via `META_APP_SECRET` instead
 - **Phone ↔ JID translation**: Cloud API uses plain phone numbers, AI API expects JIDs — conversion happens at the Cloud client boundary via `utils/jid.ts`
-- **callback_url routing**: Each client includes its own URL as `callback_url` in enqueue requests so the AI API stream worker calls back the correct client
+- **client_id routing**: Each client sends a `client_id` (`"baileys"` or `"cloud"`) in enqueue requests — the AI API maps this to a pre-configured URL (`WHATSAPP_CLIENT_URL` / `WHATSAPP_CLOUD_CLIENT_URL`) to route callbacks
 
 ### AI API (Python)
 - Slash commands (`/settings`, `/tts`, `/clean`, `/memories`, `/help`) are intercepted in `routes/chat.py` — they never reach the AI agent

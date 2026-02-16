@@ -32,8 +32,6 @@ export const config = {
   corsOrigins: process.env.CORS_ORIGINS || '',
   rateLimitGlobal: parseInt(process.env.RATE_LIMIT_GLOBAL || '30', 10),
   rateLimitExpensive: parseInt(process.env.RATE_LIMIT_EXPENSIVE || '5', 10),
-  // Callback URL for AI API to call back (defaults to local URL for dev, override in Docker)
-  callbackUrl: process.env.WHATSAPP_CALLBACK_URL || '',
   // Timeouts
   timeouts: {
     default: parseInt(process.env.FETCH_TIMEOUT_DEFAULT_MS || '30000', 10),

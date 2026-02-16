@@ -97,8 +97,9 @@ class Settings(BaseSettings):
     tts_default_voice: str = "Kore"
     tts_max_text_length: int = 5000
 
-    # WhatsApp Client
+    # WhatsApp Clients
     whatsapp_client_url: str = "http://localhost:3001"
+    whatsapp_cloud_client_url: str = "http://localhost:3002"
     whatsapp_client_timeout: int = 30
 
     # External APIs
@@ -120,3 +121,10 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def get_whatsapp_client_url(client_id: str | None) -> str:
+    """Resolve client_id to a pre-configured WhatsApp client URL."""
+    if client_id == "cloud":
+        return settings.whatsapp_cloud_client_url
+    return settings.whatsapp_client_url

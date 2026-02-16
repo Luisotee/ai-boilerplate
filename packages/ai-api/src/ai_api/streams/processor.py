@@ -8,7 +8,7 @@ making it compatible with Redis Streams.
 import httpx
 
 from ..agent import AgentDeps, format_message_history, get_ai_response
-from ..config import settings
+from ..config import get_whatsapp_client_url, settings
 from ..database import SessionLocal, get_conversation_history, save_message
 from ..embeddings import create_embedding_service
 from ..logger import logger
@@ -33,7 +33,7 @@ async def process_chat_job_direct(
     document_path: str | None = None,
     document_filename: str | None = None,
     sender_name: str | None = None,
-    callback_url: str | None = None,
+    client_id: str | None = None,
 ) -> dict:
     """
     Process a chat message asynchronously without arq context.
@@ -98,8 +98,8 @@ async def process_chat_job_direct(
             embedding_service = create_embedding_service(settings.gemini_api_key)
 
             # Step 2.5: Initialize HTTP client and WhatsApp client
-            # Use per-job callback_url if provided, otherwise fall back to global config
-            whatsapp_base_url = callback_url or settings.whatsapp_client_url
+            # Resolve client_id to pre-configured URL
+            whatsapp_base_url = get_whatsapp_client_url(client_id)
             http_client = httpx.AsyncClient(timeout=settings.whatsapp_client_timeout)
             whatsapp_client = create_whatsapp_client(
                 http_client=http_client,

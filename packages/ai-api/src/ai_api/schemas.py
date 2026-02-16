@@ -24,9 +24,9 @@ class ChatRequest(BaseModel):
     )
     phone: str | None = Field(None, description="E.164 phone number (e.g., +5491126726818)")
     whatsapp_lid: str | None = Field(None, description="WhatsApp LID if known")
-    callback_url: str | None = Field(
+    client_id: Literal["baileys", "cloud"] | None = Field(
         None,
-        description="Callback URL for WhatsApp client (used for multi-client routing)",
+        description="WhatsApp client identifier for routing callbacks",
     )
 
 
