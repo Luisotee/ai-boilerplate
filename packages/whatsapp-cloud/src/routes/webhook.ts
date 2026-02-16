@@ -11,6 +11,8 @@ import {
   getDocumentFilename,
 } from '../utils/message.js';
 import type { WebhookBody } from '../utils/message.js';
+import { WebhookBodySchema } from '../schemas/webhook.js';
+import { sendReaction, sendText } from '../services/graph-api.js';
 import { handleTextMessage } from '../handlers/text.js';
 import { extractAndTranscribeAudio } from '../handlers/audio.js';
 import { extractImageData } from '../handlers/image.js';
@@ -84,7 +86,7 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
         tags: ['Webhook'],
         description: 'Receive incoming WhatsApp messages from Meta',
       },
-      // Skip Zod validation — we handle the body manually
+      // Skip Fastify's built-in Zod validation — we validate manually after HMAC verification
       validatorCompiler: () => {
         return function (data) {
           return { value: data };
@@ -120,8 +122,13 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
         }
       }
 
-      // Return 200 immediately — process messages asynchronously
-      const body = request.body as WebhookBody;
+      // Validate top-level webhook structure before processing
+      const parseResult = WebhookBodySchema.safeParse(request.body);
+      if (!parseResult.success) {
+        logger.warn({ errors: parseResult.error.issues }, 'Malformed webhook payload — skipping');
+        return reply.code(200).send('EVENT_RECEIVED');
+      }
+      const body = parseResult.data as WebhookBody;
 
       // Fire and forget: process messages in the background
       processWebhookMessages(body).catch((error) => {
@@ -169,15 +176,16 @@ async function processWebhookMessages(body: WebhookBody): Promise<void> {
           const mediaId = getMediaId(message);
           if (mediaId) {
             const imageData = await extractImageData(mediaId);
-            const caption = message.image?.caption || '';
-            const text = caption || 'Image received';
-            await handleTextMessage(
-              senderPhone,
-              messageId,
-              text,
-              senderName,
-              imageData ?? undefined
-            );
+            if (imageData) {
+              const caption = message.image?.caption || '';
+              const text = caption || 'Image received';
+              await handleTextMessage(senderPhone, messageId, text, senderName, imageData);
+            } else {
+              await sendText(
+                senderPhone,
+                'Sorry, I could not process that image. Please try sending it again.'
+              );
+            }
           }
           break;
         }
@@ -216,7 +224,6 @@ async function processWebhookMessages(body: WebhookBody): Promise<void> {
               );
             } else {
               // Non-PDF or download failure — send user-facing error
-              const { sendText } = await import('../services/graph-api.js');
               await sendText(
                 senderPhone,
                 'Sorry, I can only process PDF documents. Please send a PDF file.'
@@ -247,6 +254,11 @@ async function processWebhookMessages(body: WebhookBody): Promise<void> {
         { error, type: message.type, messageId, senderPhone },
         'Error processing individual message'
       );
+      try {
+        await sendReaction(senderPhone, messageId, '❌');
+      } catch (reactionError) {
+        logger.error({ error: reactionError }, 'Failed to send failure reaction');
+      }
     }
   }
 }

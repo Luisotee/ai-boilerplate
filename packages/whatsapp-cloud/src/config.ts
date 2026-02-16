@@ -27,7 +27,7 @@ export const config = {
     host: process.env.WHATSAPP_CLOUD_HOST || '0.0.0.0',
   },
   // Security
-  whatsappApiKey: process.env.WHATSAPP_CLOUD_API_KEY || '',
+  whatsappApiKey: process.env.WHATSAPP_CLOUD_API_KEY || process.env.WHATSAPP_API_KEY || '',
   aiApiKey: process.env.AI_API_KEY || '',
   corsOrigins: process.env.CORS_ORIGINS || '',
   rateLimitGlobal: parseInt(process.env.RATE_LIMIT_GLOBAL || '30', 10),

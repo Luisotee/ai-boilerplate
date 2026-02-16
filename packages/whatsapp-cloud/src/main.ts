@@ -12,6 +12,8 @@ import {
   jsonSchemaTransform,
   type ZodTypeProvider,
 } from 'fastify-type-provider-zod';
+import { logger } from './logger.js';
+import { fetchWithTimeout } from './utils/fetch.js';
 import { setCloudApiReady } from './services/cloud-state.js';
 import { registerHealthRoutes } from './routes/health.js';
 import { registerWebhookRoutes } from './routes/webhook.js';
@@ -59,15 +61,29 @@ async function validateCloudApiCredentials(): Promise<boolean> {
 
   try {
     const url = `${graphApiBaseUrl}/${graphApiVersion}/${phoneNumberId}`;
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
+    const response = await fetchWithTimeout(
+      url,
+      {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
       },
-    });
+      config.timeouts.default
+    );
 
+    if (!response.ok) {
+      logger.warn(
+        { status: response.status },
+        'Cloud API credential validation failed — check META_PHONE_NUMBER_ID and META_ACCESS_TOKEN'
+      );
+    }
     return response.ok;
-  } catch {
+  } catch (error) {
+    logger.warn(
+      { error },
+      'Could not reach Graph API during credential validation — check network connectivity'
+    );
     return false;
   }
 }
@@ -87,10 +103,8 @@ async function start() {
     throw new Error('META_ACCESS_TOKEN environment variable is required');
   }
   if (!config.meta.appSecret) {
-    console.warn(
-      '\u26a0\ufe0f  WARNING: META_APP_SECRET is not set \u2014 webhook signature verification is DISABLED. ' +
-        'Any request to /webhook will be accepted without authentication. ' +
-        'Set META_APP_SECRET before deploying to production.'
+    throw new Error(
+      'META_APP_SECRET environment variable is required for webhook signature verification'
     );
   }
 
@@ -229,8 +243,8 @@ async function start() {
     app.log.info('WhatsApp Cloud API credentials validated successfully');
   } else {
     app.log.warn(
-      'Failed to validate Cloud API credentials — API will start but report unhealthy. ' +
-        'Check META_PHONE_NUMBER_ID and META_ACCESS_TOKEN.'
+      'Cloud API credentials could not be validated — API will start but report unhealthy. ' +
+        'See warnings above for details.'
     );
   }
 

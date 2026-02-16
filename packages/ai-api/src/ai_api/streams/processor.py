@@ -8,7 +8,7 @@ making it compatible with Redis Streams.
 import httpx
 
 from ..agent import AgentDeps, format_message_history, get_ai_response
-from ..config import get_whatsapp_client_url, settings
+from ..config import get_whatsapp_api_key, get_whatsapp_client_url, settings
 from ..database import SessionLocal, get_conversation_history, save_message
 from ..embeddings import create_embedding_service
 from ..logger import logger
@@ -104,7 +104,7 @@ async def process_chat_job_direct(
             whatsapp_client = create_whatsapp_client(
                 http_client=http_client,
                 base_url=whatsapp_base_url,
-                api_key=settings.whatsapp_api_key,
+                api_key=get_whatsapp_api_key(client_id),
             )
             logger.info(f"[Job {job_id}] WhatsApp client initialized")
 

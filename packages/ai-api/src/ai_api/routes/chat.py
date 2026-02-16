@@ -9,7 +9,7 @@ from starlette.requests import Request
 
 from ..agent import AgentDeps, format_message_history, get_ai_response
 from ..commands import is_command, parse_and_execute
-from ..config import get_whatsapp_client_url, settings
+from ..config import get_whatsapp_api_key, get_whatsapp_client_url, settings
 from ..database import (
     get_conversation_history,
     get_db,
@@ -484,7 +484,7 @@ async def chat(request: Request, chat_request: ChatRequest, db: Session = Depend
             whatsapp_client = create_whatsapp_client(
                 http_client=http_client,
                 base_url=whatsapp_base_url,
-                api_key=settings.whatsapp_api_key,
+                api_key=get_whatsapp_api_key(chat_request.client_id),
             )
 
             agent_deps = AgentDeps(

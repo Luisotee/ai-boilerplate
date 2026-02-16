@@ -29,13 +29,13 @@ export async function registerOperationsRoutes(app: FastifyInstance) {
   );
 
   // DELETE /whatsapp/delete-message
-  // Cloud API does not support message deletion — return 501 Not Implemented
+  // Cloud API supports deletion, but it is not implemented here — return 501
   app.withTypeProvider<ZodTypeProvider>().delete(
     '/whatsapp/delete-message',
     {
       schema: {
         tags: ['Operations'],
-        description: 'Delete a message for everyone (not supported by Cloud API)',
+        description: 'Delete a message for everyone (not implemented)',
         body: DeleteMessageSchema,
         response: {
           501: ErrorResponseSchema,

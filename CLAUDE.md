@@ -159,8 +159,8 @@ Multipart routes can't use Zod validation directly. Follow the pattern in `route
 ### Cloud API / WhatsApp (TS)
 - **24-hour messaging window**: Can only send free-form messages within 24h of customer's last message — outside this window, template messages are required (not implemented)
 - **No typing indicators**: Cloud API doesn't support `composing`/`paused` presence updates — handlers skip this step
-- **No message edit/delete**: Cloud API doesn't support editing or deleting sent messages — `operations.ts` routes return 501
-- **Media URL expiry**: Downloaded media URLs from Graph API expire in 5 minutes — `downloadMedia()` fetches URL and downloads immediately in one call
+- **No message edit/delete**: Cloud API doesn't support editing messages; deletion is supported but not implemented — `operations.ts` routes return 501 for both
+- **Media URL expiry**: Downloaded media URLs from Graph API are temporary — `downloadMedia()` fetches URL and downloads immediately in one call
 - **Webhook routes exempt from API key auth**: `/webhook` GET/POST use HMAC signature verification via `META_APP_SECRET` instead
 - **Phone ↔ JID translation**: Cloud API uses plain phone numbers, AI API expects JIDs — conversion happens at the Cloud client boundary via `utils/jid.ts`
 - **client_id routing**: Each client sends a `client_id` (`"baileys"` or `"cloud"`) in enqueue requests — the AI API maps this to a pre-configured URL (`WHATSAPP_CLIENT_URL` / `WHATSAPP_CLOUD_CLIENT_URL`) to route callbacks

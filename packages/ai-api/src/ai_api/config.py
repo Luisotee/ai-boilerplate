@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     # API Authentication
     ai_api_key: str  # Required — app fails to start if not set
     whatsapp_api_key: str  # Required — used to authenticate calls to WhatsApp client
+    whatsapp_cloud_api_key: str | None = None  # Falls back to whatsapp_api_key
 
     # Optional with defaults
     groq_api_key: str | None = None
@@ -128,3 +129,10 @@ def get_whatsapp_client_url(client_id: str | None) -> str:
     if client_id == "cloud":
         return settings.whatsapp_cloud_client_url
     return settings.whatsapp_client_url
+
+
+def get_whatsapp_api_key(client_id: str | None) -> str:
+    """Resolve client_id to the appropriate WhatsApp client API key."""
+    if client_id == "cloud" and settings.whatsapp_cloud_api_key:
+        return settings.whatsapp_cloud_api_key
+    return settings.whatsapp_api_key

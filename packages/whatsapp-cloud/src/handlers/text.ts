@@ -91,21 +91,31 @@ export async function handleTextMessage(
     await graphApi.sendText(to, response);
     logger.info({ to: whatsappJid, responseLength: response.length }, 'Sent AI response');
 
+    // --- Response delivered; failures below should NOT trigger error reaction ---
+
     // Check if TTS is enabled and send voice message
-    const prefs = await getUserPreferences(whatsappJid);
-    if (prefs?.tts_enabled) {
-      logger.info({ whatsappJid }, 'TTS enabled, generating voice message');
-      const audioBuffer = await textToSpeech(response, whatsappJid);
-      if (audioBuffer) {
-        await graphApi.sendAudio(to, audioBuffer, 'audio/ogg; codecs=opus');
-        logger.info({ whatsappJid }, 'Voice message sent');
-      } else {
-        logger.warn({ whatsappJid }, 'TTS failed, text-only sent');
+    try {
+      const prefs = await getUserPreferences(whatsappJid);
+      if (prefs?.tts_enabled) {
+        logger.info({ whatsappJid }, 'TTS enabled, generating voice message');
+        const audioBuffer = await textToSpeech(response, whatsappJid);
+        if (audioBuffer) {
+          await graphApi.sendAudio(to, audioBuffer, 'audio/ogg; codecs=opus');
+          logger.info({ whatsappJid }, 'Voice message sent');
+        } else {
+          logger.warn({ whatsappJid }, 'TTS failed, text-only sent');
+        }
       }
+    } catch (ttsError) {
+      logger.warn({ error: ttsError, whatsappJid }, 'TTS delivery failed, text-only sent');
     }
 
     // Mark as read
-    await graphApi.markAsRead(messageId);
+    try {
+      await graphApi.markAsRead(messageId);
+    } catch (readError) {
+      logger.warn({ error: readError, messageId }, 'Failed to mark message as read');
+    }
   } catch (error) {
     logger.error({ error, to, messageId }, 'Error handling text message');
     try {

@@ -10,6 +10,7 @@
 
 import { config } from '../config.js';
 import { logger } from '../logger.js';
+import { fetchWithTimeout } from '../utils/fetch.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -73,11 +74,15 @@ async function sendMessage(to: string, messageBody: Record<string, unknown>): Pr
 
   logger.debug({ to, type: messageBody.type }, 'Sending message via Graph API');
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: getHeaders(),
-    body: JSON.stringify(body),
-  });
+  const response = await fetchWithTimeout(
+    url,
+    {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify(body),
+    },
+    config.timeouts.default
+  );
 
   if (!response.ok) {
     const errorBody = await response.text();
@@ -258,11 +263,15 @@ export async function markAsRead(messageId: string): Promise<void> {
 
   logger.debug({ messageId }, 'Marking message as read');
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: getHeaders(),
-    body: JSON.stringify(body),
-  });
+  const response = await fetchWithTimeout(
+    url,
+    {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify(body),
+    },
+    config.timeouts.default
+  );
 
   if (!response.ok) {
     const errorBody = await response.text();
@@ -306,14 +315,18 @@ export async function uploadMedia(
 
   logger.debug({ mimetype, size: buffer.length }, 'Uploading media to Graph API');
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      // Content-Type is set automatically for FormData
+  const response = await fetchWithTimeout(
+    url,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        // Content-Type is set automatically for FormData
+      },
+      body: formData,
     },
-    body: formData,
-  });
+    config.timeouts.default
+  );
 
   if (!response.ok) {
     const errorBody = await response.text();
@@ -343,12 +356,16 @@ export async function downloadMedia(
 
   logger.debug({ mediaId }, 'Fetching media URL from Graph API');
 
-  const metadataResponse = await fetch(metadataUrl, {
-    method: 'GET',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
+  const metadataResponse = await fetchWithTimeout(
+    metadataUrl,
+    {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
     },
-  });
+    config.timeouts.default
+  );
 
   if (!metadataResponse.ok) {
     const errorBody = await metadataResponse.text();
@@ -364,12 +381,16 @@ export async function downloadMedia(
   // Step 2: Download the actual file
   logger.debug({ mediaId, url: metadata.url }, 'Downloading media binary');
 
-  const fileResponse = await fetch(metadata.url, {
-    method: 'GET',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
+  const fileResponse = await fetchWithTimeout(
+    metadata.url,
+    {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
     },
-  });
+    config.timeouts.default
+  );
 
   if (!fileResponse.ok) {
     const errorBody = await fileResponse.text();
