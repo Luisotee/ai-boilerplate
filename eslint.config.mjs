@@ -15,7 +15,7 @@ export default tseslint.config(
   eslintConfigPrettier,
   // Project-specific settings
   {
-    files: ['packages/whatsapp-client/src/**/*.ts'],
+    files: ['packages/whatsapp-client/src/**/*.ts', 'packages/whatsapp-cloud/src/**/*.ts'],
     languageOptions: {
       parserOptions: {
         projectService: true,

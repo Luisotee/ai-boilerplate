@@ -118,7 +118,7 @@ export async function sendMessageToAI(
     whatsapp_message_id: messageId,
     phone,
     whatsapp_lid: whatsappLid,
-    client_id: 'baileys',
+    client_id: 'cloud',
   };
 
   // Add group admin status if available (for admin-only commands)

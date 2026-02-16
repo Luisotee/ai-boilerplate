@@ -28,3 +28,5 @@ postgres-data/
 .idea/
 *.swp
 *.swo
+
+serena/

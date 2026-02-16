@@ -9,7 +9,7 @@ from starlette.requests import Request
 
 from ..agent import AgentDeps, format_message_history, get_ai_response
 from ..commands import is_command, parse_and_execute
-from ..config import settings
+from ..config import get_whatsapp_api_key, get_whatsapp_client_url, settings
 from ..database import (
     get_conversation_history,
     get_db,
@@ -265,6 +265,8 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
                 job_data["whatsapp_message_id"] = chat_request.whatsapp_message_id
             if chat_request.sender_name:
                 job_data["sender_name"] = chat_request.sender_name
+            if chat_request.client_id:
+                job_data["client_id"] = chat_request.client_id
 
             # Handle image data if present
             if has_image:
@@ -477,11 +479,12 @@ async def chat(request: Request, chat_request: ChatRequest, db: Session = Depend
         embedding_service = create_embedding_service(settings.gemini_api_key)
 
         # Initialize HTTP client and WhatsApp client for agent tools
+        whatsapp_base_url = get_whatsapp_client_url(chat_request.client_id)
         async with httpx.AsyncClient(timeout=settings.whatsapp_client_timeout) as http_client:
             whatsapp_client = create_whatsapp_client(
                 http_client=http_client,
-                base_url=settings.whatsapp_client_url,
-                api_key=settings.whatsapp_api_key,
+                base_url=whatsapp_base_url,
+                api_key=get_whatsapp_api_key(chat_request.client_id),
             )
 
             agent_deps = AgentDeps(
