@@ -1,7 +1,7 @@
 ---
 name: docker-ops
 description: Manages Docker Compose infrastructure: start/stop services, view logs, debug connectivity, check health, manage volumes. Use for any Docker, container, infrastructure, or deployment task.
-model: haiku
+model: sonnet
 tools:
   - Read
   - Bash

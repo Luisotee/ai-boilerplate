@@ -87,17 +87,19 @@ export async function registerMessagingRoutes(app: FastifyInstance) {
   );
 
   // POST /whatsapp/typing
-  // Cloud API does not support typing indicators via the messages API.
-  // Return success as a no-op to maintain API compatibility.
+  // Shows typing indicator via the Graph API mark-as-read endpoint.
+  // 'paused' state is a no-op — Cloud API typing dismisses automatically after 25s or on response.
   app.withTypeProvider<ZodTypeProvider>().post(
     '/whatsapp/typing',
     {
       schema: {
         tags: ['Messaging'],
-        description: 'Show or hide typing indicator (no-op for Cloud API)',
+        description:
+          'Show typing indicator. Requires message_id for composing state. Paused is a no-op (typing dismisses automatically).',
         body: TypingIndicatorSchema,
         response: {
           200: SuccessResponseSchema,
+          400: ErrorResponseSchema,
           503: ErrorResponseSchema,
         },
       },
@@ -107,7 +109,16 @@ export async function registerMessagingRoutes(app: FastifyInstance) {
         return reply.code(503).send({ error: 'WhatsApp Cloud API not connected' });
       }
 
-      // No-op: Cloud API does not support typing indicators
+      const { state, message_id } = request.body;
+
+      if (state === 'composing') {
+        if (!message_id) {
+          return reply.code(400).send({ error: 'message_id is required for composing state' });
+        }
+        await graphApi.sendTypingIndicator(message_id);
+      }
+
+      // 'paused' is a no-op — typing dismisses automatically
       return { success: true };
     }
   );

@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "FILE_PATH=$(cat | jq -r '.tool_input.file_path // empty'); [ -z \"$FILE_PATH\" ] || [ ! -f \"$FILE_PATH\" ] && exit 0; case \"$FILE_PATH\" in *.ts|*.tsx|*.js|*.jsx|*.json|*.md|*.yaml|*.yml) cd \"$CLAUDE_PROJECT_DIR\" && npx prettier --write \"$FILE_PATH\" 2>/dev/null || true ;; *.py) cd \"$CLAUDE_PROJECT_DIR\" && uvx ruff format \"$FILE_PATH\" 2>/dev/null || true ;; esac; exit 0",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

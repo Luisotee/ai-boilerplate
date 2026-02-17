@@ -133,7 +133,7 @@ Apply every applicable section below. Skip sections irrelevant to the changed fi
 Check against known pitfalls from CLAUDE.md:
 
 - 24-hour messaging window (Cloud API — free-form only within 24h)
-- No typing indicators in Cloud API
+- Cloud API typing indicators use Graph API `typing_indicator` field (not WebSocket presence like Baileys)
 - No message edit/delete in Cloud API
 - Media URL expiry (5 minutes, Graph API)
 - Webhook routes use HMAC, not API key auth

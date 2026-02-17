@@ -74,6 +74,9 @@ export async function handleTextMessage(
   );
 
   try {
+    // Show typing indicator (also marks message as read)
+    await graphApi.sendTypingIndicator(messageId);
+
     const response = await sendMessageToAI(whatsappJid, text, {
       conversationType,
       senderJid: options?.senderJid,
@@ -108,13 +111,6 @@ export async function handleTextMessage(
       }
     } catch (ttsError) {
       logger.warn({ error: ttsError, whatsappJid }, 'TTS delivery failed, text-only sent');
-    }
-
-    // Mark as read
-    try {
-      await graphApi.markAsRead(messageId);
-    } catch (readError) {
-      logger.warn({ error: readError, messageId }, 'Failed to mark message as read');
     }
   } catch (error) {
     logger.error({ error, to, messageId }, 'Error handling text message');
