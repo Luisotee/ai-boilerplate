@@ -99,8 +99,13 @@ pnpm format:check                       # Verify formatting without changes (CI)
 
 - Root `.env` loaded first (shared vars) — see @.env.example for all required variables
 - Package-level `.env.local` for overrides (not committed to git)
+- **`.env.local` override pitfall**: Loaded with `override: true` — an uncommented empty variable (e.g., `AI_API_KEY=`) silently overrides the root `.env` value. Comment out or delete unused vars
 - TS config loader: `packages/whatsapp-client/src/config.ts` (Baileys), `packages/whatsapp-cloud/src/config.ts` (Cloud API)
 - Python config: pydantic-settings in `packages/ai-api/src/ai_api/config.py`
+
+## Mandatory Subagent: docs-fetcher
+
+**ALWAYS use the `docs-fetcher` subagent before writing or modifying code that touches any external library, SDK, API, or framework.** Do not rely on training data for API signatures, method names, or behavior — fetch current documentation first. This applies to Baileys, Pydantic AI, FastAPI, Fastify, Meta Cloud API, Gemini, pgvector, SQLAlchemy, Zod, Redis, Docling, Groq, and any other dependency. Launch `docs-fetcher` in parallel with your planning or exploration to avoid blocking.
 
 ## Guidelines
 
@@ -158,7 +163,7 @@ Multipart routes can't use Zod validation directly. Follow the pattern in `route
 
 ### Cloud API / WhatsApp (TS)
 - **24-hour messaging window**: Can only send free-form messages within 24h of customer's last message — outside this window, template messages are required (not implemented)
-- **No typing indicators**: Cloud API doesn't support `composing`/`paused` presence updates — handlers skip this step
+- **Typing indicators**: Cloud API supports typing via the mark-as-read endpoint with `typing_indicator: { type: 'text' }` — auto-dismisses after 25s or when a response is sent. `sendTypingIndicator()` in `graph-api.ts` handles this; `paused` state is a no-op
 - **No message edit/delete**: Cloud API doesn't support editing messages; deletion is supported but not implemented — `operations.ts` routes return 501 for both
 - **Media URL expiry**: Downloaded media URLs from Graph API are temporary — `downloadMedia()` fetches URL and downloads immediately in one call
 - **Webhook routes exempt from API key auth**: `/webhook` GET/POST use HMAC signature verification via `META_APP_SECRET` instead

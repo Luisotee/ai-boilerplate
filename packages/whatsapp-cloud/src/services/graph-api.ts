@@ -285,6 +285,45 @@ export async function markAsRead(messageId: string): Promise<void> {
   logger.debug({ messageId }, 'Message marked as read');
 }
 
+/**
+ * Mark a message as read and show a typing indicator.
+ * The indicator dismisses automatically when a response is sent or after 25 seconds.
+ * Non-fatal: logs a warning on failure instead of throwing.
+ */
+export async function sendTypingIndicator(messageId: string): Promise<void> {
+  const url = getMessagesUrl();
+  const body = {
+    messaging_product: 'whatsapp',
+    status: 'read',
+    message_id: messageId,
+    typing_indicator: { type: 'text' },
+  };
+
+  logger.debug({ messageId }, 'Sending typing indicator');
+
+  try {
+    const response = await fetchWithTimeout(
+      url,
+      {
+        method: 'POST',
+        headers: getHeaders(),
+        body: JSON.stringify(body),
+      },
+      config.timeouts.default
+    );
+
+    if (!response.ok) {
+      const errorBody = await response.text();
+      logger.warn(
+        { status: response.status, body: errorBody, messageId },
+        'Failed to send typing indicator'
+      );
+    }
+  } catch (error) {
+    logger.warn({ error, messageId }, 'Typing indicator request failed');
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Public API — Media upload / download
 // ---------------------------------------------------------------------------

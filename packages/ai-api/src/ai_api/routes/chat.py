@@ -361,7 +361,8 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
 
 
 @router.get("/chat/job/{job_id}", response_model=JobStatusResponse, tags=["Chat"])
-async def get_job_status(job_id: str):
+@limiter.exempt
+async def get_job_status(request: Request, job_id: str):
     """
     Get the status and accumulated chunks for a job
 

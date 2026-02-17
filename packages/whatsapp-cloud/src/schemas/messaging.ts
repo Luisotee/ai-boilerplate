@@ -16,6 +16,7 @@ export const SendReactionSchema = z.object({
 export const TypingIndicatorSchema = z.object({
   phoneNumber: z.string().describe('Phone number (e.g., 5511999999999)'),
   state: z.enum(['composing', 'paused']).describe('Typing state'),
+  message_id: z.string().optional().describe('Message ID to show typing indicator for'),
 });
 
 export const ReadMessagesSchema = z.object({
