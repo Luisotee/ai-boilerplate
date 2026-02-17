@@ -88,7 +88,7 @@ Check for consistency in:
 ### Step 6: Note known intentional differences
 
 Some differences are by design (documented in CLAUDE.md):
-- **No typing indicators**: Cloud API doesn't support `composing`/`paused` presence
+- **Typing indicators differ**: Baileys uses WebSocket presence updates (`composing`/`paused`), Cloud uses Graph API `typing_indicator` field via mark-as-read endpoint. `paused` is a no-op on Cloud (typing auto-dismisses after 25s)
 - **No message edit/delete**: Cloud API doesn't support editing; deletion supported but not implemented
 - **24-hour messaging window**: Cloud API limitation on free-form messages
 - **Media download method**: Baileys uses `downloadMediaMessage()`, Cloud uses `graphApi.downloadMedia()`

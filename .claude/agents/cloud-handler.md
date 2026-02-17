@@ -65,7 +65,7 @@ Key patterns from text.ts:
 - `saveOnly` mode: skips AI processing, just saves to history
 - Error handling: `graphApi.sendReaction(to, messageId, '❌')` in catch block
 - TTS failure is non-fatal (logged but doesn't prevent text delivery)
-- NO typing indicators (Cloud API doesn't support `composing`/`paused` presence updates)
+- Typing indicator: `await graphApi.sendTypingIndicator(messageId)` — marks as read + shows typing. Non-fatal on failure
 
 ## Step 2: Register in webhook.ts
 
@@ -134,7 +134,7 @@ For multipart routes (media upload), follow `packages/whatsapp-cloud/src/routes/
 
 ## Cloud API gotchas
 
-- **No typing indicators**: Cloud API doesn't support `composing`/`paused` — skip this entirely
+- **Typing indicators**: Use `graphApi.sendTypingIndicator(messageId)` which marks as read and shows typing. Auto-dismisses after 25s or when a response is sent. `paused` state is a no-op
 - **Phone format**: Raw numbers without `@s.whatsapp.net` — conversion via `phoneToJid()` / `jidToPhone()`
 - **Media download**: Two-step via Graph API (get URL → download binary) handled by `graphApi.downloadMedia(mediaId)`
 - **Media URL expiry**: Downloaded URLs from Graph API are temporary (~5 minutes) — `downloadMedia()` handles both steps in one call
