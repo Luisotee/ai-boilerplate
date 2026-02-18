@@ -59,7 +59,7 @@ export async function sendMessageToAI(
   whatsappJid: string,
   message: string,
   options: MessageOptions
-): Promise<string> {
+): Promise<string | null> {
   const {
     conversationType,
     senderJid,
@@ -150,6 +150,10 @@ export async function sendMessageToAI(
   );
 
   if (!enqueueResponse.ok) {
+    if (enqueueResponse.status === 403) {
+      logger.warn({ whatsappJid }, 'Message blocked by API whitelist');
+      return null;
+    }
     throw new Error(`Enqueue failed: ${enqueueResponse.status} ${enqueueResponse.statusText}`);
   }
 

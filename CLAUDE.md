@@ -84,6 +84,7 @@ pnpm format:check                       # Verify formatting without changes (CI)
 - **Webhook HMAC**: Cloud API `/webhook` routes skip API key auth — verified via `x-hub-signature-256` HMAC-SHA256 using `META_APP_SECRET`
 - **CORS**: `CORS_ORIGINS` env var (comma-separated). Empty = block all cross-origin
 - **Rate Limiting**: `RATE_LIMIT_GLOBAL` (default 30/min), `RATE_LIMIT_EXPENSIVE` (default 5/min)
+- **User Whitelist**: `WHITELIST_PHONES` env var — comma-separated phone numbers and/or group JIDs. Empty = all users allowed (disabled). When set, non-whitelisted messages are silently ignored. Checked at both WhatsApp client level (primary) and AI API level (defense in depth)
 - **No default passwords**: `POSTGRES_PASSWORD` and `REDIS_PASSWORD` required in `.env`
 
 ## Database
@@ -169,6 +170,7 @@ Multipart routes can't use Zod validation directly. Follow the pattern in `route
 - **Webhook routes exempt from API key auth**: `/webhook` GET/POST use HMAC signature verification via `META_APP_SECRET` instead
 - **Phone ↔ JID translation**: Cloud API uses plain phone numbers, AI API expects JIDs — conversion happens at the Cloud client boundary via `utils/jid.ts`
 - **client_id routing**: Each client sends a `client_id` (`"baileys"` or `"cloud"`) in enqueue requests — the AI API maps this to a pre-configured URL (`WHATSAPP_CLIENT_URL` / `WHATSAPP_CLOUD_CLIENT_URL`) to route callbacks
+- **Whitelist group JID limitation**: `WHITELIST_PHONES` supports group JIDs (e.g. `120363...@g.us`) only on the Baileys client. The Cloud API webhook payload does not include group context — only the individual sender's phone number — so group JID entries in the whitelist have no effect for Cloud API messages
 
 ### AI API (Python)
 - Slash commands (`/settings`, `/tts`, `/clean`, `/memories`, `/help`) are intercepted in `routes/chat.py` — they never reach the AI agent

@@ -179,6 +179,11 @@ async function start() {
   app.log.info(`WhatsApp REST API listening on http://${config.server.host}:${config.server.port}`);
   app.log.info(`API Docs: http://localhost:${config.server.port}/docs`);
   app.log.info(`OpenAPI JSON: http://localhost:${config.server.port}/docs/json`);
+  if (config.whitelistPhones.size > 0) {
+    app.log.info({ count: config.whitelistPhones.size }, 'User whitelist ENABLED');
+  } else {
+    app.log.info('User whitelist DISABLED (all users allowed)');
+  }
   app.log.info('='.repeat(60));
 }
 

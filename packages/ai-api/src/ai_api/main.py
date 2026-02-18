@@ -10,7 +10,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from .config import settings
+from .config import settings, whitelist_set
 from .database import init_db
 from .deps import limiter
 from .logger import logger
@@ -54,6 +54,11 @@ async def lifespan(app: FastAPI):
 
     # Start periodic expired-document cleanup
     cleanup_task = asyncio.create_task(_cleanup_loop())
+
+    if whitelist_set:
+        logger.info("User whitelist ENABLED (%d entries)", len(whitelist_set))
+    else:
+        logger.info("User whitelist DISABLED (all users allowed)")
 
     logger.info("=" * 60)
     logger.info("AI API is ready!")

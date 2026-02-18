@@ -155,6 +155,17 @@ export async function initializeWhatsApp(): Promise<void> {
         );
 
         if (msg.key.fromMe || msg.key.remoteJid === 'status@broadcast') continue;
+        if (!msg.key.remoteJid) continue;
+
+        // Whitelist check: skip non-whitelisted JIDs
+        if (config.whitelistPhones.size > 0) {
+          const remoteJid = msg.key.remoteJid!;
+          const phone = remoteJid.replace(/@.*$/, '');
+          if (!config.whitelistPhones.has(phone) && !config.whitelistPhones.has(remoteJid)) {
+            logger.info({ remoteJid }, 'Skipping non-whitelisted JID');
+            continue;
+          }
+        }
 
         // Normalize message content to handle wrappers (viewOnce, ephemeral, etc.)
         const normalizedMessage = normalizeMessageContent(msg.message);
