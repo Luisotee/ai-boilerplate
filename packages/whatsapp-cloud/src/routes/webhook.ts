@@ -160,7 +160,7 @@ async function processWebhookMessages(body: WebhookBody): Promise<void> {
     // Whitelist check: skip non-whitelisted phones
     if (config.whitelistPhones.size > 0) {
       if (!config.whitelistPhones.has(senderPhone)) {
-        logger.debug({ senderPhone }, 'Skipping non-whitelisted phone');
+        logger.info({ senderPhone }, 'Skipping non-whitelisted phone');
         continue;
       }
     }

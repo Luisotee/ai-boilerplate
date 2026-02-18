@@ -96,6 +96,8 @@ export async function handleTextMessage(
         : undefined,
     });
 
+    if (response === null) return; // Silently blocked by API whitelist
+
     // Send text response first
     await sock.sendMessage(whatsappJid, { text: response });
     logger.info({ to: whatsappJid, responseLength: response.length }, 'Sent AI response');

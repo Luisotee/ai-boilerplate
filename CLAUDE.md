@@ -170,6 +170,7 @@ Multipart routes can't use Zod validation directly. Follow the pattern in `route
 - **Webhook routes exempt from API key auth**: `/webhook` GET/POST use HMAC signature verification via `META_APP_SECRET` instead
 - **Phone ↔ JID translation**: Cloud API uses plain phone numbers, AI API expects JIDs — conversion happens at the Cloud client boundary via `utils/jid.ts`
 - **client_id routing**: Each client sends a `client_id` (`"baileys"` or `"cloud"`) in enqueue requests — the AI API maps this to a pre-configured URL (`WHATSAPP_CLIENT_URL` / `WHATSAPP_CLOUD_CLIENT_URL`) to route callbacks
+- **Whitelist group JID limitation**: `WHITELIST_PHONES` supports group JIDs (e.g. `120363...@g.us`) only on the Baileys client. The Cloud API webhook payload does not include group context — only the individual sender's phone number — so group JID entries in the whitelist have no effect for Cloud API messages
 
 ### AI API (Python)
 - Slash commands (`/settings`, `/tts`, `/clean`, `/memories`, `/help`) are intercepted in `routes/chat.py` — they never reach the AI agent

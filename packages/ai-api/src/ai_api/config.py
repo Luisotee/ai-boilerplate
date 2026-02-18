@@ -141,8 +141,8 @@ def get_whatsapp_api_key(client_id: str | None) -> str:
     return settings.whatsapp_api_key
 
 
-def get_whitelist_set() -> set[str]:
-    """Parse WHITELIST_JIDS into a set for O(1) lookups."""
-    if not settings.whitelist_phones:
-        return set()
-    return {jid.strip() for jid in settings.whitelist_phones.split(",") if jid.strip()}
+whitelist_set: set[str] = (
+    {p.strip() for p in settings.whitelist_phones.split(",") if p.strip()}
+    if settings.whitelist_phones
+    else set()
+)

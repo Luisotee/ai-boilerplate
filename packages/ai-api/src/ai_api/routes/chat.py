@@ -9,7 +9,7 @@ from starlette.requests import Request
 
 from ..agent import AgentDeps, format_message_history, get_ai_response
 from ..commands import is_command, parse_and_execute
-from ..config import get_whatsapp_api_key, get_whatsapp_client_url, get_whitelist_set, settings
+from ..config import get_whatsapp_api_key, get_whatsapp_client_url, settings, whitelist_set
 from ..database import (
     get_conversation_history,
     get_db,
@@ -37,11 +37,10 @@ router = APIRouter()
 
 def _is_whitelisted(whatsapp_jid: str) -> bool:
     """Check if a JID is whitelisted. Returns True if whitelist is empty (disabled)."""
-    whitelist = get_whitelist_set()
-    if not whitelist:
+    if not whitelist_set:
         return True
     phone = whatsapp_jid.split("@")[0]
-    return phone in whitelist or whatsapp_jid in whitelist
+    return phone in whitelist_set or whatsapp_jid in whitelist_set
 
 
 async def get_stream_job_status(redis, job_id: str) -> str:
@@ -88,7 +87,7 @@ async def save_message_only(request: SaveMessageRequest, db: Session = Depends(g
     logger.info(f"Saving message from {request.whatsapp_jid} (no response)")
 
     if not _is_whitelisted(request.whatsapp_jid):
-        logger.debug(f"Blocked non-whitelisted JID: {request.whatsapp_jid}")
+        logger.warning(f"Blocked non-whitelisted JID: {request.whatsapp_jid}")
         raise HTTPException(status_code=403, detail="Not authorized")
 
     try:
@@ -176,7 +175,7 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
     )
 
     if not _is_whitelisted(chat_request.whatsapp_jid):
-        logger.debug(f"Blocked non-whitelisted JID: {chat_request.whatsapp_jid}")
+        logger.warning(f"Blocked non-whitelisted JID: {chat_request.whatsapp_jid}")
         raise HTTPException(status_code=403, detail="Not authorized")
 
     # Check for commands first (e.g., /settings, /tts on, /help)
@@ -444,7 +443,7 @@ async def chat(request: Request, chat_request: ChatRequest, db: Session = Depend
     logger.info(f"Received chat request from {chat_request.whatsapp_jid}")
 
     if not _is_whitelisted(chat_request.whatsapp_jid):
-        logger.debug(f"Blocked non-whitelisted JID: {chat_request.whatsapp_jid}")
+        logger.warning(f"Blocked non-whitelisted JID: {chat_request.whatsapp_jid}")
         raise HTTPException(status_code=403, detail="Not authorized")
 
     try:
