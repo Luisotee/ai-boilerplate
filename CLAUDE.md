@@ -84,6 +84,7 @@ pnpm format:check                       # Verify formatting without changes (CI)
 - **Webhook HMAC**: Cloud API `/webhook` routes skip API key auth — verified via `x-hub-signature-256` HMAC-SHA256 using `META_APP_SECRET`
 - **CORS**: `CORS_ORIGINS` env var (comma-separated). Empty = block all cross-origin
 - **Rate Limiting**: `RATE_LIMIT_GLOBAL` (default 30/min), `RATE_LIMIT_EXPENSIVE` (default 5/min)
+- **User Whitelist**: `WHITELIST_PHONES` env var — comma-separated phone numbers and/or group JIDs. Empty = all users allowed (disabled). When set, non-whitelisted messages are silently ignored. Checked at both WhatsApp client level (primary) and AI API level (defense in depth)
 - **No default passwords**: `POSTGRES_PASSWORD` and `REDIS_PASSWORD` required in `.env`
 
 ## Database

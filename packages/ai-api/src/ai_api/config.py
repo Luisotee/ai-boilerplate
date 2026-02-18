@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     groq_api_key: str | None = None
     log_level: str = "INFO"
 
+    # User Whitelist
+    whitelist_phones: str = ""  # Comma-separated phone numbers/group JIDs (empty = all allowed)
+
     # CORS
     cors_origins: str = ""  # Comma-separated allowed origins
 
@@ -136,3 +139,10 @@ def get_whatsapp_api_key(client_id: str | None) -> str:
     if client_id == "cloud" and settings.whatsapp_cloud_api_key:
         return settings.whatsapp_cloud_api_key
     return settings.whatsapp_api_key
+
+
+def get_whitelist_set() -> set[str]:
+    """Parse WHITELIST_JIDS into a set for O(1) lookups."""
+    if not settings.whitelist_phones:
+        return set()
+    return {jid.strip() for jid in settings.whitelist_phones.split(",") if jid.strip()}

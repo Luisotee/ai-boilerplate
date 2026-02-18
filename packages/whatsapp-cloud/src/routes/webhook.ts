@@ -157,6 +157,14 @@ async function processWebhookMessages(body: WebhookBody): Promise<void> {
     const senderName = getSenderName(contact);
     const messageId = message.id;
 
+    // Whitelist check: skip non-whitelisted phones
+    if (config.whitelistPhones.size > 0) {
+      if (!config.whitelistPhones.has(senderPhone)) {
+        logger.debug({ senderPhone }, 'Skipping non-whitelisted phone');
+        continue;
+      }
+    }
+
     logger.info(
       { type: message.type, from: senderPhone, messageId },
       'Processing incoming message'

@@ -9,7 +9,7 @@ from starlette.requests import Request
 
 from ..agent import AgentDeps, format_message_history, get_ai_response
 from ..commands import is_command, parse_and_execute
-from ..config import get_whatsapp_api_key, get_whatsapp_client_url, settings
+from ..config import get_whatsapp_api_key, get_whatsapp_client_url, get_whitelist_set, settings
 from ..database import (
     get_conversation_history,
     get_db,
@@ -33,6 +33,15 @@ from ..streams.manager import add_message_to_stream
 from ..whatsapp import create_whatsapp_client
 
 router = APIRouter()
+
+
+def _is_whitelisted(whatsapp_jid: str) -> bool:
+    """Check if a JID is whitelisted. Returns True if whitelist is empty (disabled)."""
+    whitelist = get_whitelist_set()
+    if not whitelist:
+        return True
+    phone = whatsapp_jid.split("@")[0]
+    return phone in whitelist or whatsapp_jid in whitelist
 
 
 async def get_stream_job_status(redis, job_id: str) -> str:
@@ -77,6 +86,10 @@ async def save_message_only(request: SaveMessageRequest, db: Session = Depends(g
     - `success`: Boolean indicating if save was successful
     """
     logger.info(f"Saving message from {request.whatsapp_jid} (no response)")
+
+    if not _is_whitelisted(request.whatsapp_jid):
+        logger.debug(f"Blocked non-whitelisted JID: {request.whatsapp_jid}")
+        raise HTTPException(status_code=403, detail="Not authorized")
 
     try:
         # Format message with sender name if group message
@@ -161,6 +174,10 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
     logger.info(
         f"Received request from {chat_request.whatsapp_jid}: {chat_request.message[:50]}... (has_image={has_image})"
     )
+
+    if not _is_whitelisted(chat_request.whatsapp_jid):
+        logger.debug(f"Blocked non-whitelisted JID: {chat_request.whatsapp_jid}")
+        raise HTTPException(status_code=403, detail="Not authorized")
 
     # Check for commands first (e.g., /settings, /tts on, /help)
     if is_command(chat_request.message):
@@ -425,6 +442,10 @@ async def chat(request: Request, chat_request: ChatRequest, db: Session = Depend
     - `response`: Complete AI-generated response text
     """
     logger.info(f"Received chat request from {chat_request.whatsapp_jid}")
+
+    if not _is_whitelisted(chat_request.whatsapp_jid):
+        logger.debug(f"Blocked non-whitelisted JID: {chat_request.whatsapp_jid}")
+        raise HTTPException(status_code=403, detail="Not authorized")
 
     try:
         # Get conversation history with type-specific limit

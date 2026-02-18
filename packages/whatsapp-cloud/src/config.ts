@@ -19,7 +19,15 @@ if (existsSync(localEnvPath)) {
   dotenvConfig({ path: localEnvPath, override: true });
 }
 
+const whitelistPhones = new Set(
+  (process.env.WHITELIST_PHONES || '')
+    .split(',')
+    .map((jid) => jid.trim())
+    .filter(Boolean)
+);
+
 export const config = {
+  whitelistPhones,
   aiApiUrl: process.env.AI_API_URL || 'http://localhost:8000',
   logLevel: process.env.LOG_LEVEL || 'info',
   server: {
