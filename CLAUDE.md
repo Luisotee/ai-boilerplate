@@ -52,7 +52,7 @@ How a WhatsApp message traverses the system end-to-end:
 - **Python**: >=3.11, managed with `uv`
 - **Formatting**: Prettier (TS) + Ruff (Python) — enforced by Husky pre-commit hook (`pnpm format` runs automatically)
 - **Linting**: ESLint flat config (TS) + Ruff (Python)
-- **No test framework configured** — human developer handles testing
+- **Testing**: Vitest (TS) + pytest/pytest-asyncio (Python) — `pnpm test` runs all
 
 ## Commands
 
@@ -72,6 +72,17 @@ pnpm lint                               # Check TypeScript (ESLint) + Python (Ru
 pnpm lint:fix                           # Auto-fix lint issues
 pnpm format                             # Format TypeScript (Prettier) + Python (Ruff)
 pnpm format:check                       # Verify formatting without changes (CI)
+
+# Testing (from root)
+pnpm test                               # Run all tests (TS + Python)
+pnpm test:ts                            # Run TypeScript tests only (both clients)
+pnpm test:python                        # Run Python tests only (uv run pytest)
+
+# Per-package
+cd packages/whatsapp-client && pnpm test        # Baileys client tests
+cd packages/whatsapp-cloud && pnpm test         # Cloud client tests
+cd packages/ai-api && uv run pytest             # AI API tests
+cd packages/ai-api && uv run pytest tests/unit  # AI API unit tests only
 ```
 
 ## Security
@@ -114,8 +125,31 @@ pnpm format:check                       # Verify formatting without changes (CI)
 - Prefer pure functions over classes
 - Async throughout both codebases
 - Use structured logging (Pino for TS, Python `logging`) — no console.log/print
-- Do NOT write tests — the human developer handles testing
+- Write tests for new functionality — follow existing patterns in `tests/` directories
 - Keep this file updated with important changes
+
+## Testing
+
+### Structure
+Each package has `tests/` with: `unit/` (pure functions, no I/O), `integration/` (HTTP routes via app injection), `helpers/` (factories + test app builders). ai-api also has `mocked/` (external deps mocked: DB, Redis, Google API).
+
+### Frameworks & Config
+- **TypeScript**: Vitest 4 — config in `vitest.config.ts`, tests match `tests/**/*.test.ts`
+- **Python**: pytest 9 + pytest-asyncio — config in `pytest.ini`, `asyncio_mode = auto` (no `@pytest.mark.asyncio` needed)
+
+### Key Patterns
+- **TS integration tests**: Use `buildTestApp()` from `tests/helpers/fastify.ts` — builds Fastify with all routes but NO auth, rate limiting, or Swagger
+- **TS fixtures**: `makeMockSocket()` / `makeMockGraphApi()` and message factories (`makeTextMsg`, `makeWebhookBody`, etc.) in `tests/helpers/fixtures.ts`
+- **Python conftest.py**: Session-scoped patches for `sqlalchemy.create_engine` and `GoogleProvider` — prevents real DB/API connections. Must run before production imports
+- **Python integration tests**: Use `httpx.AsyncClient` with `ASGITransport(app=app)` + `app.dependency_overrides[get_db]` for mock DB. Rate limiter disabled via `tests/integration/conftest.py`
+- **Python factories**: `tests/helpers/factories.py` — `make_conversation_message()`, `make_user()`, `make_http_response()` return `MagicMock` objects mimicking ORM models
+
+### Gotchas
+- TS singleton state (`getBaileysSocket`, `isCloudApiConnected`) needs `vi.resetModules()` in `beforeEach` to reset between tests
+- TS `fetch` tests use `vi.stubGlobal('fetch', mockFetch)` + `vi.useFakeTimers()` for timeout testing
+- Python `conftest.py` sets env vars BEFORE any production code import — order matters, don't rearrange
+- No coverage tooling configured — no `pytest-cov` or `@vitest/coverage-*`
+- No CI/CD pipeline runs tests — testing is local only
 
 ## Common Workflows
 
@@ -124,6 +158,7 @@ pnpm format:check                       # Verify formatting without changes (CI)
 2. Wrap in try/catch: use `sendFailureReaction(sock, msg)` + `logger.error` in catch, `sendPresenceUpdate('paused')` in finally
 3. Register it in `src/whatsapp.ts` inside the `messages.upsert` event handler
 4. Add any new routes in `src/routes/` with Zod schemas in `src/schemas/`
+5. Add unit tests in `tests/unit/` and integration tests in `tests/integration/` following existing patterns
 
 ### Adding a new agent tool (ai-api)
 1. Add tool function in `agent/tools/` using the `@agent.tool` decorator (see existing tools for patterns)
@@ -131,12 +166,14 @@ pnpm format:check                       # Verify formatting without changes (CI)
 3. Import the module in `agent/tools/__init__.py` — the import triggers decorator registration
 4. Add tool description to the system prompt in `agent/core.py`
 5. Tool accesses deps via `ctx.deps` (db, embedding_service, whatsapp_client, etc.)
+6. Add mocked tests in `tests/mocked/` following existing patterns (mock external deps, test tool behavior)
 
 ### Adding a new API endpoint (ai-api)
 1. Add route in the appropriate `routes/*.py` file (or create a new router module)
 2. Use `APIRouter` with appropriate tags; import `limiter` from `deps.py` for rate-limited endpoints
 3. Add Pydantic schemas in `schemas.py`
 4. Register new router in `main.py` via `app.include_router()`
+5. Add integration tests in `tests/integration/` using `httpx.AsyncClient` with `ASGITransport`
 
 ### Adding a new message handler (whatsapp-cloud)
 1. Create handler in `src/handlers/` as a pure async function — follow the pattern in `text.ts`
@@ -144,6 +181,7 @@ pnpm format:check                       # Verify formatting without changes (CI)
 3. Register in `src/routes/webhook.ts` inside the message type dispatch switch
 4. Use `jidToPhone()` / `phoneToJid()` from `utils/jid.ts` when crossing API boundaries
 5. Download media via `graphApi.downloadMedia(mediaId)` instead of Baileys `downloadMediaMessage()`
+6. Add unit tests in `tests/unit/` and integration tests in `tests/integration/` following existing patterns
 
 ### Adding a WhatsApp media route (multipart — whatsapp-client)
 Multipart routes can't use Zod validation directly. Follow the pattern in `routes/media.ts`:
