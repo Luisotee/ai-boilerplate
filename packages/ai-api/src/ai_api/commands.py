@@ -250,43 +250,50 @@ def handle_reset_command(db: Session, user_id: str, whatsapp_jid: str) -> str:
     Returns:
         Response message
     """
-    message_count = (
-        db.query(ConversationMessage).filter(ConversationMessage.user_id == user_id).delete()
-    )
-
-    mem = get_or_create_core_memory(db, user_id)
-    had_memories = bool(mem.content)
-    mem.content = ""
-
-    # Delete conversation-scoped documents
-    upload_dir = Path(settings.kb_upload_dir)
-    docs_to_delete = (
-        db.query(KnowledgeBaseDocument)
-        .filter(
-            KnowledgeBaseDocument.whatsapp_jid == whatsapp_jid,
-            KnowledgeBaseDocument.is_conversation_scoped == True,  # noqa: E712
+    try:
+        message_count = (
+            db.query(ConversationMessage).filter(ConversationMessage.user_id == user_id).delete()
         )
-        .all()
-    )
-    doc_count = len(docs_to_delete)
 
-    for doc in docs_to_delete:
-        file_path = upload_dir / doc.filename
+        mem = get_or_create_core_memory(db, user_id)
+        had_memories = bool(mem.content)
+        mem.content = ""
+
+        # Query conversation-scoped documents and collect file paths before commit
+        upload_dir = Path(settings.kb_upload_dir)
+        docs_to_delete = (
+            db.query(KnowledgeBaseDocument)
+            .filter(
+                KnowledgeBaseDocument.whatsapp_jid == whatsapp_jid,
+                KnowledgeBaseDocument.is_conversation_scoped == True,  # noqa: E712
+            )
+            .all()
+        )
+        doc_count = len(docs_to_delete)
+        file_paths = [upload_dir / doc.filename for doc in docs_to_delete]
+
+        for doc in docs_to_delete:
+            db.delete(doc)
+
+        # Reset preferences to defaults
+        prefs = get_or_create_preferences(db, user_id)
+        prefs.tts_enabled = False
+        prefs.tts_language = "en"
+        prefs.stt_language = None
+
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    # Delete files AFTER successful commit (files on disk can't be rolled back)
+    for file_path in file_paths:
         if file_path.exists():
             try:
                 file_path.unlink()
                 logger.debug(f"Deleted file: {file_path}")
             except Exception as e:
                 logger.warning(f"Failed to delete file {file_path}: {e}")
-        db.delete(doc)
-
-    # Reset preferences to defaults
-    prefs = get_or_create_preferences(db, user_id)
-    prefs.tts_enabled = False
-    prefs.tts_language = "en"
-    prefs.stt_language = None
-
-    db.commit()
 
     parts = []
     if message_count > 0:

@@ -439,3 +439,29 @@ class TestHandleResetCommand:
         assert "Reset complete" in result
         assert "preferences" in result
         db.commit.assert_called_once()
+
+    @patch("ai_api.commands.Path.unlink")
+    @patch("ai_api.commands.Path.exists", return_value=True)
+    @patch("ai_api.commands.get_or_create_preferences")
+    @patch("ai_api.commands.get_or_create_core_memory")
+    def test_resets_with_documents(self, mock_get_mem, mock_get_prefs, _mock_exists, mock_unlink):
+        mock_mem = MagicMock()
+        mock_mem.content = ""
+        mock_get_mem.return_value = mock_mem
+
+        mock_prefs = MagicMock()
+        mock_get_prefs.return_value = mock_prefs
+
+        doc1 = MagicMock()
+        doc1.filename = "abc.pdf"
+        doc2 = MagicMock()
+        doc2.filename = "def.pdf"
+
+        db = self._make_db(delete_count=2, docs=[doc1, doc2])
+        result = handle_reset_command(db, "user-123", "123@s.whatsapp.net")
+
+        assert "2 documents" in result
+        assert "2 messages" in result
+        assert db.delete.call_count == 2
+        assert mock_unlink.call_count == 2
+        db.commit.assert_called_once()

@@ -114,7 +114,6 @@ If the user wants the AI agent to also handle this functionality conversationall
 - `strip_leading_mentions()` (defined in `commands.py`) removes leading `@botname` from group messages: `"@BotName /settings"` -> `"/settings"`
 - `CommandResult(is_command=True, response_text=...)` returns immediately without AI processing
 - Commands are NOT saved to conversation history (`save_to_history=False` by default)
-- Duration parsing uses `_parse_duration()` for time-based operations (1h, 7d, 1m)
 - The TypeScript client checks `is_command` in the response to handle it differently from AI responses
 
 ## If adding a new preference field
