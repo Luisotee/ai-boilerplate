@@ -7,7 +7,6 @@ Commands are intercepted before reaching the AI agent.
 
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -59,32 +58,6 @@ def is_command(message: str) -> bool:
     return cleaned.startswith("/")
 
 
-def _parse_duration(duration_str: str) -> timedelta | None:
-    """Parse a duration string like '1h', '7d', '1m' into a timedelta.
-
-    Args:
-        duration_str: Duration string (e.g., '1h', '7d', '1m')
-
-    Returns:
-        timedelta object or None if invalid format
-    """
-    match = re.match(r"^(\d+)([hdm])$", duration_str.lower())
-    if not match:
-        return None
-
-    value = int(match.group(1))
-    unit = match.group(2)
-
-    if unit == "h":
-        return timedelta(hours=value)
-    elif unit == "d":
-        return timedelta(days=value)
-    elif unit == "m":
-        return timedelta(days=value * 30)  # Approximate month as 30 days
-
-    return None
-
-
 def format_settings(prefs: ConversationPreferences) -> str:
     """Format current settings for display."""
     tts_status = "enabled" if prefs.tts_enabled else "disabled"
@@ -114,10 +87,10 @@ def _get_help_text() -> str:
 /tts lang [code] - Set TTS language
 /stt lang [code] - Set transcription language
 /stt lang auto - Use auto-detection for STT
-/clean - Delete all conversation history
-/clean [duration] - Delete messages (e.g., 1h, 7d, 1m)
+/clear - Clear conversation messages
+/forget - Clear messages + core memories
+/reset - Reset everything (messages, memories, documents, preferences)
 /memories - Show saved core memories
-/memories clear - Delete all core memories
 /help - Show this message
 
 Language codes: {lang_codes}"""
@@ -210,60 +183,93 @@ def _handle_stt_command(db: Session, prefs: ConversationPreferences, parts: list
         return "Unknown STT command. Use '/stt lang [code]' or '/stt lang auto'."
 
 
-def handle_clean_command(
-    db: Session,
-    user_id: str,
-    whatsapp_jid: str,
-    duration: str | None = None,
-) -> str:
-    """Delete conversation history and associated documents.
+def handle_clear_command(db: Session, user_id: str) -> str:
+    """Delete all conversation messages for the user.
 
     Args:
         db: Database session
         user_id: User UUID string
-        whatsapp_jid: WhatsApp JID for the conversation
-        duration: Optional time period string (e.g., '1h', '7d', '1m'). None deletes all.
 
     Returns:
         Response message
     """
-    # Determine the time filter
-    parsed_duration: timedelta | None = None
-    duration_str: str | None = None
+    message_count = (
+        db.query(ConversationMessage).filter(ConversationMessage.user_id == user_id).delete()
+    )
+    db.commit()
 
-    if duration:
-        parsed_duration = _parse_duration(duration)
-        if parsed_duration is None:
-            return (
-                f"Invalid duration '{duration}'. "
-                "Use formats like: 1h (hours), 7d (days), 1m (months), or 'all'."
-            )
-        duration_str = duration
+    if message_count == 0:
+        return "No conversation messages to clear."
 
-    # Calculate cutoff time if duration specified
-    cutoff = datetime.now(UTC) - parsed_duration if parsed_duration else None
+    logger.info(f"Cleared {message_count} messages for user {user_id}")
+    return f"Cleared {message_count} conversation messages."
 
-    # Delete conversation messages
-    msg_query = db.query(ConversationMessage).filter(ConversationMessage.user_id == user_id)
-    if cutoff:
-        msg_query = msg_query.filter(ConversationMessage.timestamp >= cutoff)
 
-    message_count = msg_query.count()
-    msg_query.delete()
+def handle_forget_command(db: Session, user_id: str) -> str:
+    """Delete all conversation messages and clear core memory.
+
+    Args:
+        db: Database session
+        user_id: User UUID string
+
+    Returns:
+        Response message
+    """
+    message_count = (
+        db.query(ConversationMessage).filter(ConversationMessage.user_id == user_id).delete()
+    )
+
+    mem = get_or_create_core_memory(db, user_id)
+    had_memories = bool(mem.content)
+    mem.content = ""
+
+    db.commit()
+
+    parts = []
+    if message_count > 0:
+        parts.append(f"{message_count} messages")
+    if had_memories:
+        parts.append("core memories")
+
+    if not parts:
+        return "No messages or memories to clear."
+
+    deleted_str = " and ".join(parts)
+    logger.info(f"Forgot {deleted_str} for user {user_id}")
+    return f"Cleared {deleted_str}."
+
+
+def handle_reset_command(db: Session, user_id: str, whatsapp_jid: str) -> str:
+    """Reset everything: messages, core memory, documents, and preferences.
+
+    Args:
+        db: Database session
+        user_id: User UUID string
+        whatsapp_jid: WhatsApp JID for document cleanup
+
+    Returns:
+        Response message
+    """
+    message_count = (
+        db.query(ConversationMessage).filter(ConversationMessage.user_id == user_id).delete()
+    )
+
+    mem = get_or_create_core_memory(db, user_id)
+    had_memories = bool(mem.content)
+    mem.content = ""
 
     # Delete conversation-scoped documents
     upload_dir = Path(settings.kb_upload_dir)
-    doc_query = db.query(KnowledgeBaseDocument).filter(
-        KnowledgeBaseDocument.whatsapp_jid == whatsapp_jid,
-        KnowledgeBaseDocument.is_conversation_scoped == True,  # noqa: E712
+    docs_to_delete = (
+        db.query(KnowledgeBaseDocument)
+        .filter(
+            KnowledgeBaseDocument.whatsapp_jid == whatsapp_jid,
+            KnowledgeBaseDocument.is_conversation_scoped == True,  # noqa: E712
+        )
+        .all()
     )
-    if cutoff:
-        doc_query = doc_query.filter(KnowledgeBaseDocument.created_at >= cutoff)
-
-    docs_to_delete = doc_query.all()
     doc_count = len(docs_to_delete)
 
-    # Delete PDF files from disk
     for doc in docs_to_delete:
         file_path = upload_dir / doc.filename
         if file_path.exists():
@@ -272,45 +278,34 @@ def handle_clean_command(
                 logger.debug(f"Deleted file: {file_path}")
             except Exception as e:
                 logger.warning(f"Failed to delete file {file_path}: {e}")
-
-    # Delete documents from database (cascades to chunks)
-    for doc in docs_to_delete:
         db.delete(doc)
+
+    # Reset preferences to defaults
+    prefs = get_or_create_preferences(db, user_id)
+    prefs.tts_enabled = False
+    prefs.tts_language = "en"
+    prefs.stt_language = None
 
     db.commit()
 
-    # Build response message
-    if message_count == 0 and doc_count == 0:
-        if duration_str:
-            return f"No messages or documents found from the last {duration_str}."
-        return "No messages or documents found to delete."
-
-    parts_deleted = []
+    parts = []
     if message_count > 0:
-        parts_deleted.append(f"{message_count} messages")
+        parts.append(f"{message_count} messages")
+    if had_memories:
+        parts.append("core memories")
     if doc_count > 0:
-        parts_deleted.append(f"{doc_count} documents")
+        parts.append(f"{doc_count} documents")
+    parts.append("preferences")
 
-    deleted_str = " and ".join(parts_deleted)
-
-    if duration_str:
-        logger.info(f"Cleaned {deleted_str} (last {duration_str}) for user {user_id}")
-        return f"Deleted {deleted_str} from the last {duration_str}."
-    else:
-        logger.info(f"Cleaned all {deleted_str} for user {user_id}")
-        return f"Deleted {deleted_str}. Conversation history cleared."
+    deleted_str = " and ".join(parts)
+    logger.info(f"Reset {deleted_str} for user {user_id}")
+    return f"Reset complete. Cleared {deleted_str}."
 
 
 def _handle_memories_command(db: Session, user_id: str, parts: list[str]) -> str:
-    """Handle /memories commands."""
+    """Handle /memories command (show only)."""
     if len(parts) >= 2 and parts[1].lower() == "clear":
-        mem = get_or_create_core_memory(db, user_id)
-        if not mem.content:
-            return "No core memories to clear."
-        mem.content = ""
-        db.commit()
-        logger.info(f"Cleared core memory for user {user_id}")
-        return "Core memories cleared."
+        return "Use /forget to clear messages and core memories, or /reset to clear everything."
 
     mem = get_or_create_core_memory(db, user_id)
     if not mem.content:
@@ -323,7 +318,7 @@ def _handle_memories_command(db: Session, user_id: str, parts: list[str]) -> str
 
 
 # Commands that require group admin privileges
-ADMIN_ONLY_COMMANDS = {"/clean", "/tts", "/stt", "/settings", "/memories"}
+ADMIN_ONLY_COMMANDS = {"/clear", "/forget", "/reset", "/tts", "/stt", "/settings", "/memories"}
 
 
 def parse_and_execute(
@@ -376,10 +371,19 @@ def parse_and_execute(
         response = _handle_memories_command(db, user_id, parts)
         return CommandResult(is_command=True, response_text=response)
 
-    # Handle /clean (needs whatsapp_jid for document cleanup)
-    if command == "/clean":
-        clean_duration = parts[1] if len(parts) >= 2 else None
-        response = handle_clean_command(db, user_id, whatsapp_jid, duration=clean_duration)
+    # Handle /clear (conversation messages only)
+    if command == "/clear":
+        response = handle_clear_command(db, user_id)
+        return CommandResult(is_command=True, response_text=response)
+
+    # Handle /forget (messages + core memory)
+    if command == "/forget":
+        response = handle_forget_command(db, user_id)
+        return CommandResult(is_command=True, response_text=response)
+
+    # Handle /reset (everything)
+    if command == "/reset":
+        response = handle_reset_command(db, user_id, whatsapp_jid)
         return CommandResult(is_command=True, response_text=response)
 
     # Get or create preferences for other commands

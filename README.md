@@ -51,8 +51,9 @@ A production-ready AI agent system that brings conversational AI to WhatsApp wit
 | `/tts on\|off` | Enable/disable voice responses |
 | `/tts lang [code]` | Set TTS language (en, es, pt, fr, de) |
 | `/stt lang [code\|auto]` | Set transcription language |
-| `/clean` | Delete all conversation history |
-| `/clean [1h\|7d\|1m]` | Delete messages from time period |
+| `/clear` | Clear conversation messages |
+| `/forget` | Clear messages + core memories |
+| `/reset` | Reset everything (messages, memories, documents, preferences) |
 | `/help` | Show available commands |
 
 ## Architecture

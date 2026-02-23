@@ -1,18 +1,19 @@
 """
-Unit tests for ai_api.commands — pure functions only.
+Unit tests for ai_api.commands — pure functions and command handlers.
 
 Tests cover:
 - strip_leading_mentions
 - is_command
-- _parse_duration
 - format_settings
 - _get_help_text
 - CommandResult dataclass
 - Constants (SUPPORTED_LANGUAGES, LANGUAGE_NAMES, ADMIN_ONLY_COMMANDS)
+- handle_clear_command
+- handle_forget_command
+- handle_reset_command
 """
 
-from datetime import timedelta
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -22,8 +23,10 @@ from ai_api.commands import (
     SUPPORTED_LANGUAGES,
     CommandResult,
     _get_help_text,
-    _parse_duration,
     format_settings,
+    handle_clear_command,
+    handle_forget_command,
+    handle_reset_command,
     is_command,
     strip_leading_mentions,
 )
@@ -101,64 +104,7 @@ class TestIsCommand:
         assert is_command("/tts on") is True
 
     def test_multiple_mentions_then_command(self):
-        assert is_command("@bot @user /clean 1h") is True
-
-
-# ---------------------------------------------------------------------------
-# _parse_duration
-# ---------------------------------------------------------------------------
-
-
-class TestParseDuration:
-    def test_hours(self):
-        assert _parse_duration("1h") == timedelta(hours=1)
-
-    def test_multiple_hours(self):
-        assert _parse_duration("24h") == timedelta(hours=24)
-
-    def test_days(self):
-        assert _parse_duration("7d") == timedelta(days=7)
-
-    def test_single_day(self):
-        assert _parse_duration("1d") == timedelta(days=1)
-
-    def test_months(self):
-        assert _parse_duration("1m") == timedelta(days=30)
-
-    def test_multiple_months(self):
-        assert _parse_duration("3m") == timedelta(days=90)
-
-    def test_case_insensitive(self):
-        assert _parse_duration("1H") == timedelta(hours=1)
-        assert _parse_duration("7D") == timedelta(days=7)
-        assert _parse_duration("1M") == timedelta(days=30)
-
-    def test_invalid_unit(self):
-        assert _parse_duration("1x") is None
-
-    def test_no_number(self):
-        assert _parse_duration("h") is None
-
-    def test_empty_string(self):
-        assert _parse_duration("") is None
-
-    def test_float_not_supported(self):
-        assert _parse_duration("1.5h") is None
-
-    def test_negative_not_supported(self):
-        assert _parse_duration("-1h") is None
-
-    def test_zero_hours(self):
-        assert _parse_duration("0h") == timedelta(hours=0)
-
-    def test_large_value(self):
-        assert _parse_duration("100d") == timedelta(days=100)
-
-    def test_random_text(self):
-        assert _parse_duration("abc") is None
-
-    def test_number_only(self):
-        assert _parse_duration("42") is None
+        assert is_command("@bot @user /clear") is True
 
 
 # ---------------------------------------------------------------------------
@@ -247,9 +193,18 @@ class TestGetHelpText:
         assert "/tts off" in text
         assert "/tts lang" in text
         assert "/stt lang" in text
-        assert "/clean" in text
+        assert "/clear" in text
+        assert "/forget" in text
+        assert "/reset" in text
         assert "/memories" in text
         assert "/help" in text
+
+    def test_does_not_contain_removed_commands(self):
+        text = _get_help_text()
+        # /clean was replaced by /clear, /forget, /reset
+        lines = text.split("\n")
+        for line in lines:
+            assert not line.startswith("/clean")
 
     def test_contains_language_codes(self):
         text = _get_help_text()
@@ -315,10 +270,172 @@ class TestConstants:
         assert LANGUAGE_NAMES["de"] == "German"
 
     def test_admin_only_commands(self):
-        assert "/clean" in ADMIN_ONLY_COMMANDS
+        assert "/clear" in ADMIN_ONLY_COMMANDS
+        assert "/forget" in ADMIN_ONLY_COMMANDS
+        assert "/reset" in ADMIN_ONLY_COMMANDS
         assert "/tts" in ADMIN_ONLY_COMMANDS
         assert "/stt" in ADMIN_ONLY_COMMANDS
         assert "/settings" in ADMIN_ONLY_COMMANDS
         assert "/memories" in ADMIN_ONLY_COMMANDS
         # /help should NOT be admin-only
         assert "/help" not in ADMIN_ONLY_COMMANDS
+
+    def test_clean_not_in_admin_commands(self):
+        """Verify /clean was fully removed."""
+        assert "/clean" not in ADMIN_ONLY_COMMANDS
+
+
+# ---------------------------------------------------------------------------
+# handle_clear_command
+# ---------------------------------------------------------------------------
+
+
+class TestHandleClearCommand:
+    def _make_db(self, delete_count=0):
+        db = MagicMock()
+        query_mock = MagicMock()
+        query_mock.filter.return_value = query_mock
+        query_mock.delete.return_value = delete_count
+        db.query.return_value = query_mock
+        return db
+
+    def test_clears_messages(self):
+        db = self._make_db(delete_count=5)
+        result = handle_clear_command(db, "user-123")
+        assert "5" in result
+        assert "messages" in result
+        db.commit.assert_called_once()
+
+    def test_no_messages(self):
+        db = self._make_db(delete_count=0)
+        result = handle_clear_command(db, "user-123")
+        assert "No conversation messages" in result
+        db.commit.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# handle_forget_command
+# ---------------------------------------------------------------------------
+
+
+class TestHandleForgetCommand:
+    def _make_db(self, delete_count=0):
+        db = MagicMock()
+        query_mock = MagicMock()
+        query_mock.filter.return_value = query_mock
+        query_mock.delete.return_value = delete_count
+        db.query.return_value = query_mock
+        return db
+
+    @patch("ai_api.commands.get_or_create_core_memory")
+    def test_clears_messages_and_memory(self, mock_get_mem):
+        db = self._make_db(delete_count=3)
+        mock_mem = MagicMock()
+        mock_mem.content = "Some notes about the user"
+        mock_get_mem.return_value = mock_mem
+
+        result = handle_forget_command(db, "user-123")
+        assert "3 messages" in result
+        assert "core memories" in result
+        assert mock_mem.content == ""
+        db.commit.assert_called_once()
+
+    @patch("ai_api.commands.get_or_create_core_memory")
+    def test_no_messages_no_memory(self, mock_get_mem):
+        db = self._make_db(delete_count=0)
+        mock_mem = MagicMock()
+        mock_mem.content = ""
+        mock_get_mem.return_value = mock_mem
+
+        result = handle_forget_command(db, "user-123")
+        assert "No messages or memories" in result
+
+    @patch("ai_api.commands.get_or_create_core_memory")
+    def test_messages_only_no_memory(self, mock_get_mem):
+        db = self._make_db(delete_count=10)
+        mock_mem = MagicMock()
+        mock_mem.content = ""
+        mock_get_mem.return_value = mock_mem
+
+        result = handle_forget_command(db, "user-123")
+        assert "10 messages" in result
+        assert "core memories" not in result
+
+    @patch("ai_api.commands.get_or_create_core_memory")
+    def test_memory_only_no_messages(self, mock_get_mem):
+        db = self._make_db(delete_count=0)
+        mock_mem = MagicMock()
+        mock_mem.content = "User likes cats"
+        mock_get_mem.return_value = mock_mem
+
+        result = handle_forget_command(db, "user-123")
+        assert "core memories" in result
+        assert "messages" not in result
+
+
+# ---------------------------------------------------------------------------
+# handle_reset_command
+# ---------------------------------------------------------------------------
+
+
+class TestHandleResetCommand:
+    def _make_db(self, delete_count=0, docs=None):
+        db = MagicMock()
+
+        msg_query = MagicMock()
+        msg_query.filter.return_value = msg_query
+        msg_query.delete.return_value = delete_count
+
+        doc_query = MagicMock()
+        doc_query.filter.return_value = doc_query
+        doc_query.all.return_value = docs or []
+
+        def query_side_effect(model):
+            from ai_api.database import ConversationMessage
+
+            if model is ConversationMessage:
+                return msg_query
+            return doc_query
+
+        db.query.side_effect = query_side_effect
+        return db
+
+    @patch("ai_api.commands.get_or_create_preferences")
+    @patch("ai_api.commands.get_or_create_core_memory")
+    def test_resets_everything(self, mock_get_mem, mock_get_prefs):
+        mock_mem = MagicMock()
+        mock_mem.content = "User info"
+        mock_get_mem.return_value = mock_mem
+
+        mock_prefs = MagicMock()
+        mock_get_prefs.return_value = mock_prefs
+
+        db = self._make_db(delete_count=5)
+        result = handle_reset_command(db, "user-123", "123@s.whatsapp.net")
+
+        assert "Reset complete" in result
+        assert "5 messages" in result
+        assert "core memories" in result
+        assert "preferences" in result
+        assert mock_mem.content == ""
+        assert mock_prefs.tts_enabled is False
+        assert mock_prefs.tts_language == "en"
+        assert mock_prefs.stt_language is None
+        db.commit.assert_called_once()
+
+    @patch("ai_api.commands.get_or_create_preferences")
+    @patch("ai_api.commands.get_or_create_core_memory")
+    def test_no_data_still_resets_preferences(self, mock_get_mem, mock_get_prefs):
+        mock_mem = MagicMock()
+        mock_mem.content = ""
+        mock_get_mem.return_value = mock_mem
+
+        mock_prefs = MagicMock()
+        mock_get_prefs.return_value = mock_prefs
+
+        db = self._make_db(delete_count=0)
+        result = handle_reset_command(db, "user-123", "123@s.whatsapp.net")
+
+        assert "Reset complete" in result
+        assert "preferences" in result
+        db.commit.assert_called_once()
