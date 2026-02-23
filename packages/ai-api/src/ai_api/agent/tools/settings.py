@@ -4,7 +4,9 @@ from ...commands import (
     LANGUAGE_NAMES,
     SUPPORTED_LANGUAGES,
     format_settings,
-    handle_clean_command,
+    handle_clear_command,
+    handle_forget_command,
+    handle_reset_command,
 )
 from ...database import get_or_create_preferences
 from ...logger import logger
@@ -192,58 +194,63 @@ async def update_stt_settings(
 
 
 @agent.tool
-async def clean_conversation_history(
+async def clear_user_data(
     ctx: RunContext[AgentDeps],
-    duration: str | None = None,
+    level: str = "clear",
 ) -> str:
     """
-    Delete conversation history and associated documents.
+    Delete user data at different levels of thoroughness.
 
-    Use this when the user asks to clear their chat, delete messages,
-    or start fresh (e.g., "clean my history", "delete last week's messages",
-    "start over", "erase everything").
+    Use this when the user asks to clear their chat, delete messages, forget them,
+    or start fresh (e.g., "clear my history", "forget everything about me",
+    "reset my account", "start over").
 
     WARNING: This is a destructive action. If the user's intent is ambiguous,
     ask for confirmation before calling this tool.
 
     Args:
         ctx: Run context with database and user info
-        duration: Optional time period to delete. Examples:
-            - None or "all" = delete everything
-            - "1h" = last 1 hour
-            - "7d" = last 7 days
-            - "1m" = last 1 month (30 days)
+        level: How much to delete:
+            - "clear" = Delete conversation messages only (short-term memory)
+            - "forget" = Delete messages AND core memories (short + long term memory)
+            - "reset" = Delete everything: messages, memories, documents, and reset preferences
 
     Returns:
         Message describing what was deleted
     """
     logger.info("=" * 80)
-    logger.info("🧹 TOOL CALLED: clean_conversation_history")
+    logger.info("🧹 TOOL CALLED: clear_user_data")
     logger.info(f"   User ID: {ctx.deps.user_id}")
-    logger.info(f"   WhatsApp JID: {ctx.deps.whatsapp_jid}")
-    logger.info(f"   Duration: {duration}")
+    logger.info(f"   Level: {level}")
     logger.info("=" * 80)
 
     try:
-        clean_duration = duration if duration and duration.lower() != "all" else None
-        result = handle_clean_command(
-            ctx.deps.db,
-            ctx.deps.user_id,
-            ctx.deps.whatsapp_jid,
-            duration=clean_duration,
-        )
+        level = level.lower().strip()
+
+        if level == "clear":
+            result = handle_clear_command(ctx.deps.db, ctx.deps.user_id)
+        elif level == "forget":
+            result = handle_forget_command(ctx.deps.db, ctx.deps.user_id)
+        elif level == "reset":
+            result = handle_reset_command(ctx.deps.db, ctx.deps.user_id, ctx.deps.whatsapp_jid)
+        else:
+            result = (
+                f"Invalid level '{level}'. "
+                "Use 'clear' (messages only), 'forget' (messages + memories), "
+                "or 'reset' (everything)."
+            )
 
         logger.info("=" * 80)
-        logger.info("✅ TOOL RETURNING: clean_conversation_history")
+        logger.info("✅ TOOL RETURNING: clear_user_data")
         logger.info(f"   Result: {result}")
         logger.info("=" * 80)
 
         return result
 
     except Exception as e:
-        logger.error(f"Error cleaning conversation history: {str(e)}", exc_info=True)
+        logger.error(f"Error clearing user data: {str(e)}", exc_info=True)
         logger.info("=" * 80)
-        logger.info("❌ TOOL ERROR: clean_conversation_history")
+        logger.info("❌ TOOL ERROR: clear_user_data")
         logger.info(f"   Error: {str(e)}")
         logger.info("=" * 80)
-        return f"Failed to clean conversation history: {str(e)}"
+        return f"Failed to clear user data: {str(e)}"

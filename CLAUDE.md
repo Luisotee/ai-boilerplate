@@ -27,7 +27,7 @@ How a WhatsApp message traverses the system end-to-end:
 3. Type dispatch: text → `handlers/text.ts`, audio → `handlers/audio.ts` (transcribe first), image → `handlers/image.ts`, document → `handlers/document.ts`
 4. All handlers funnel into `handleTextMessage()` with optional base64 image/document
 5. `api-client.ts` sends POST `/chat/enqueue` to AI API → returns `job_id`
-6. `routes/chat.py` intercepts slash commands (`/settings`, `/tts`, `/clean`, `/memories`, etc.) before queuing
+6. `routes/chat.py` intercepts slash commands (`/settings`, `/tts`, `/clear`, `/forget`, `/reset`, `/memories`, etc.) before queuing
 7. Non-command messages: saved to PostgreSQL, enqueued to Redis Stream (`stream:user:{user_id}`)
 8. `streams/processor.py`: fetches conversation history → runs Pydantic AI agent with tools → streams response chunks to Redis
 9. `api-client.ts` polls GET `/chat/job/{id}` (500ms interval, max 120s) until complete
@@ -211,7 +211,7 @@ Multipart routes can't use Zod validation directly. Follow the pattern in `route
 - **Whitelist group JID limitation**: `WHITELIST_PHONES` supports group JIDs (e.g. `120363...@g.us`) only on the Baileys client. The Cloud API webhook payload does not include group context — only the individual sender's phone number — so group JID entries in the whitelist have no effect for Cloud API messages
 
 ### AI API (Python)
-- Slash commands (`/settings`, `/tts`, `/clean`, `/memories`, `/help`) are intercepted in `routes/chat.py` — they never reach the AI agent
+- Slash commands (`/settings`, `/tts`, `/clear`, `/forget`, `/reset`, `/memories`, `/help`) are intercepted in `routes/chat.py` — they never reach the AI agent
 - Core memory is a single markdown document per user (not individual rows) — the AI reads the whole doc and rewrites it via `update_core_memory` tool
 - CORS middleware must be added AFTER `APIKeyMiddleware` in `main.py` (Starlette processes middleware LIFO — reversing this breaks CORS preflight)
 - pgvector IVFFlat index must be created manually for `knowledge_base_chunks` — without it, similarity search does full table scan
