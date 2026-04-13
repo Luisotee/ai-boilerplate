@@ -125,28 +125,31 @@ packages/
 ### Setup
 
 ```bash
-# Clone and configure
 git clone <repo>
 cd ai-boilerplate
-cp .env.example .env  # Add your GEMINI_API_KEY
+./setup.sh             # interactive: generates .env, installs deps
+```
 
-# Start infrastructure
-docker-compose up -d
+The script checks prerequisites, creates `.env` from the template (auto-generating passwords and inter-service keys), prompts for `GEMINI_API_KEY` and any optional integrations (Meta Cloud API, Groq), then runs `pnpm install:all`.
 
-# Terminal 1: AI API
-cd packages/ai-api
-cp .env.example .env
-uv sync
-uv run uvicorn ai_api.main:app --reload --port 8000
+### Run with Docker (recommended)
 
-# Terminal 2: WhatsApp Client
-cd packages/whatsapp-client
-cp .env.example .env
-pnpm install
-pnpm dev  # Scan QR code when prompted
+```bash
+docker compose up -d                                    # core: postgres, redis, api, worker, whatsapp
+docker compose --profile dev up -d                      # + Adminer (DB GUI on :8080)
+docker compose --profile cloud up -d                    # + WhatsApp Cloud API (port 3002)
+docker compose --profile dev --profile cloud up -d      # everything
+```
 
-# Terminal 3: Background Worker (optional, for async processing)
-pnpm dev:queue
+Profiles are opt-in: without `--profile`, Adminer and the Cloud API client stay stopped. Infrastructure ports (`5432`, `6379`, `8080`) bind to `127.0.0.1` only.
+
+### Run locally (no Docker for app services)
+
+```bash
+docker compose up -d postgres redis     # just infra in containers
+pnpm dev:server                          # Terminal 1: AI API
+pnpm dev:whatsapp                        # Terminal 2: WhatsApp client (scan QR)
+pnpm dev:queue                           # Terminal 3: background worker
 ```
 
 ### Verify

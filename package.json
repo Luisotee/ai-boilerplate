@@ -4,6 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "setup": "bash setup.sh",
     "test": "pnpm test:ts && pnpm test:python",
     "test:ts": "pnpm --filter @ai-boilerplate/whatsapp-client test && pnpm --filter @ai-boilerplate/whatsapp-cloud test",
     "test:python": "cd packages/ai-api && uv run pytest",

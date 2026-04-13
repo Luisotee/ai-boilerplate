@@ -57,8 +57,14 @@ How a WhatsApp message traverses the system end-to-end:
 ## Commands
 
 ```bash
-# Infrastructure
-docker-compose up -d                    # PostgreSQL + Redis + Adminer + full stack
+# First-time setup
+./setup.sh                              # Interactive: generates .env, installs Node + Python deps
+
+# Infrastructure (Docker Compose profiles)
+docker compose up -d                                    # Core: postgres, redis, api, worker, whatsapp
+docker compose --profile dev up -d                      # + Adminer (DB GUI, opt-in)
+docker compose --profile cloud up -d                    # + WhatsApp Cloud API client (opt-in)
+docker compose --profile dev --profile cloud up -d      # Everything
 
 # Development (from root)
 pnpm dev:server                         # Start AI API (port 8000)
