@@ -141,7 +141,7 @@ docker compose --profile cloud up -d                    # + WhatsApp Cloud API (
 docker compose --profile dev --profile cloud up -d      # everything
 ```
 
-Profiles are opt-in: without `--profile`, Adminer and the Cloud API client stay stopped. Infrastructure ports (`5432`, `6379`, `8080`) bind to `127.0.0.1` only.
+Profiles are opt-in: without `--profile`, Adminer and the Cloud API client stay stopped. Infrastructure ports (`5432`, `6379`, `8080`) bind to `127.0.0.1` only — application services (`8000`, `3001`, `3002`) remain on all interfaces so they can be reached from host tooling and the WhatsApp client.
 
 ### Run locally (no Docker for app services)
 

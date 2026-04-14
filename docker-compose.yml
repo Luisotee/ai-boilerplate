@@ -122,10 +122,9 @@ services:
       - aiagent-network
 
   worker:
+    # Reuses the image built by the `api` service — `depends_on: api` below
+    # guarantees the image exists before this container starts.
     image: aiagent-api:latest
-    build:
-      context: ./packages/ai-api
-      dockerfile: Dockerfile
     container_name: aiagent-worker
     command: ["python", "-m", "ai_api.scripts.run_stream_worker"]
     restart: unless-stopped

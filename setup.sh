@@ -29,10 +29,25 @@ generate_hex_key() {
 
 escape_sed() { printf '%s' "$1" | sed -e 's/[&/|\\]/\\&/g'; }
 
+# Strip CR/LF from user-pasted input (common when copying tokens from the clipboard).
+sanitize() { printf '%s' "${1//$'\r'/}" | tr -d '\n'; }
+
+# Compare semantic versions with sort -V; returns 0 if $2 >= $3.
+check_min_version() {
+  local name="$1" current="$2" minimum="$3"
+  if [ "$(printf '%s\n%s\n' "$minimum" "$current" | sort -V | head -n1)" != "$minimum" ]; then
+    print_error "$name $current found, but $minimum+ required"
+    MISSING+=("$name $minimum+")
+    return 1
+  fi
+  return 0
+}
+
 # ── Banner ──────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}AI WhatsApp Agent — Setup${NC}"
 echo "This script will configure your environment and install dependencies."
+echo "Note: targets Linux (uses GNU sed). On macOS, configure .env manually."
 echo ""
 
 # ── 1. Check prerequisites ──────────────────────────────
@@ -41,10 +56,12 @@ print_header "Checking prerequisites"
 MISSING=()
 
 if command -v node &>/dev/null; then
+  NODE_VER=$(node --version 2>&1 | sed 's/^v//')
   print_success "Node.js $(node --version)"
+  check_min_version "Node.js" "$NODE_VER" "18.0.0" || true
 else
   print_error "Node.js not found"
-  MISSING+=("Node.js (https://nodejs.org)")
+  MISSING+=("Node.js 18+ (https://nodejs.org)")
 fi
 
 if command -v pnpm &>/dev/null; then
@@ -55,7 +72,9 @@ else
 fi
 
 if command -v python3 &>/dev/null; then
-  print_success "Python $(python3 --version 2>&1 | awk '{print $2}')"
+  PY_VER=$(python3 --version 2>&1 | awk '{print $2}')
+  print_success "Python $PY_VER"
+  check_min_version "Python" "$PY_VER" "3.11.0" || true
 else
   print_error "Python 3 not found"
   MISSING+=("Python 3.11+ (https://python.org)")
@@ -66,6 +85,13 @@ if command -v uv &>/dev/null; then
 else
   print_error "uv not found"
   MISSING+=("uv (curl -LsSf https://astral.sh/uv/install.sh | sh)")
+fi
+
+if command -v openssl &>/dev/null; then
+  print_success "openssl $(openssl version 2>&1 | awk '{print $2}')"
+else
+  print_error "openssl not found"
+  MISSING+=("openssl (required for secret generation)")
 fi
 
 if command -v docker &>/dev/null; then
@@ -114,6 +140,24 @@ if [ "$SKIP_ENV" = false ]; then
   cp "$ENV_EXAMPLE" "$ENV_FILE"
   print_success "Copied .env.example → .env"
 
+  # Fail fast if .env.example is missing any key this script writes to —
+  # otherwise sed substitutions silently no-op and the user ends up with a
+  # half-configured .env only discovered at runtime.
+  REQUIRED_KEYS=(
+    POSTGRES_PASSWORD REDIS_PASSWORD GEMINI_API_KEY AI_API_KEY
+    WHATSAPP_API_KEY DATABASE_URL GROQ_API_KEY
+    META_PHONE_NUMBER_ID META_ACCESS_TOKEN META_APP_SECRET META_WEBHOOK_VERIFY_TOKEN
+  )
+  MISSING_KEYS=()
+  for key in "${REQUIRED_KEYS[@]}"; do
+    grep -q "^${key}=" "$ENV_EXAMPLE" || MISSING_KEYS+=("$key")
+  done
+  if [ ${#MISSING_KEYS[@]} -gt 0 ]; then
+    print_error ".env.example is missing expected keys: ${MISSING_KEYS[*]}"
+    print_error "Template drift detected — update .env.example or setup.sh"
+    exit 1
+  fi
+
   # ── Required secrets ──────────────────────────────────
   echo ""
   echo -e "  ${BOLD}Required secrets${NC}"
@@ -123,12 +167,12 @@ if [ "$SKIP_ENV" = false ]; then
   # Postgres password
   DEFAULT_PG_PASS=$(generate_password)
   read -rp "  POSTGRES_PASSWORD (Enter to auto-generate): " PG_PASS
-  PG_PASS=${PG_PASS:-$DEFAULT_PG_PASS}
+  PG_PASS=$(sanitize "${PG_PASS:-$DEFAULT_PG_PASS}")
 
   # Redis password
   DEFAULT_REDIS_PASS=$(generate_password)
   read -rp "  REDIS_PASSWORD (Enter to auto-generate): " REDIS_PASS
-  REDIS_PASS=${REDIS_PASS:-$DEFAULT_REDIS_PASS}
+  REDIS_PASS=$(sanitize "${REDIS_PASS:-$DEFAULT_REDIS_PASS}")
 
   # Gemini API key
   echo ""
@@ -136,6 +180,7 @@ if [ "$SKIP_ENV" = false ]; then
   while true; do
     read -rsp "  GEMINI_API_KEY: " GEMINI_KEY
     echo
+    GEMINI_KEY=$(sanitize "$GEMINI_KEY")
     if [ -n "$GEMINI_KEY" ]; then
       break
     fi
@@ -147,11 +192,11 @@ if [ "$SKIP_ENV" = false ]; then
   echo "  Inter-service authentication keys (used internally between services)."
   DEFAULT_AI_KEY=$(generate_hex_key)
   read -rp "  AI_API_KEY (Enter to auto-generate): " AI_KEY
-  AI_KEY=${AI_KEY:-$DEFAULT_AI_KEY}
+  AI_KEY=$(sanitize "${AI_KEY:-$DEFAULT_AI_KEY}")
 
   DEFAULT_WA_KEY=$(generate_hex_key)
   read -rp "  WHATSAPP_API_KEY (Enter to auto-generate): " WA_KEY
-  WA_KEY=${WA_KEY:-$DEFAULT_WA_KEY}
+  WA_KEY=$(sanitize "${WA_KEY:-$DEFAULT_WA_KEY}")
 
   # Construct DATABASE_URL
   PG_USER="aiagent"
@@ -175,18 +220,37 @@ if [ "$SKIP_ENV" = false ]; then
     echo ""
     echo -e "  ${YELLOW}Get these from the Meta Developer Console: https://developers.facebook.com${NC}"
     read -rp "  META_PHONE_NUMBER_ID: " META_PHONE
+    META_PHONE=$(sanitize "$META_PHONE")
     read -rsp "  META_ACCESS_TOKEN: " META_TOKEN
     echo
+    META_TOKEN=$(sanitize "$META_TOKEN")
     read -rsp "  META_APP_SECRET: " META_SECRET
     echo
-    read -rp "  META_WEBHOOK_VERIFY_TOKEN (any string you choose): " META_WEBHOOK
+    META_SECRET=$(sanitize "$META_SECRET")
+    DEFAULT_META_WEBHOOK=$(generate_hex_key)
+    read -rp "  META_WEBHOOK_VERIFY_TOKEN (Enter to auto-generate; paste this into the Meta dashboard): " META_WEBHOOK
+    META_WEBHOOK=$(sanitize "${META_WEBHOOK:-$DEFAULT_META_WEBHOOK}")
 
-    [ -n "$META_PHONE" ]   && sed -i "s|^META_PHONE_NUMBER_ID=.*|META_PHONE_NUMBER_ID=$(escape_sed "$META_PHONE")|" "$ENV_FILE"
-    [ -n "$META_TOKEN" ]   && sed -i "s|^META_ACCESS_TOKEN=.*|META_ACCESS_TOKEN=$(escape_sed "$META_TOKEN")|" "$ENV_FILE"
-    [ -n "$META_SECRET" ]  && sed -i "s|^META_APP_SECRET=.*|META_APP_SECRET=$(escape_sed "$META_SECRET")|" "$ENV_FILE"
-    [ -n "$META_WEBHOOK" ] && sed -i "s|^META_WEBHOOK_VERIFY_TOKEN=.*|META_WEBHOOK_VERIFY_TOKEN=$(escape_sed "$META_WEBHOOK")|" "$ENV_FILE"
+    META_WRITTEN=0
+    write_if_set() {
+      local key="$1" value="$2"
+      if [ -n "$value" ]; then
+        sed -i "s|^${key}=.*|${key}=$(escape_sed "$value")|" "$ENV_FILE"
+        META_WRITTEN=$((META_WRITTEN + 1))
+      else
+        print_warning "$key left empty — Cloud API will not be fully functional"
+      fi
+    }
+    write_if_set META_PHONE_NUMBER_ID     "$META_PHONE"
+    write_if_set META_ACCESS_TOKEN        "$META_TOKEN"
+    write_if_set META_APP_SECRET          "$META_SECRET"
+    write_if_set META_WEBHOOK_VERIFY_TOKEN "$META_WEBHOOK"
 
-    print_success "Cloud API configured"
+    if [ "$META_WRITTEN" -eq 4 ]; then
+      print_success "Cloud API configured"
+    else
+      print_warning "Cloud API partially configured ($META_WRITTEN/4 fields set)"
+    fi
   else
     print_warning "Skipped Cloud API — you can set META_* vars in .env later"
   fi
@@ -198,8 +262,13 @@ if [ "$SKIP_ENV" = false ]; then
     echo -e "  ${YELLOW}Get your key at: https://console.groq.com/keys${NC}"
     read -rsp "  GROQ_API_KEY: " GROQ_KEY
     echo
-    [ -n "$GROQ_KEY" ] && sed -i "s|^GROQ_API_KEY=.*|GROQ_API_KEY=$(escape_sed "$GROQ_KEY")|" "$ENV_FILE"
-    print_success "Groq API configured"
+    GROQ_KEY=$(sanitize "$GROQ_KEY")
+    if [ -n "$GROQ_KEY" ]; then
+      sed -i "s|^GROQ_API_KEY=.*|GROQ_API_KEY=$(escape_sed "$GROQ_KEY")|" "$ENV_FILE"
+      print_success "Groq API configured"
+    else
+      print_warning "GROQ_API_KEY left empty — audio transcription will be unavailable"
+    fi
   else
     print_warning "Skipped Groq — audio transcription will be unavailable"
   fi
@@ -209,7 +278,14 @@ fi
 print_header "Installing dependencies"
 
 echo "  Running pnpm install:all (Node + Python)..."
-pnpm install:all
+if ! pnpm install:all; then
+  echo ""
+  print_error "pnpm install:all failed."
+  echo "  Your .env has been saved. To retry dependencies without reconfiguring:"
+  echo "    pnpm install:all"
+  echo "  If the issue persists, inspect the output above and report it."
+  exit 1
+fi
 
 print_success "All dependencies installed"
 

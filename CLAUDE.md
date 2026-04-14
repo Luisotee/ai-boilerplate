@@ -116,8 +116,9 @@ cd packages/ai-api && uv run pytest tests/unit  # AI API unit tests only
 ## Environment Config
 
 - Root `.env` loaded first (shared vars) — see @.env.example for all required variables
-- Package-level `.env.local` for overrides (not committed to git)
-- **`.env.local` override pitfall**: Loaded with `override: true` — an uncommented empty variable (e.g., `AI_API_KEY=`) silently overrides the root `.env` value. Comment out or delete unused vars
+- **Shared secrets live in root `.env` only.** Never duplicate credentials (API keys, DB passwords, Meta tokens, etc.) in package-level `.env.local` — they belong in root `.env` only, and `setup.sh` writes them there
+- **`.env.local` is for per-developer customization** (log level, port, feature flags). It loads with `override: true`, so any duplicated key silently wins over root — including empty `KEY=` lines that blank out the root value
+- The TS config loaders warn at startup when `.env.local` shadows a root key. If you see `[config] .env.local overrides root .env: X`, confirm it's intentional
 - TS config loader: `packages/whatsapp-client/src/config.ts` (Baileys), `packages/whatsapp-cloud/src/config.ts` (Cloud API)
 - Python config: pydantic-settings in `packages/ai-api/src/ai_api/config.py`
 

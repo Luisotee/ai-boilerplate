@@ -1,5 +1,5 @@
-import { config as dotenvConfig } from 'dotenv';
-import { existsSync } from 'fs';
+import { config as dotenvConfig, parse as dotenvParse } from 'dotenv';
+import { existsSync, readFileSync } from 'fs';
 import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -7,15 +7,25 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const packageRoot = resolve(__dirname, '..');
 const monorepoRoot = resolve(packageRoot, '../..');
 
-// Load root .env first (shared vars)
 const rootEnvPath = resolve(monorepoRoot, '.env');
+const localEnvPath = resolve(packageRoot, '.env.local');
+
+const rootVars: Record<string, string> = existsSync(rootEnvPath)
+  ? dotenvParse(readFileSync(rootEnvPath))
+  : {};
+
 if (existsSync(rootEnvPath)) {
   dotenvConfig({ path: rootEnvPath });
 }
 
-// Load local .env.local for overrides
-const localEnvPath = resolve(packageRoot, '.env.local');
 if (existsSync(localEnvPath)) {
+  const localVars = dotenvParse(readFileSync(localEnvPath));
+  for (const [key, localValue] of Object.entries(localVars)) {
+    const rootValue = rootVars[key];
+    if (rootValue !== undefined && localValue && rootValue !== localValue) {
+      console.warn(`[config] .env.local overrides root .env: ${key}`);
+    }
+  }
   dotenvConfig({ path: localEnvPath, override: true });
 }
 
