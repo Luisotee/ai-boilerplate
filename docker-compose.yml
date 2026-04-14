@@ -46,7 +46,7 @@ services:
     volumes:
       - redis-data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -62,7 +62,7 @@ services:
   adminer:
     image: adminer:latest
     container_name: aiagent-adminer
-    restart: always
+    restart: unless-stopped
     profiles: ["dev"]
     logging:
       driver: json-file
@@ -120,6 +120,11 @@ services:
       retries: 3
     networks:
       - aiagent-network
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "1.5"
 
   worker:
     # Reuses the image built by the `api` service — `depends_on: api` below
@@ -151,6 +156,11 @@ services:
         condition: service_healthy
     networks:
       - aiagent-network
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "1.5"
 
   whatsapp:
     build:

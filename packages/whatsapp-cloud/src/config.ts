@@ -22,7 +22,7 @@ if (existsSync(localEnvPath)) {
   const localVars = dotenvParse(readFileSync(localEnvPath));
   for (const [key, localValue] of Object.entries(localVars)) {
     const rootValue = rootVars[key];
-    if (rootValue !== undefined && localValue && rootValue !== localValue) {
+    if (rootValue !== undefined && rootValue !== localValue) {
       console.warn(`[config] .env.local overrides root .env: ${key}`);
     }
   }

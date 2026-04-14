@@ -50,6 +50,11 @@ echo "This script will configure your environment and install dependencies."
 echo "Note: targets Linux (uses GNU sed). On macOS, configure .env manually."
 echo ""
 
+if [[ "$(uname)" == "Darwin" ]]; then
+  print_error "macOS is not supported (script requires GNU sed). Configure .env manually."
+  exit 1
+fi
+
 # ── 1. Check prerequisites ──────────────────────────────
 print_header "Checking prerequisites"
 
@@ -123,6 +128,8 @@ if [ -f "$ENV_FILE" ]; then
   read -rp "  Overwrite it? (y/N): " OVERWRITE
   if [[ ! "$OVERWRITE" =~ ^[Yy]$ ]]; then
     print_warning "Keeping existing .env — skipping configuration"
+    print_warning "Verify your .env contains all required keys (diff against .env.example)"
+    chmod 600 "$ENV_FILE" 2>/dev/null || true
     SKIP_ENV=true
   else
     SKIP_ENV=false
@@ -138,7 +145,8 @@ if [ "$SKIP_ENV" = false ]; then
   fi
 
   cp "$ENV_EXAMPLE" "$ENV_FILE"
-  print_success "Copied .env.example → .env"
+  chmod 600 "$ENV_FILE"
+  print_success "Copied .env.example → .env (mode 600)"
 
   # Fail fast if .env.example is missing any key this script writes to —
   # otherwise sed substitutions silently no-op and the user ends up with a
@@ -198,9 +206,12 @@ if [ "$SKIP_ENV" = false ]; then
   read -rp "  WHATSAPP_API_KEY (Enter to auto-generate): " WA_KEY
   WA_KEY=$(sanitize "${WA_KEY:-$DEFAULT_WA_KEY}")
 
-  # Construct DATABASE_URL
-  PG_USER="aiagent"
-  PG_DB="aiagent"
+  # Construct DATABASE_URL — read defaults from .env.example so customizing
+  # POSTGRES_USER/POSTGRES_DB there stays in sync.
+  PG_USER=$(grep -E '^POSTGRES_USER=' "$ENV_EXAMPLE" | cut -d= -f2-)
+  PG_DB=$(grep -E '^POSTGRES_DB=' "$ENV_EXAMPLE" | cut -d= -f2-)
+  PG_USER="${PG_USER:-aiagent}"
+  PG_DB="${PG_DB:-aiagent}"
   DATABASE_URL="postgresql://${PG_USER}:${PG_PASS}@localhost:5432/${PG_DB}"
 
   # Write values to .env
@@ -281,7 +292,11 @@ echo "  Running pnpm install:all (Node + Python)..."
 if ! pnpm install:all; then
   echo ""
   print_error "pnpm install:all failed."
-  echo "  Your .env has been saved. To retry dependencies without reconfiguring:"
+  if [ "$SKIP_ENV" = false ]; then
+    echo "  Your .env has been saved. To retry dependencies without reconfiguring:"
+  else
+    echo "  To retry dependency installation:"
+  fi
   echo "    pnpm install:all"
   echo "  If the issue persists, inspect the output above and report it."
   exit 1
