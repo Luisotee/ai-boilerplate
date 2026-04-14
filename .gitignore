@@ -22,6 +22,8 @@ postgres-data/
 
 # Claude Code
 .claude/settings.local.json
+.claude/agent-memory/
+.claude/plans/
 
 # IDE
 .vscode/

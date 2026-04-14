@@ -1,2 +1,8 @@
+STAGED=$(git diff --cached --name-only --diff-filter=ACMR)
+[ -z "$STAGED" ] && exit 0
+
 pnpm format
-git add .
+
+# Re-stage ONLY files that were already staged. Never blanket-add untracked
+# files (would sweep in scratch/agent-memory/local artifacts).
+echo "$STAGED" | xargs -r git add --

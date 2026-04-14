@@ -13,56 +13,66 @@ You are an operations agent for the AI WhatsApp Agent's Docker infrastructure.
 
 ## Service Architecture
 
-| Service | Container | Port | Image | Depends On |
-|---------|-----------|------|-------|------------|
-| postgres | aiagent-postgres | 5432 | pgvector/pgvector:pg16 | — |
-| redis | aiagent-redis | 6379 | redis:7-alpine | — |
-| adminer | aiagent-adminer | 8080 | adminer:latest | postgres |
-| api | aiagent-api | 8000 | packages/ai-api/Dockerfile | postgres, redis |
-| worker | aiagent-worker | — | Same as api | postgres, redis, api |
-| whatsapp | aiagent-whatsapp | 3001 | packages/whatsapp-client/Dockerfile | api |
+| Service | Container | Port | Profile | Image | Depends On |
+|---------|-----------|------|---------|-------|------------|
+| postgres | aiagent-postgres | 127.0.0.1:5432 | (core) | pgvector/pgvector:pg16 | — |
+| redis | aiagent-redis | 127.0.0.1:6379 | (core) | redis:7-alpine | — |
+| adminer | aiagent-adminer | 127.0.0.1:8080 | `dev` | adminer:latest | postgres |
+| api | aiagent-api | 8000 | (core) | packages/ai-api/Dockerfile | postgres, redis |
+| worker | aiagent-worker | — | (core) | Same image as api (reused) | postgres, redis, api |
+| whatsapp | aiagent-whatsapp | 3001 | (core) | packages/whatsapp-client/Dockerfile | api |
+| whatsapp-cloud | aiagent-whatsapp-cloud | 3002 | `cloud` | packages/whatsapp-cloud/Dockerfile | api |
 
-Worker runs: `python -m ai_api.scripts.run_stream_worker`
+Worker runs: `python -m ai_api.scripts.run_stream_worker`. It reuses the image built by `api`, so starting `worker` without `api` in the same compose invocation requires the image to already exist.
+
+Infrastructure ports (5432 / 6379 / 8080) are bound to `127.0.0.1` only. Application ports (8000 / 3001 / 3002) are bound to all interfaces.
 
 ## Common Operations
 
-### Start infrastructure only (for local dev)
+### Start core stack
 ```bash
-docker-compose up -d postgres redis adminer
+docker compose up -d                                    # postgres, redis, api, worker, whatsapp
+docker compose --profile dev up -d                      # + Adminer (DB GUI)
+docker compose --profile cloud up -d                    # + WhatsApp Cloud API client
+docker compose --profile dev --profile cloud up -d      # everything
 ```
 
-### Start full stack
+### Start infrastructure only (for local dev without containerized app services)
 ```bash
-docker-compose up -d
+docker compose up -d postgres redis
+docker compose --profile dev up -d adminer              # optional DB GUI
 ```
 
 ### View logs
 ```bash
-docker-compose logs -f api          # AI API
-docker-compose logs -f worker       # Stream worker
-docker-compose logs -f whatsapp     # WhatsApp client
-docker-compose logs --tail=50 api   # Last 50 lines
+docker compose logs -f api              # AI API
+docker compose logs -f worker           # Stream worker
+docker compose logs -f whatsapp         # WhatsApp client (Baileys)
+docker compose logs -f whatsapp-cloud   # WhatsApp Cloud API client (requires --profile cloud)
+docker compose logs --tail=50 api       # Last 50 lines
 ```
 
 ### Health checks
 ```bash
 curl -s http://localhost:8000/health     # AI API
-curl -s http://localhost:3001/health     # WhatsApp
+curl -s http://localhost:3001/health     # WhatsApp (Baileys)
+curl -s http://localhost:3002/health     # WhatsApp Cloud (requires --profile cloud)
 docker exec aiagent-postgres pg_isready -U aiagent
 docker exec aiagent-redis redis-cli ping
 ```
 
 ### Database access
 ```bash
-# Adminer GUI: http://localhost:8080
+# Adminer GUI: http://localhost:8080 (requires --profile dev)
 docker exec -it aiagent-postgres psql -U aiagent -d aiagent
 ```
 
 ### Rebuild after code changes
 ```bash
-docker-compose build api worker     # Rebuild Python services
-docker-compose build whatsapp       # Rebuild TypeScript service
-docker-compose up -d                # Restart with new images
+docker compose build api                 # Rebuilds the shared api image (worker reuses it)
+docker compose build whatsapp             # Rebuild Baileys client
+docker compose build whatsapp-cloud       # Rebuild Cloud API client (requires --profile cloud)
+docker compose up -d                      # Restart with new images
 ```
 
 ## Volumes
@@ -93,11 +103,13 @@ From root `.env`:
 5. **Worker not processing**: Worker depends on api health — if api is unhealthy, worker won't start
 6. **WhatsApp disconnected**: Delete `whatsapp-session` volume and re-scan QR code
 7. **Services can't reach each other**: All must be on `aiagent-network`. Use container names as hostnames (e.g., `http://api:8000` not `localhost`)
-8. **Port conflicts**: Check nothing else is using 5432, 6379, 8000, 8080, or 3001
+8. **Port conflicts**: Check nothing else is using 5432, 6379, 8000, 8080, 3001, or 3002
+9. **`adminer` or `whatsapp-cloud` missing**: They are gated behind `--profile dev` and `--profile cloud` respectively. Add the flag to `docker compose up`, logs, etc.
 
 ## Important
 
 - Always run docker commands from the project root (where `docker-compose.yml` lives)
+- Prefer the modern `docker compose` (space) over legacy `docker-compose` (hyphen)
 - The docker-compose.yml is at the project root
 - Never expose database passwords or API keys in command output
 - `create_all()` only creates NEW tables — schema changes need manual ALTER TABLE
