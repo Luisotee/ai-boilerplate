@@ -8,14 +8,11 @@ Tests cover:
 - _get_help_text
 - CommandResult dataclass
 - Constants (SUPPORTED_LANGUAGES, LANGUAGE_NAMES, ADMIN_ONLY_COMMANDS)
-- handle_clear_command
-- handle_forget_command
-- handle_reset_command
+- handle_clean_command (messages, data, all levels)
+- _handle_memories_command (clear branch)
 """
 
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 from ai_api.commands import (
     ADMIN_ONLY_COMMANDS,
@@ -23,14 +20,12 @@ from ai_api.commands import (
     SUPPORTED_LANGUAGES,
     CommandResult,
     _get_help_text,
+    _handle_memories_command,
     format_settings,
-    handle_clear_command,
-    handle_forget_command,
-    handle_reset_command,
+    handle_clean_command,
     is_command,
     strip_leading_mentions,
 )
-
 
 # ---------------------------------------------------------------------------
 # strip_leading_mentions
@@ -193,18 +188,21 @@ class TestGetHelpText:
         assert "/tts off" in text
         assert "/tts lang" in text
         assert "/stt lang" in text
-        assert "/clear" in text
-        assert "/forget" in text
-        assert "/reset" in text
+        assert "/clean" in text
+        assert "/clean data" in text
+        assert "/clean all" in text
         assert "/memories" in text
+        assert "/memories clear" in text
         assert "/help" in text
 
     def test_does_not_contain_removed_commands(self):
         text = _get_help_text()
-        # /clean was replaced by /clear, /forget, /reset
+        # /clear, /forget, /reset were replaced by /clean
         lines = text.split("\n")
         for line in lines:
-            assert not line.startswith("/clean")
+            assert not line.startswith("/clear")
+            assert not line.startswith("/forget")
+            assert not line.startswith("/reset")
 
     def test_contains_language_codes(self):
         text = _get_help_text()
@@ -270,9 +268,7 @@ class TestConstants:
         assert LANGUAGE_NAMES["de"] == "German"
 
     def test_admin_only_commands(self):
-        assert "/clear" in ADMIN_ONLY_COMMANDS
-        assert "/forget" in ADMIN_ONLY_COMMANDS
-        assert "/reset" in ADMIN_ONLY_COMMANDS
+        assert "/clean" in ADMIN_ONLY_COMMANDS
         assert "/tts" in ADMIN_ONLY_COMMANDS
         assert "/stt" in ADMIN_ONLY_COMMANDS
         assert "/settings" in ADMIN_ONLY_COMMANDS
@@ -280,129 +276,113 @@ class TestConstants:
         # /help should NOT be admin-only
         assert "/help" not in ADMIN_ONLY_COMMANDS
 
-    def test_clean_not_in_admin_commands(self):
-        """Verify /clean was fully removed."""
-        assert "/clean" not in ADMIN_ONLY_COMMANDS
+    def test_old_commands_removed_from_admin(self):
+        """Verify /clear, /forget, /reset were fully removed."""
+        assert "/clear" not in ADMIN_ONLY_COMMANDS
+        assert "/forget" not in ADMIN_ONLY_COMMANDS
+        assert "/reset" not in ADMIN_ONLY_COMMANDS
 
 
 # ---------------------------------------------------------------------------
-# handle_clear_command
+# handle_clean_command
 # ---------------------------------------------------------------------------
 
 
-class TestHandleClearCommand:
-    def _make_db(self, delete_count=0):
-        db = MagicMock()
-        query_mock = MagicMock()
-        query_mock.filter.return_value = query_mock
-        query_mock.delete.return_value = delete_count
-        db.query.return_value = query_mock
-        return db
+def _make_clean_db(message_count=0, docs=None):
+    """Build a MagicMock DB session that yields message and document queries.
 
-    def test_clears_messages(self):
-        db = self._make_db(delete_count=5)
-        result = handle_clear_command(db, "user-123")
-        assert "5" in result
-        assert "messages" in result
+    The first ``db.query()`` call (ConversationMessage) returns a query whose
+    ``count()`` reports ``message_count``. The second call (KnowledgeBaseDocument)
+    returns a query whose ``all()`` yields ``docs``.
+    """
+    db = MagicMock()
+
+    msg_query = MagicMock()
+    msg_query.filter.return_value = msg_query
+    msg_query.count.return_value = message_count
+    msg_query.delete.return_value = message_count
+
+    doc_query = MagicMock()
+    doc_query.filter.return_value = doc_query
+    doc_query.all.return_value = docs or []
+
+    def query_side_effect(model):
+        from ai_api.database import ConversationMessage
+
+        if model is ConversationMessage:
+            return msg_query
+        return doc_query
+
+    db.query.side_effect = query_side_effect
+    return db
+
+
+class TestHandleCleanCommandMessages:
+    def test_deletes_messages(self):
+        db = _make_clean_db(message_count=5)
+        result = handle_clean_command(db, "user-123", "123@s.whatsapp.net")
+        assert "Deleted 5 messages" in result
         db.commit.assert_called_once()
 
     def test_no_messages(self):
-        db = self._make_db(delete_count=0)
-        result = handle_clear_command(db, "user-123")
-        assert "No conversation messages" in result
+        db = _make_clean_db(message_count=0)
+        result = handle_clean_command(db, "user-123", "123@s.whatsapp.net")
+        assert "No messages found" in result
         db.commit.assert_called_once()
 
+    def test_does_not_touch_documents(self):
+        db = _make_clean_db(message_count=3)
+        handle_clean_command(db, "user-123", "123@s.whatsapp.net", level="messages")
+        # Only the message query should have been issued — not the document query.
+        db.delete.assert_not_called()
 
-# ---------------------------------------------------------------------------
-# handle_forget_command
-# ---------------------------------------------------------------------------
+    def test_default_level_is_messages(self):
+        db = _make_clean_db(message_count=2)
+        result = handle_clean_command(db, "user-123", "123@s.whatsapp.net")
+        assert "Deleted 2 messages" in result
+        db.delete.assert_not_called()
 
 
-class TestHandleForgetCommand:
-    def _make_db(self, delete_count=0):
-        db = MagicMock()
-        query_mock = MagicMock()
-        query_mock.filter.return_value = query_mock
-        query_mock.delete.return_value = delete_count
-        db.query.return_value = query_mock
-        return db
+class TestHandleCleanCommandData:
+    @patch("ai_api.commands.Path.unlink")
+    @patch("ai_api.commands.Path.exists", return_value=True)
+    def test_deletes_messages_and_documents(self, _mock_exists, mock_unlink):
+        doc1 = MagicMock()
+        doc1.filename = "a.pdf"
+        doc2 = MagicMock()
+        doc2.filename = "b.pdf"
+        db = _make_clean_db(message_count=4, docs=[doc1, doc2])
 
-    @patch("ai_api.commands.get_or_create_core_memory")
-    def test_clears_messages_and_memory(self, mock_get_mem):
-        db = self._make_db(delete_count=3)
-        mock_mem = MagicMock()
-        mock_mem.content = "Some notes about the user"
-        mock_get_mem.return_value = mock_mem
+        result = handle_clean_command(db, "user-123", "123@s.whatsapp.net", level="data")
 
-        result = handle_forget_command(db, "user-123")
+        assert "4 messages" in result
+        assert "2 documents" in result
+        assert "Conversation data cleared" in result
+        assert db.delete.call_count == 2
+        assert mock_unlink.call_count == 2
+        db.commit.assert_called_once()
+
+    def test_no_data(self):
+        db = _make_clean_db(message_count=0, docs=[])
+        result = handle_clean_command(db, "user-123", "123@s.whatsapp.net", level="data")
+        assert "No messages or documents" in result
+
+    @patch("ai_api.commands.Path.unlink")
+    @patch("ai_api.commands.Path.exists", return_value=True)
+    def test_messages_only(self, _mock_exists, mock_unlink):
+        db = _make_clean_db(message_count=3, docs=[])
+        result = handle_clean_command(db, "user-123", "123@s.whatsapp.net", level="data")
         assert "3 messages" in result
-        assert "core memories" in result
-        assert mock_mem.content == ""
-        db.commit.assert_called_once()
-
-    @patch("ai_api.commands.get_or_create_core_memory")
-    def test_no_messages_no_memory(self, mock_get_mem):
-        db = self._make_db(delete_count=0)
-        mock_mem = MagicMock()
-        mock_mem.content = ""
-        mock_get_mem.return_value = mock_mem
-
-        result = handle_forget_command(db, "user-123")
-        assert "No messages or memories" in result
-
-    @patch("ai_api.commands.get_or_create_core_memory")
-    def test_messages_only_no_memory(self, mock_get_mem):
-        db = self._make_db(delete_count=10)
-        mock_mem = MagicMock()
-        mock_mem.content = ""
-        mock_get_mem.return_value = mock_mem
-
-        result = handle_forget_command(db, "user-123")
-        assert "10 messages" in result
-        assert "core memories" not in result
-
-    @patch("ai_api.commands.get_or_create_core_memory")
-    def test_memory_only_no_messages(self, mock_get_mem):
-        db = self._make_db(delete_count=0)
-        mock_mem = MagicMock()
-        mock_mem.content = "User likes cats"
-        mock_get_mem.return_value = mock_mem
-
-        result = handle_forget_command(db, "user-123")
-        assert "core memories" in result
-        assert "messages" not in result
+        assert "documents" not in result
+        mock_unlink.assert_not_called()
 
 
-# ---------------------------------------------------------------------------
-# handle_reset_command
-# ---------------------------------------------------------------------------
-
-
-class TestHandleResetCommand:
-    def _make_db(self, delete_count=0, docs=None):
-        db = MagicMock()
-
-        msg_query = MagicMock()
-        msg_query.filter.return_value = msg_query
-        msg_query.delete.return_value = delete_count
-
-        doc_query = MagicMock()
-        doc_query.filter.return_value = doc_query
-        doc_query.all.return_value = docs or []
-
-        def query_side_effect(model):
-            from ai_api.database import ConversationMessage
-
-            if model is ConversationMessage:
-                return msg_query
-            return doc_query
-
-        db.query.side_effect = query_side_effect
-        return db
-
+class TestHandleCleanCommandAll:
+    @patch("ai_api.commands.Path.unlink")
+    @patch("ai_api.commands.Path.exists", return_value=True)
     @patch("ai_api.commands.get_or_create_preferences")
     @patch("ai_api.commands.get_or_create_core_memory")
-    def test_resets_everything(self, mock_get_mem, mock_get_prefs):
+    def test_full_reset(self, mock_get_mem, mock_get_prefs, _mock_exists, mock_unlink):
         mock_mem = MagicMock()
         mock_mem.content = "User info"
         mock_get_mem.return_value = mock_mem
@@ -410,58 +390,89 @@ class TestHandleResetCommand:
         mock_prefs = MagicMock()
         mock_get_prefs.return_value = mock_prefs
 
-        db = self._make_db(delete_count=5)
-        result = handle_reset_command(db, "user-123", "123@s.whatsapp.net")
+        doc = MagicMock()
+        doc.filename = "x.pdf"
+        db = _make_clean_db(message_count=5, docs=[doc])
 
-        assert "Reset complete" in result
-        assert "5 messages" in result
-        assert "core memories" in result
-        assert "preferences" in result
+        result = handle_clean_command(db, "user-123", "123@s.whatsapp.net", level="all")
+
+        assert "Full reset complete" in result
         assert mock_mem.content == ""
         assert mock_prefs.tts_enabled is False
         assert mock_prefs.tts_language == "en"
         assert mock_prefs.stt_language is None
+        assert db.delete.call_count == 1
+        assert mock_unlink.call_count == 1
         db.commit.assert_called_once()
 
     @patch("ai_api.commands.get_or_create_preferences")
     @patch("ai_api.commands.get_or_create_core_memory")
-    def test_no_data_still_resets_preferences(self, mock_get_mem, mock_get_prefs):
+    def test_full_reset_with_no_data(self, mock_get_mem, mock_get_prefs):
         mock_mem = MagicMock()
         mock_mem.content = ""
         mock_get_mem.return_value = mock_mem
-
         mock_prefs = MagicMock()
         mock_get_prefs.return_value = mock_prefs
 
-        db = self._make_db(delete_count=0)
-        result = handle_reset_command(db, "user-123", "123@s.whatsapp.net")
+        db = _make_clean_db(message_count=0, docs=[])
+        result = handle_clean_command(db, "user-123", "123@s.whatsapp.net", level="all")
 
-        assert "Reset complete" in result
-        assert "preferences" in result
+        assert "Full reset complete" in result
+        assert mock_prefs.tts_enabled is False
         db.commit.assert_called_once()
 
-    @patch("ai_api.commands.Path.unlink")
-    @patch("ai_api.commands.Path.exists", return_value=True)
-    @patch("ai_api.commands.get_or_create_preferences")
+
+class TestHandleCleanCommandInvalid:
+    def test_invalid_level(self):
+        db = MagicMock()
+        result = handle_clean_command(db, "user-123", "123@s.whatsapp.net", level="bogus")
+        assert "Invalid clean level" in result
+        db.commit.assert_not_called()
+
+    def test_level_is_normalized(self):
+        db = _make_clean_db(message_count=1)
+        result = handle_clean_command(db, "user-123", "123@s.whatsapp.net", level="  MESSAGES  ")
+        assert "Deleted 1 messages" in result
+
+
+# ---------------------------------------------------------------------------
+# _handle_memories_command — clear branch
+# ---------------------------------------------------------------------------
+
+
+class TestHandleMemoriesClear:
     @patch("ai_api.commands.get_or_create_core_memory")
-    def test_resets_with_documents(self, mock_get_mem, mock_get_prefs, _mock_exists, mock_unlink):
+    def test_clear_with_existing_memory(self, mock_get_mem):
+        mock_mem = MagicMock()
+        mock_mem.content = "User info"
+        mock_get_mem.return_value = mock_mem
+
+        db = MagicMock()
+        result = _handle_memories_command(db, "user-123", ["/memories", "clear"])
+
+        assert "Core memories cleared" in result
+        assert mock_mem.content == ""
+        db.commit.assert_called_once()
+
+    @patch("ai_api.commands.get_or_create_core_memory")
+    def test_clear_with_empty_memory(self, mock_get_mem):
         mock_mem = MagicMock()
         mock_mem.content = ""
         mock_get_mem.return_value = mock_mem
 
-        mock_prefs = MagicMock()
-        mock_get_prefs.return_value = mock_prefs
+        db = MagicMock()
+        result = _handle_memories_command(db, "user-123", ["/memories", "clear"])
 
-        doc1 = MagicMock()
-        doc1.filename = "abc.pdf"
-        doc2 = MagicMock()
-        doc2.filename = "def.pdf"
+        assert "No core memories to clear" in result
+        db.commit.assert_not_called()
 
-        db = self._make_db(delete_count=2, docs=[doc1, doc2])
-        result = handle_reset_command(db, "user-123", "123@s.whatsapp.net")
+    @patch("ai_api.commands.get_or_create_core_memory")
+    def test_show_memories(self, mock_get_mem):
+        mock_mem = MagicMock()
+        mock_mem.content = "Likes pizza"
+        mock_get_mem.return_value = mock_mem
 
-        assert "2 documents" in result
-        assert "2 messages" in result
-        assert db.delete.call_count == 2
-        assert mock_unlink.call_count == 2
-        db.commit.assert_called_once()
+        db = MagicMock()
+        result = _handle_memories_command(db, "user-123", ["/memories"])
+
+        assert "Likes pizza" in result

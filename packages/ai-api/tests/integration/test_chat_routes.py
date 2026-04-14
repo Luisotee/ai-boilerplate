@@ -15,7 +15,6 @@ import uuid
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 from httpx import ASGITransport, AsyncClient
 
 from tests.helpers.factories import make_conversation_message, make_user
@@ -636,7 +635,7 @@ class TestEnqueueRegularMessage:
             patch("ai_api.routes.chat.create_embedding_service", return_value=None),
             patch("ai_api.routes.chat.save_message", return_value=mock_msg),
             patch("ai_api.routes.chat.get_redis_client", mock_get_redis_client),
-            patch("ai_api.routes.chat.add_message_to_stream", new_callable=AsyncMock) as mock_add,
+            patch("ai_api.routes.chat.add_message_to_stream", new_callable=AsyncMock),
         ):
             app = _get_app_with_db_override(mock_db)
             try:

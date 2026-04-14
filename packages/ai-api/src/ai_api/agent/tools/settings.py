@@ -4,9 +4,7 @@ from ...commands import (
     LANGUAGE_NAMES,
     SUPPORTED_LANGUAGES,
     format_settings,
-    handle_clear_command,
-    handle_forget_command,
-    handle_reset_command,
+    handle_clean_command,
 )
 from ...database import get_or_create_preferences
 from ...logger import logger
@@ -194,9 +192,9 @@ async def update_stt_settings(
 
 
 @agent.tool
-async def clear_user_data(
+async def clean_user_data(
     ctx: RunContext[AgentDeps],
-    level: str = "clear",
+    level: str = "messages",
 ) -> str:
     """
     Delete user data at different levels of thoroughness.
@@ -211,46 +209,35 @@ async def clear_user_data(
     Args:
         ctx: Run context with database and user info
         level: How much to delete:
-            - "clear" = Delete conversation messages only (short-term memory)
-            - "forget" = Delete messages AND core memories (short + long term memory)
-            - "reset" = Delete everything: messages, memories, documents, and reset preferences
+            - "messages" = Delete conversation messages only (short-term memory)
+            - "data" = Delete messages AND conversation-scoped documents
+            - "all" = Delete everything: messages, documents, core memories, and reset preferences
 
     Returns:
         Message describing what was deleted
     """
     logger.info("=" * 80)
-    logger.info("🧹 TOOL CALLED: clear_user_data")
+    logger.info("🧹 TOOL CALLED: clean_user_data")
     logger.info(f"   User ID: {ctx.deps.user_id}")
     logger.info(f"   Level: {level}")
     logger.info("=" * 80)
 
     try:
-        level = level.lower().strip()
-
-        if level == "clear":
-            result = handle_clear_command(ctx.deps.db, ctx.deps.user_id)
-        elif level == "forget":
-            result = handle_forget_command(ctx.deps.db, ctx.deps.user_id)
-        elif level == "reset":
-            result = handle_reset_command(ctx.deps.db, ctx.deps.user_id, ctx.deps.whatsapp_jid)
-        else:
-            result = (
-                f"Invalid level '{level}'. "
-                "Use 'clear' (messages only), 'forget' (messages + memories), "
-                "or 'reset' (everything)."
-            )
+        result = handle_clean_command(
+            ctx.deps.db, ctx.deps.user_id, ctx.deps.whatsapp_jid, level=level
+        )
 
         logger.info("=" * 80)
-        logger.info("✅ TOOL RETURNING: clear_user_data")
+        logger.info("✅ TOOL RETURNING: clean_user_data")
         logger.info(f"   Result: {result}")
         logger.info("=" * 80)
 
         return result
 
     except Exception as e:
-        logger.error(f"Error clearing user data: {str(e)}", exc_info=True)
+        logger.error(f"Error cleaning user data: {str(e)}", exc_info=True)
         logger.info("=" * 80)
-        logger.info("❌ TOOL ERROR: clear_user_data")
+        logger.info("❌ TOOL ERROR: clean_user_data")
         logger.info(f"   Error: {str(e)}")
         logger.info("=" * 80)
-        return f"Failed to clear user data: {str(e)}"
+        return f"Failed to clean user data: {str(e)}"

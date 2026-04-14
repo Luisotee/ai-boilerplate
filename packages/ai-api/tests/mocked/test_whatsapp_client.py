@@ -1,13 +1,14 @@
 """Tests for the WhatsApp HTTP client wrapper."""
 
-import pytest
+from unittest.mock import AsyncMock, MagicMock
+
 import httpx
-from unittest.mock import AsyncMock, MagicMock, patch
+import pytest
 
 from ai_api.whatsapp.client import (
-    WhatsAppClient,
     SendMessageResponse,
     SuccessResponse,
+    WhatsAppClient,
     create_whatsapp_client,
 )
 from ai_api.whatsapp.exceptions import (
@@ -15,7 +16,6 @@ from ai_api.whatsapp.exceptions import (
     WhatsAppNotConnectedError,
     WhatsAppNotFoundError,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

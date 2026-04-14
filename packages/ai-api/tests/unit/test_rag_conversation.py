@@ -10,8 +10,6 @@ Tests cover:
 from datetime import datetime
 from unittest.mock import MagicMock
 
-import pytest
-
 from ai_api.rag.conversation import (
     format_conversation_message,
     format_conversation_results,

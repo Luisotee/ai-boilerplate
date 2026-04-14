@@ -1,10 +1,10 @@
 """Tests for the stream consumer message processing."""
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
 
 from ai_api.streams.consumer import process_single_message
-
 
 # ---------------------------------------------------------------------------
 # Helpers

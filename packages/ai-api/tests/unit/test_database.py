@@ -2,8 +2,6 @@
 Unit tests for ai_api.database — pure function phone_from_jid.
 """
 
-import pytest
-
 from ai_api.database import phone_from_jid
 
 

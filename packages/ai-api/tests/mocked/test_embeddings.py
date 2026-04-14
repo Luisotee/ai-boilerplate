@@ -1,16 +1,16 @@
 """Tests for the embedding generation service."""
 
-import pytest
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from ai_api.embeddings import (
+    EMBEDDING_DIMENSIONS,
+    EMBEDDING_MODEL,
+    MAX_EMBEDDING_LENGTH,
     EmbeddingService,
     create_embedding_service,
-    EMBEDDING_MODEL,
-    EMBEDDING_DIMENSIONS,
-    MAX_EMBEDDING_LENGTH,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
