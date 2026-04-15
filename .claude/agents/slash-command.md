@@ -17,7 +17,7 @@ Before starting, read `packages/ai-api/src/ai_api/commands.py` to understand the
 
 Slash commands are intercepted in the Python AI API BEFORE reaching the AI agent. They provide direct control over bot behavior and user preferences.
 
-Current commands: `/settings`, `/tts`, `/stt`, `/clear`, `/forget`, `/reset`, `/memories`, `/help`
+Current commands: `/settings`, `/tts`, `/stt`, `/clean`, `/memories`, `/help`
 
 ## Files to modify (in order):
 
@@ -58,7 +58,7 @@ Key patterns:
 - Always `db.commit()` after modifying preferences
 - Always `logger.info()` for state changes
 
-If the command doesn't need preferences (like `/clear`), use this signature instead:
+If the command doesn't need preferences (like `/clean`), use this signature instead:
 ```python
 def handle_xxx_command(db: Session, user_id: str, whatsapp_jid: str, ...) -> str:
 ```
@@ -74,10 +74,10 @@ elif command == "/xxx":
 ```
 
 Place it in the correct position:
-- `/help`, `/clear`, `/forget`, and `/reset` are handled before `get_or_create_preferences()`
+- `/help`, `/memories`, and `/clean` are handled before `get_or_create_preferences()`
 - Other commands that need `prefs` go after the `prefs = get_or_create_preferences(db, user_id)` line
 - If your command needs prefs, place it alongside `/settings`, `/tts`, `/stt`
-- If your command doesn't need prefs, place it alongside `/help`, `/clear`
+- If your command doesn't need prefs, place it alongside `/help`, `/clean`
 
 ### Step 3: Update help text
 
@@ -93,7 +93,7 @@ Edit `_get_help_text()` in the same file. Add the new command in the appropriate
 If the command should only be usable by group admins, add it to the set:
 
 ```python
-ADMIN_ONLY_COMMANDS = {"/clear", "/forget", "/reset", "/tts", "/stt", "/settings", "/xxx"}
+ADMIN_ONLY_COMMANDS = {"/clean", "/tts", "/stt", "/settings", "/memories", "/xxx"}
 ```
 
 Commands NOT in this set can be used by any group member.

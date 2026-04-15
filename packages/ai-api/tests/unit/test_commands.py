@@ -24,6 +24,7 @@ from ai_api.commands import (
     format_settings,
     handle_clean_command,
     is_command,
+    parse_and_execute,
     strip_leading_mentions,
 )
 
@@ -476,3 +477,134 @@ class TestHandleMemoriesClear:
         result = _handle_memories_command(db, "user-123", ["/memories"])
 
         assert "Likes pizza" in result
+
+
+# ---------------------------------------------------------------------------
+# /clean all empty-account branch
+# ---------------------------------------------------------------------------
+
+
+class TestHandleCleanCommandAllEmpty:
+    @patch("ai_api.commands.get_or_create_preferences")
+    @patch("ai_api.commands.get_or_create_core_memory")
+    def test_returns_already_clean_when_nothing_to_reset(self, mock_get_mem, mock_get_prefs):
+        mock_mem = MagicMock()
+        mock_mem.content = ""
+        mock_get_mem.return_value = mock_mem
+
+        # Spec a real-shaped prefs object so attribute access returns plain
+        # values instead of truthy MagicMocks (which would falsely indicate
+        # "had prefs changes").
+        mock_prefs = MagicMock()
+        mock_prefs.tts_enabled = False
+        mock_prefs.tts_language = "en"
+        mock_prefs.stt_language = None
+        mock_get_prefs.return_value = mock_prefs
+
+        db = _make_clean_db(message_count=0, docs=[])
+        result = handle_clean_command(db, "user-123", "123@s.whatsapp.net", level="all")
+
+        assert "Nothing to reset" in result
+        assert "already clean" in result
+        db.commit.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# parse_and_execute — dispatcher wiring for /clean and /memories clear
+# ---------------------------------------------------------------------------
+
+
+class TestParseAndExecuteClean:
+    def test_clean_default_level_is_messages(self):
+        with patch("ai_api.commands.handle_clean_command") as mock_handle:
+            mock_handle.return_value = "Deleted 0 messages."
+            db = MagicMock()
+            result = parse_and_execute(db, "user-123", "123@s.whatsapp.net", "/clean")
+            assert result.is_command is True
+            mock_handle.assert_called_once_with(
+                db, "user-123", "123@s.whatsapp.net", level="messages"
+            )
+
+    def test_clean_data_level(self):
+        with patch("ai_api.commands.handle_clean_command") as mock_handle:
+            mock_handle.return_value = "ok"
+            db = MagicMock()
+            parse_and_execute(db, "user-123", "123@s.whatsapp.net", "/clean data")
+            mock_handle.assert_called_once_with(db, "user-123", "123@s.whatsapp.net", level="data")
+
+    def test_clean_all_level(self):
+        with patch("ai_api.commands.handle_clean_command") as mock_handle:
+            mock_handle.return_value = "ok"
+            db = MagicMock()
+            parse_and_execute(db, "user-123", "123@s.whatsapp.net", "/clean all")
+            mock_handle.assert_called_once_with(db, "user-123", "123@s.whatsapp.net", level="all")
+
+    def test_clean_uppercase_level_normalized(self):
+        with patch("ai_api.commands.handle_clean_command") as mock_handle:
+            mock_handle.return_value = "ok"
+            db = MagicMock()
+            parse_and_execute(db, "user-123", "123@s.whatsapp.net", "/clean DATA")
+            mock_handle.assert_called_once_with(db, "user-123", "123@s.whatsapp.net", level="data")
+
+    def test_clean_invalid_level_returns_error(self):
+        # Goes through the real handler — invalid level short-circuits before any DB call.
+        db = MagicMock()
+        result = parse_and_execute(db, "user-123", "123@s.whatsapp.net", "/clean bogus")
+        assert result.is_command is True
+        assert "Invalid clean level" in result.response_text
+        db.commit.assert_not_called()
+
+    def test_clean_blocked_for_non_admin_in_group(self):
+        db = MagicMock()
+        result = parse_and_execute(
+            db,
+            "user-123",
+            "group@g.us",
+            "@bot /clean data",
+            conversation_type="group",
+            is_group_admin=False,
+        )
+        assert result.is_command is True
+        assert "Only group admins" in result.response_text
+
+    def test_clean_allowed_for_admin_in_group(self):
+        with patch("ai_api.commands.handle_clean_command") as mock_handle:
+            mock_handle.return_value = "ok"
+            db = MagicMock()
+            parse_and_execute(
+                db,
+                "user-123",
+                "group@g.us",
+                "@bot /clean",
+                conversation_type="group",
+                is_group_admin=True,
+            )
+            mock_handle.assert_called_once()
+
+
+class TestParseAndExecuteMemoriesClear:
+    @patch("ai_api.commands.get_or_create_core_memory")
+    def test_memories_clear_dispatches_to_handler(self, mock_get_mem):
+        mock_mem = MagicMock()
+        mock_mem.content = "Likes pizza"
+        mock_get_mem.return_value = mock_mem
+
+        db = MagicMock()
+        result = parse_and_execute(db, "user-123", "123@s.whatsapp.net", "/memories clear")
+
+        assert result.is_command is True
+        assert "Core memories cleared" in result.response_text
+        assert mock_mem.content == ""
+        db.commit.assert_called_once()
+
+    @patch("ai_api.commands.get_or_create_core_memory")
+    def test_memories_show_when_no_subcommand(self, mock_get_mem):
+        mock_mem = MagicMock()
+        mock_mem.content = "Likes pizza"
+        mock_get_mem.return_value = mock_mem
+
+        db = MagicMock()
+        result = parse_and_execute(db, "user-123", "123@s.whatsapp.net", "/memories")
+
+        assert result.is_command is True
+        assert "Likes pizza" in result.response_text

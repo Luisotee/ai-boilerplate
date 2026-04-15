@@ -211,9 +211,11 @@ def handle_clean_command(
     if level not in valid_levels:
         return f"Invalid clean level '{level}'. Use 'messages', 'data', or 'all'."
 
-    msg_query = db.query(ConversationMessage).filter(ConversationMessage.user_id == user_id)
-    message_count = msg_query.count()
-    msg_query.delete()
+    message_count = (
+        db.query(ConversationMessage)
+        .filter(ConversationMessage.user_id == user_id)
+        .delete(synchronize_session=False)
+    )
 
     doc_count = 0
     files_to_delete: list[Path] = []
@@ -233,12 +235,18 @@ def handle_clean_command(
         for doc in docs_to_delete:
             db.delete(doc)
 
+    had_memories = False
+    had_prefs_changes = False
     if level == "all":
         mem = get_or_create_core_memory(db, user_id)
+        had_memories = bool(mem.content)
         if mem.content:
             mem.content = ""
 
         prefs = get_or_create_preferences(db, user_id)
+        had_prefs_changes = (
+            prefs.tts_enabled or prefs.tts_language != "en" or prefs.stt_language is not None
+        )
         prefs.tts_enabled = False
         prefs.tts_language = "en"
         prefs.stt_language = None
@@ -274,6 +282,8 @@ def handle_clean_command(
         return f"Deleted {summary}. Conversation data cleared."
 
     # level == "all"
+    if message_count == 0 and doc_count == 0 and not had_memories and not had_prefs_changes:
+        return "Nothing to reset. Your account is already clean."
     logger.info(f"Clean [all] for user {user_id}: full reset")
     return (
         "Full reset complete. All messages, documents, memories, and preferences have been cleared."
