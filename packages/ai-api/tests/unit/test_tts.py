@@ -8,8 +8,6 @@ Tests cover:
 - TTS_VOICES and AUDIO_FORMATS constants
 """
 
-import pytest
-
 from ai_api.config import settings
 from ai_api.tts import (
     AUDIO_FORMATS,
@@ -18,7 +16,6 @@ from ai_api.tts import (
     get_voice_for_language,
     validate_text_input,
 )
-
 
 # ---------------------------------------------------------------------------
 # validate_text_input

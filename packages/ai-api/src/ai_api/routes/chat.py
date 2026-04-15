@@ -147,10 +147,11 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
     - `/tts on|off` - Enable/disable TTS
     - `/tts lang [code]` - Set TTS language
     - `/stt lang [code|auto]` - Set STT language
-    - `/clear` - Clear conversation messages
-    - `/forget` - Clear messages + core memories
-    - `/reset` - Reset everything (messages, memories, documents, preferences)
+    - `/clean` - Delete conversation messages
+    - `/clean data` - Delete messages + conversation documents
+    - `/clean all` - Full reset (messages, documents, memories, preferences)
     - `/memories` - Show saved core memories
+    - `/memories clear` - Delete all core memories
     - `/help` - Show available commands
 
     **Request Body:**

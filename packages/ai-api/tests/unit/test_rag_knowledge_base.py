@@ -10,8 +10,6 @@ Tests cover:
 - Excessive blank line removal
 """
 
-import pytest
-
 from ai_api.rag.knowledge_base import format_knowledge_base_results
 
 

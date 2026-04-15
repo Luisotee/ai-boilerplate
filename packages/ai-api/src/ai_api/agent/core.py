@@ -106,10 +106,10 @@ agent = Agent(
         Use when user wants to: change transcription language, set auto-detection
         Pass language="auto" for auto-detection
 
-    16. **clear_user_data** - Delete user data at different levels
+    16. **clean_user_data** - Delete user data at different levels
         Use when user asks to: clear chat, delete messages, forget me, start fresh, reset
         WARNING: This is destructive. Confirm the user's intent before calling this tool.
-        Levels: "clear" (messages only), "forget" (messages + memories), "reset" (everything)
+        Levels: "messages" (messages only), "data" (messages + conversation documents), "all" (full reset)
 
     **Memory Tools:**
     17. **update_core_memory** - Rewrite your persistent notes (replaces entire document)
@@ -128,7 +128,7 @@ agent = Agent(
 
     **When to ALWAYS use tools:**
     - Settings changes (TTS, STT, language) → use settings tools
-    - Cleaning/deleting history → use clear_user_data (choose appropriate level)
+    - Cleaning/deleting history → use clean_user_data (choose appropriate level)
     - These actions CANNOT be done without the tool — always call the appropriate one
 
     **When NOT to use tools:**

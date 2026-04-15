@@ -6,14 +6,11 @@ Tests cover:
 - get_whatsapp_api_key
 """
 
-import pytest
-
 from ai_api.config import (
     get_whatsapp_api_key,
     get_whatsapp_client_url,
     settings,
 )
-
 
 # ---------------------------------------------------------------------------
 # get_whatsapp_client_url

@@ -9,8 +9,6 @@ Tests cover:
 - MIME type mismatch (warning but still passes)
 """
 
-import pytest
-
 from ai_api.transcription import (
     MAX_FILE_SIZE_BYTES,
     SUPPORTED_FORMATS,

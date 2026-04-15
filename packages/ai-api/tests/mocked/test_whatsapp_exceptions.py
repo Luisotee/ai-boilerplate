@@ -8,7 +8,6 @@ from ai_api.whatsapp.exceptions import (
     WhatsAppNotFoundError,
 )
 
-
 # ---------------------------------------------------------------------------
 # WhatsAppClientError (base)
 # ---------------------------------------------------------------------------

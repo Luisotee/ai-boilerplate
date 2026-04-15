@@ -1,10 +1,8 @@
 """Tests for agent response formatting utilities."""
 
-import pytest
 from unittest.mock import MagicMock
 
 from ai_api.agent.response import format_message_history
-
 
 # ---------------------------------------------------------------------------
 # Helpers
