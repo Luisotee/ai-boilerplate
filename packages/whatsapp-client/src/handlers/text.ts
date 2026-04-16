@@ -4,6 +4,7 @@ import { getUserPreferences, sendMessageToAI, textToSpeech } from '../api-client
 import { stripDeviceSuffix, isGroupChat } from '../utils/jid.js';
 import { getSenderName } from '../utils/message.js';
 import { sendFailureReaction } from '../utils/reactions.js';
+import { messagesSent } from '../routes/metrics.js';
 
 interface ImageData {
   buffer: Buffer;
@@ -100,6 +101,7 @@ export async function handleTextMessage(
 
     // Send text response first
     await sock.sendMessage(whatsappJid, { text: response });
+    messagesSent.inc({ type: 'text' });
     logger.info({ to: whatsappJid, responseLength: response.length }, 'Sent AI response');
 
     // Check if TTS is enabled and send voice message
@@ -115,6 +117,7 @@ export async function handleTextMessage(
             mimetype: 'audio/ogg; codecs=opus',
             ptt: true, // Voice note
           });
+          messagesSent.inc({ type: 'audio' });
           logger.info({ whatsappJid }, 'Voice message sent');
         } else {
           logger.warn({ whatsappJid }, 'TTS failed, text-only sent');

@@ -118,6 +118,7 @@ async def update_tts_settings(
         return result
 
     except Exception as e:
+        ctx.deps.db.rollback()
         logger.error(f"Error updating TTS settings: {str(e)}", exc_info=True)
         logger.info("=" * 80)
         logger.info("❌ TOOL ERROR: update_tts_settings")
@@ -183,6 +184,7 @@ async def update_stt_settings(
         return result
 
     except Exception as e:
+        ctx.deps.db.rollback()
         logger.error(f"Error updating STT settings: {str(e)}", exc_info=True)
         logger.info("=" * 80)
         logger.info("❌ TOOL ERROR: update_stt_settings")

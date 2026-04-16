@@ -81,7 +81,7 @@ export async function normalizeJid(identifier: string): Promise<string> {
 
   // Phone number - convert to JID using onWhatsApp
   const sock = getBaileysSocket();
-  const [result] = await sock.onWhatsApp(identifier);
+  const [result] = (await sock.onWhatsApp(identifier)) ?? [];
 
   if (!result?.exists) {
     throw new Error(`Phone number ${identifier} is not registered on WhatsApp`);

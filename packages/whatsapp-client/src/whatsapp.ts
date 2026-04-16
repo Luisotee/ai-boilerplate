@@ -15,6 +15,7 @@ import { extractDocumentData } from './handlers/document.js';
 import { sendFailureReaction } from './utils/reactions.js';
 import { stripDeviceSuffix, isGroupChat, phoneFromJid, isLid } from './utils/jid.js';
 import { shouldRespondInGroup } from './utils/message.js';
+import { messagesReceived } from './routes/metrics.js';
 
 const DEFAULT_IMAGE_PROMPT = 'Please describe and analyze this image';
 const DEFAULT_DOCUMENT_PROMPT = 'I have uploaded a document for you to analyze';
@@ -60,6 +61,7 @@ export async function initializeWhatsApp(): Promise<void> {
   const sock = makeWASocket({
     auth: state,
     logger: logger.child({ module: 'baileys' }),
+    browser: ['AI Boilerplate', 'Chrome', '131.0.0'],
   });
 
   // Connection events
@@ -180,6 +182,19 @@ export async function initializeWhatsApp(): Promise<void> {
         // Extract phone number and LID for user identity resolution
         const phone = phoneFromJid(whatsappJid) ?? undefined;
         const whatsappLid = isLid(whatsappJid) ? whatsappJid : undefined;
+
+        // Record received message metric
+        const msgType = normalizedMessage?.audioMessage
+          ? 'audio'
+          : normalizedMessage?.imageMessage
+            ? 'image'
+            : normalizedMessage?.documentMessage
+              ? 'document'
+              : 'text';
+        messagesReceived.inc({
+          type: msgType,
+          conversation_type: isGroup ? 'group' : 'private',
+        });
 
         // Get text from normalized message or transcribe audio
         let text = normalizedMessage?.conversation || normalizedMessage?.extendedTextMessage?.text;

@@ -2,6 +2,7 @@ import * as graphApi from '../services/graph-api.js';
 import { sendMessageToAI, getUserPreferences, textToSpeech } from '../api-client.js';
 import { phoneToJid, isGroupChat, phoneFromJid } from '../utils/jid.js';
 import { logger } from '../logger.js';
+import { messagesSent } from '../routes/metrics.js';
 
 interface ImageData {
   data: string; // base64 encoded
@@ -92,6 +93,7 @@ export async function handleTextMessage(
 
     // Send text response via Graph API
     await graphApi.sendText(to, response);
+    messagesSent.inc({ type: 'text' });
     logger.info({ to: whatsappJid, responseLength: response.length }, 'Sent AI response');
 
     // --- Response delivered; failures below should NOT trigger error reaction ---
@@ -104,6 +106,7 @@ export async function handleTextMessage(
         const audioBuffer = await textToSpeech(response, whatsappJid);
         if (audioBuffer) {
           await graphApi.sendAudio(to, audioBuffer, 'audio/ogg; codecs=opus');
+          messagesSent.inc({ type: 'audio' });
           logger.info({ whatsappJid }, 'Voice message sent');
         } else {
           logger.warn({ whatsappJid }, 'TTS failed, text-only sent');

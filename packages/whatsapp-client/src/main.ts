@@ -1,3 +1,5 @@
+import './instrument.js';
+import { Sentry } from './instrument.js';
 import crypto from 'node:crypto';
 import { config } from './config.js';
 import Fastify from 'fastify';
@@ -17,6 +19,7 @@ import { registerHealthRoutes } from './routes/health.js';
 import { registerMessagingRoutes } from './routes/messaging.js';
 import { registerMediaRoutes } from './routes/media.js';
 import { registerOperationsRoutes } from './routes/operations.js';
+import { registerMetricsRoutes } from './routes/metrics.js';
 
 /**
  * Transform function that handles both Zod and plain JSON Schema.
@@ -91,7 +94,11 @@ async function start() {
 
   // API Key authentication hook
   app.addHook('onRequest', async (request, reply) => {
-    if (request.url === '/health' || request.url.startsWith('/docs')) {
+    if (
+      request.url === '/health' ||
+      request.url === '/metrics' ||
+      request.url.startsWith('/docs')
+    ) {
       return;
     }
     const apiKey = request.headers['x-api-key'];
@@ -111,7 +118,7 @@ async function start() {
   await app.register(FastifyRateLimit, {
     max: config.rateLimitGlobal,
     timeWindow: '1 minute',
-    allowList: (req) => req.url === '/health',
+    allowList: (req) => req.url === '/health' || req.url === '/metrics',
   });
 
   // Register multipart for file uploads
@@ -171,6 +178,12 @@ async function start() {
   await registerMessagingRoutes(app);
   await registerMediaRoutes(app);
   await registerOperationsRoutes(app);
+  await registerMetricsRoutes(app);
+
+  // Sentry Fastify error handler — must be registered after all routes
+  if (process.env.SENTRY_DSN_NODE) {
+    Sentry.setupFastifyErrorHandler(app);
+  }
 
   // Start server
   await app.listen({ port: config.server.port, host: config.server.host });
@@ -188,6 +201,13 @@ async function start() {
 }
 
 start().catch((error) => {
+  Sentry.captureException(error);
   console.error('Failed to start server:', error);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+  Sentry.captureException(reason);
+  console.error('Unhandled rejection:', reason);
   process.exit(1);
 });

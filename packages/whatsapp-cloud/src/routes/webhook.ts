@@ -17,6 +17,7 @@ import { handleTextMessage } from '../handlers/text.js';
 import { extractAndTranscribeAudio } from '../handlers/audio.js';
 import { extractImageData } from '../handlers/image.js';
 import { extractDocumentData } from '../handlers/document.js';
+import { messagesReceived } from './metrics.js';
 
 export async function registerWebhookRoutes(app: FastifyInstance) {
   // ==================== GET /webhook — Meta verification ====================
@@ -169,6 +170,8 @@ async function processWebhookMessages(body: WebhookBody): Promise<void> {
       { type: message.type, from: senderPhone, messageId },
       'Processing incoming message'
     );
+
+    messagesReceived.inc({ type: message.type, conversation_type: 'private' });
 
     try {
       switch (message.type) {
