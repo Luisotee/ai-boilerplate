@@ -117,6 +117,7 @@ cd packages/ai-api && uv run pytest tests/unit  # AI API unit tests only
 - Models: `database.py` (users, messages, preferences, core_memories) + `kb_models.py` (documents, chunks)
 - **Core memories**: one markdown document per user (`core_memories` table), injected into system prompt via `@agent.system_prompt` in `agent/core.py`
 - **Conversation-scoped PDFs** expire after 24h (`CONVERSATION_PDF_TTL_HOURS`). Cleanup task runs in `main.py` lifespan
+- **PDF parsing**: LlamaParse (cloud, primary) via `llama-cloud` SDK, with **optional** Docling fallback behind the `[docling]` extra. Behavior controlled by `PDF_PARSER` (`auto` | `llamaparse` | `docling`). In `auto` mode, LlamaParse runs when `LLAMA_CLOUD_API_KEY` is set and falls back to Docling on any parser error *if* the extra is installed
 
 ## Environment Config
 
@@ -237,6 +238,6 @@ Multipart routes can't use Zod validation directly. Follow the pattern in `route
 
 ### General
 - Husky pre-commit hook runs `pnpm format` automatically — do NOT run format manually before committing
-- ai-api Dockerfile requires system deps: poppler-utils, tesseract-ocr, libmagic1, ffmpeg
+- ai-api Dockerfile installs `ffmpeg` always (used by pydub for TTS/STT). `poppler-utils`, `tesseract-ocr`, and `libmagic1` are only installed when `INSTALL_DOCLING=true` (build arg) — the default image uses LlamaParse only and skips them to stay lean. Docker Compose forwards `${INSTALL_DOCLING}` from the shell environment as a build arg
 - API docs: http://localhost:8000/docs (AI API), http://localhost:3001/docs (Baileys client), http://localhost:3002/docs (Cloud API client)
 - DB GUI: http://localhost:8080 (Adminer)

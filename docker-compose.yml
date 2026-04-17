@@ -89,6 +89,10 @@ services:
     build:
       context: ./packages/ai-api
       dockerfile: Dockerfile
+      args:
+        # Set INSTALL_DOCLING=true in your shell to bake the Docling fallback
+        # into the image (adds ~1GB for poppler/tesseract + docling deps).
+        INSTALL_DOCLING: "${INSTALL_DOCLING:-false}"
     container_name: aiagent-api
     restart: unless-stopped
     env_file: .env

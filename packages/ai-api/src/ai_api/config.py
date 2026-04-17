@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -80,9 +81,20 @@ class Settings(BaseSettings):
 
     # PDF Processing Timeouts
     kb_processing_timeout_seconds: int = 300  # Overall max processing time (5 minutes)
-    kb_docling_timeout_seconds: int = 180  # Max time for PDF parsing (3 minutes)
+    kb_parse_timeout_seconds: int = 180  # Max time for PDF parsing (3 minutes)
     kb_embedding_timeout_seconds: int = 10  # Max time per embedding API call (10 seconds)
     kb_embedding_batch_timeout_seconds: int = 240  # Max time for all embeddings (4 minutes)
+
+    # PDF Parser Selection
+    # auto: prefer LlamaParse when LLAMA_CLOUD_API_KEY is set, fall back to Docling
+    # llamaparse: always use LlamaParse (no fallback)
+    # docling: always use Docling (requires `uv sync --extra docling`)
+    pdf_parser: Literal["auto", "llamaparse", "docling"] = "auto"
+
+    # LlamaParse (hosted PDF parser — https://cloud.llamaindex.ai)
+    llama_cloud_api_key: str | None = None
+    llamaparse_tier: Literal["fast", "cost_effective", "agentic", "agentic_plus"] = "cost_effective"
+    llamaparse_timeout_seconds: int = 300
 
     # Conversation-scoped documents
     conversation_pdf_ttl_hours: int = 24

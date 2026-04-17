@@ -153,7 +153,7 @@ if [ "$SKIP_ENV" = false ]; then
   # half-configured .env only discovered at runtime.
   REQUIRED_KEYS=(
     POSTGRES_PASSWORD REDIS_PASSWORD GEMINI_API_KEY AI_API_KEY
-    WHATSAPP_API_KEY DATABASE_URL GROQ_API_KEY
+    WHATSAPP_API_KEY DATABASE_URL GROQ_API_KEY LLAMA_CLOUD_API_KEY
     META_PHONE_NUMBER_ID META_ACCESS_TOKEN META_APP_SECRET META_WEBHOOK_VERIFY_TOKEN
   )
   MISSING_KEYS=()
@@ -264,6 +264,24 @@ if [ "$SKIP_ENV" = false ]; then
     fi
   else
     print_warning "Skipped Cloud API — you can set META_* vars in .env later"
+  fi
+
+  # ── Optional: LlamaParse ──────────────────────────────
+  echo ""
+  read -rp "  Set up LlamaParse for PDF parsing (primary parser)? (y/N): " SETUP_LLAMA
+  if [[ "$SETUP_LLAMA" =~ ^[Yy]$ ]]; then
+    echo -e "  ${YELLOW}Get your key at: https://cloud.llamaindex.ai (free tier: 1000 pages/day)${NC}"
+    read -rsp "  LLAMA_CLOUD_API_KEY: " LLAMA_KEY
+    echo
+    LLAMA_KEY=$(sanitize "$LLAMA_KEY")
+    if [ -n "$LLAMA_KEY" ]; then
+      sed -i "s|^LLAMA_CLOUD_API_KEY=.*|LLAMA_CLOUD_API_KEY=$(escape_sed "$LLAMA_KEY")|" "$ENV_FILE"
+      print_success "LlamaParse configured"
+    else
+      print_warning "LLAMA_CLOUD_API_KEY left empty — PDF parsing requires the [docling] extra"
+    fi
+  else
+    print_warning "Skipped LlamaParse — set LLAMA_CLOUD_API_KEY in .env or install the [docling] extra later"
   fi
 
   # ── Optional: Groq ────────────────────────────────────

@@ -10,13 +10,12 @@ requires-python = ">=3.11"
 dependencies = [
     "arq>=0.26.3",
     "ddgs>=9.10.0",
-    "docling>=2.64.0",
-    "docling-core[chunking-openai]>=2.54.1",
     "fastapi>=0.122.0",
     "google-genai>=1.52.0",
     "groq>=0.36.0",
     "httpx>=0.28.1",
     "litellm>=1.80.7",
+    "llama-cloud>=2.1",
     "numpy>=2.3.5",
     "pgvector>=0.3.6",
     "pint>=0.25.2",
@@ -32,6 +31,14 @@ dependencies = [
     "tiktoken>=0.8.0",
     "uvicorn>=0.38.0",
     "wikipedia-api>=0.8.1",
+]
+
+[project.optional-dependencies]
+# Local PDF parsing fallback. Install with: uv sync --extra docling
+# Also requires system deps: poppler-utils, tesseract-ocr, libmagic1
+docling = [
+    "docling>=2.64.0",
+    "docling-core[chunking-openai]>=2.54.1",
 ]
 
 [build-system]
