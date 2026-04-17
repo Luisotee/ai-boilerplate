@@ -1,3 +1,5 @@
+import './instrument.js';
+import { Sentry } from './instrument.js';
 import crypto from 'node:crypto';
 import { config } from './config.js';
 import Fastify from 'fastify';
@@ -20,6 +22,7 @@ import { registerWebhookRoutes } from './routes/webhook.js';
 import { registerMessagingRoutes } from './routes/messaging.js';
 import { registerMediaRoutes } from './routes/media.js';
 import { registerOperationsRoutes } from './routes/operations.js';
+import { registerMetricsRoutes } from './routes/metrics.js';
 
 /**
  * Transform function that handles both Zod and plain JSON Schema.
@@ -161,6 +164,7 @@ async function start() {
   app.addHook('onRequest', async (request, reply) => {
     if (
       request.url === '/health' ||
+      request.url === '/metrics' ||
       request.url.startsWith('/docs') ||
       request.url.startsWith('/webhook')
     ) {
@@ -183,7 +187,8 @@ async function start() {
   await app.register(FastifyRateLimit, {
     max: config.rateLimitGlobal,
     timeWindow: '1 minute',
-    allowList: (req) => req.url === '/health' || req.url.startsWith('/webhook'),
+    allowList: (req) =>
+      req.url === '/health' || req.url === '/metrics' || req.url.startsWith('/webhook'),
   });
 
   // Register multipart for file uploads
@@ -254,6 +259,12 @@ async function start() {
   await registerMessagingRoutes(app);
   await registerMediaRoutes(app);
   await registerOperationsRoutes(app);
+  await registerMetricsRoutes(app);
+
+  // Sentry Fastify error handler — must be registered after all routes
+  if (process.env.SENTRY_DSN_NODE) {
+    Sentry.setupFastifyErrorHandler(app);
+  }
 
   // Start server
   await app.listen({ port: config.server.port, host: config.server.host });
@@ -273,7 +284,18 @@ async function start() {
   app.log.info('='.repeat(60));
 }
 
-start().catch((error) => {
-  console.error('Failed to start server:', error);
+async function shutdownWithError(err: unknown, message: string): Promise<never> {
+  Sentry.captureException(err);
+  logger.fatal({ err }, message);
+  // Sentry transport is async; flush before exiting or the event is lost.
+  await Sentry.close(2000);
   process.exit(1);
+}
+
+start().catch((error) => {
+  void shutdownWithError(error, 'Failed to start server');
+});
+
+process.on('unhandledRejection', (reason) => {
+  void shutdownWithError(reason, 'Unhandled rejection');
 });

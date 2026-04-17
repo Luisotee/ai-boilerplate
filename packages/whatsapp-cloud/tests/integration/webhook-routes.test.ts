@@ -96,6 +96,7 @@ vi.mock('../../src/utils/webhook-signature.js', () => ({
 import { buildTestApp } from '../helpers/fastify.js';
 import { makeWebhookBody, makeStatusWebhookBody } from '../helpers/fixtures.js';
 import { handleTextMessage } from '../../src/handlers/text.js';
+import { metricsRegistry } from '../../src/routes/metrics.js';
 
 const mockHandleTextMessage = handleTextMessage as ReturnType<typeof vi.fn>;
 
@@ -116,6 +117,7 @@ describe('Webhook routes — /webhook', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    metricsRegistry.resetMetrics();
   });
 
   // =========================================================================
@@ -265,6 +267,64 @@ describe('Webhook routes — /webhook', () => {
       await new Promise((resolve) => setTimeout(resolve, 50));
 
       expect(mockHandleTextMessage).not.toHaveBeenCalled();
+    });
+
+    it('increments whatsapp_messages_received_total with the right labels', async () => {
+      const payload = makeWebhookBody('16505551234', 'Count me');
+
+      await app.inject({
+        method: 'POST',
+        url: '/webhook',
+        payload,
+      });
+
+      // processWebhookMessages is fire-and-forget; give it a tick.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const exposition = await metricsRegistry.metrics();
+      expect(exposition).toContain(
+        'whatsapp_messages_received_total{type="text",conversation_type="private"} 1'
+      );
+    });
+
+    it('buckets unknown message.type values under type="other"', async () => {
+      // Construct a webhook payload with an unknown message type (e.g. "interactive")
+      const payload = {
+        object: 'whatsapp_business_account',
+        entry: [
+          {
+            id: 'BIZ_ID',
+            changes: [
+              {
+                value: {
+                  messaging_product: 'whatsapp',
+                  metadata: { display_phone_number: '15555550000', phone_number_id: 'PNID' },
+                  contacts: [{ profile: { name: 'T' }, wa_id: '16505551234' }],
+                  messages: [
+                    {
+                      from: '16505551234',
+                      id: 'wamid.interactive.1',
+                      timestamp: '1700000000',
+                      type: 'interactive',
+                      interactive: { type: 'button_reply', button_reply: { id: 'x', title: 'y' } },
+                    },
+                  ],
+                },
+                field: 'messages',
+              },
+            ],
+          },
+        ],
+      };
+
+      await app.inject({ method: 'POST', url: '/webhook', payload });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const exposition = await metricsRegistry.metrics();
+      expect(exposition).toContain(
+        'whatsapp_messages_received_total{type="other",conversation_type="private"} 1'
+      );
+      expect(exposition).not.toContain('type="interactive"');
     });
   });
 });

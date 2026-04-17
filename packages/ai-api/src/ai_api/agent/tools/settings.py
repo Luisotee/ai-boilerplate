@@ -41,6 +41,7 @@ async def get_user_settings(ctx: RunContext[AgentDeps]) -> str:
         return result
 
     except Exception as e:
+        ctx.deps.db.rollback()
         logger.error(f"Error getting user settings: {str(e)}", exc_info=True)
         logger.info("=" * 80)
         logger.info("❌ TOOL ERROR: get_user_settings")
@@ -118,6 +119,7 @@ async def update_tts_settings(
         return result
 
     except Exception as e:
+        ctx.deps.db.rollback()
         logger.error(f"Error updating TTS settings: {str(e)}", exc_info=True)
         logger.info("=" * 80)
         logger.info("❌ TOOL ERROR: update_tts_settings")
@@ -183,6 +185,7 @@ async def update_stt_settings(
         return result
 
     except Exception as e:
+        ctx.deps.db.rollback()
         logger.error(f"Error updating STT settings: {str(e)}", exc_info=True)
         logger.info("=" * 80)
         logger.info("❌ TOOL ERROR: update_stt_settings")
@@ -235,6 +238,7 @@ async def clean_user_data(
         return result
 
     except Exception as e:
+        ctx.deps.db.rollback()
         logger.error(f"Error cleaning user data: {str(e)}", exc_info=True)
         logger.info("=" * 80)
         logger.info("❌ TOOL ERROR: clean_user_data")

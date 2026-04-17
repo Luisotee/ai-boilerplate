@@ -17,6 +17,22 @@ import { handleTextMessage } from '../handlers/text.js';
 import { extractAndTranscribeAudio } from '../handlers/audio.js';
 import { extractImageData } from '../handlers/image.js';
 import { extractDocumentData } from '../handlers/document.js';
+import { messagesReceived } from './metrics.js';
+
+// Allowlist for the `type` metric label. Raw `message.type` is a Meta-defined
+// string; new types (interactive, button, order, system, …) would silently
+// inflate Prometheus cardinality. Anything outside this set is bucketed as
+// 'other'. Keep in sync with the handler switch below.
+const KNOWN_MESSAGE_TYPES = new Set([
+  'text',
+  'image',
+  'audio',
+  'document',
+  'reaction',
+  'sticker',
+  'location',
+  'contacts',
+]);
 
 export async function registerWebhookRoutes(app: FastifyInstance) {
   // ==================== GET /webhook — Meta verification ====================
@@ -169,6 +185,9 @@ async function processWebhookMessages(body: WebhookBody): Promise<void> {
       { type: message.type, from: senderPhone, messageId },
       'Processing incoming message'
     );
+
+    const typeLabel = KNOWN_MESSAGE_TYPES.has(message.type) ? message.type : 'other';
+    messagesReceived.inc({ type: typeLabel, conversation_type: 'private' });
 
     try {
       switch (message.type) {

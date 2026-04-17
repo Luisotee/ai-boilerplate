@@ -104,6 +104,11 @@ cd packages/ai-api && uv run pytest tests/unit  # AI API unit tests only
 - **User Whitelist**: `WHITELIST_PHONES` env var — comma-separated phone numbers and/or group JIDs. Empty = all users allowed (disabled). When set, non-whitelisted messages are silently ignored. Checked at both WhatsApp client level (primary) and AI API level (defense in depth)
 - **No default passwords**: `POSTGRES_PASSWORD` and `REDIS_PASSWORD` required in `.env`
 
+## Observability
+
+- **Prometheus metrics**: Both TypeScript clients expose `GET /metrics` (Prometheus exposition format). The route is exempt from API-key auth and rate limiting so scrapers can reach it directly. Counters: `whatsapp_messages_received_total{type,conversation_type}`, `whatsapp_messages_sent_total{type}`. Histogram: `ai_api_poll_duration_seconds{status}`. Default Node process metrics are also included.
+- **Sentry**: Error tracking is opt-in via `SENTRY_DSN_NODE`. Each TS package has `src/instrument.ts` which must be imported first in `main.ts` (before `config.ts`) so Sentry's OpenTelemetry hooks load before other modules. When `SENTRY_DSN_NODE` is unset, `instrument.ts` is a no-op and `Sentry.setupFastifyErrorHandler` is skipped.
+
 ## Database
 
 - **PostgreSQL + pgvector** (3072-dim vectors via `gemini-embedding-001`)
@@ -133,6 +138,7 @@ cd packages/ai-api && uv run pytest tests/unit  # AI API unit tests only
 - Async throughout both codebases
 - Use structured logging (Pino for TS, Python `logging`) — no console.log/print
 - Write tests for new functionality — follow existing patterns in `tests/` directories
+- New TS files may fail `pnpm format:check` even if lint passes — run `pnpm exec prettier --write <path>` on freshly created files
 - Keep this file updated with important changes
 
 ## Testing
@@ -153,6 +159,8 @@ Each package has `tests/` with: `unit/` (pure functions, no I/O), `integration/`
 
 ### Gotchas
 - TS singleton state (`getBaileysSocket`, `isCloudApiConnected`) needs `vi.resetModules()` in `beforeEach` to reset between tests
+- New routes must also be registered in `tests/helpers/fastify.ts` (`buildTestApp()`) — integration tests won't see them otherwise
+- Module-scoped prom-client counters leak across tests — call `metricsRegistry.resetMetrics()` in `beforeEach` when asserting counter values
 - TS `fetch` tests use `vi.stubGlobal('fetch', mockFetch)` + `vi.useFakeTimers()` for timeout testing
 - Python `conftest.py` sets env vars BEFORE any production code import — order matters, don't rearrange
 - No coverage tooling configured — no `pytest-cov` or `@vitest/coverage-*`
@@ -225,6 +233,7 @@ Multipart routes can't use Zod validation directly. Follow the pattern in `route
 - Redis Streams (`streams/`) supersedes the arq queue (`queue/worker.py`) — both coexist in the codebase
 - Embedding task types matter: `RETRIEVAL_DOCUMENT` for storage, `RETRIEVAL_QUERY` for search — mixing them degrades retrieval quality
 - Agent tool modules must be imported in `agent/tools/__init__.py` or the `@agent.tool` decorators won't register
+- Agent tools that call `ctx.deps.db.commit()` must call `ctx.deps.db.rollback()` in their except blocks — otherwise a failed write leaves the shared session dirty and poisons subsequent tool calls
 
 ### General
 - Husky pre-commit hook runs `pnpm format` automatically — do NOT run format manually before committing

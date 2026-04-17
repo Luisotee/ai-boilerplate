@@ -15,6 +15,7 @@ import { extractDocumentData } from './handlers/document.js';
 import { sendFailureReaction } from './utils/reactions.js';
 import { stripDeviceSuffix, isGroupChat, phoneFromJid, isLid } from './utils/jid.js';
 import { shouldRespondInGroup } from './utils/message.js';
+import { messagesReceived } from './routes/metrics.js';
 
 const DEFAULT_IMAGE_PROMPT = 'Please describe and analyze this image';
 const DEFAULT_DOCUMENT_PROMPT = 'I have uploaded a document for you to analyze';
@@ -60,6 +61,7 @@ export async function initializeWhatsApp(): Promise<void> {
   const sock = makeWASocket({
     auth: state,
     logger: logger.child({ module: 'baileys' }),
+    browser: ['AI Boilerplate', 'Chrome', '131.0.0'],
   });
 
   // Connection events
@@ -180,6 +182,32 @@ export async function initializeWhatsApp(): Promise<void> {
         // Extract phone number and LID for user identity resolution
         const phone = phoneFromJid(whatsappJid) ?? undefined;
         const whatsappLid = isLid(whatsappJid) ? whatsappJid : undefined;
+
+        // Record received message metric. Keep the label set bounded — anything
+        // we don't explicitly recognize is bucketed as 'other' to avoid Prometheus
+        // cardinality creep.
+        const n = normalizedMessage;
+        const msgType = n?.audioMessage
+          ? 'audio'
+          : n?.imageMessage
+            ? 'image'
+            : n?.documentMessage
+              ? 'document'
+              : n?.stickerMessage
+                ? 'sticker'
+                : n?.locationMessage
+                  ? 'location'
+                  : n?.contactMessage || n?.contactsArrayMessage
+                    ? 'contact'
+                    : n?.reactionMessage
+                      ? 'reaction'
+                      : n?.conversation || n?.extendedTextMessage
+                        ? 'text'
+                        : 'other';
+        messagesReceived.inc({
+          type: msgType,
+          conversation_type: isGroup ? 'group' : 'private',
+        });
 
         // Get text from normalized message or transcribe audio
         let text = normalizedMessage?.conversation || normalizedMessage?.extendedTextMessage?.text;
