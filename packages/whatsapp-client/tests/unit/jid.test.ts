@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   stripDeviceSuffix,
   isGroupChat,
@@ -7,6 +7,10 @@ import {
   isLid,
   isJid,
 } from '../../src/utils/jid.js';
+
+vi.mock('../../src/services/baileys.js', () => ({
+  getBaileysSocket: vi.fn(),
+}));
 
 describe('stripDeviceSuffix', () => {
   it('should strip device suffix from JID', () => {
@@ -188,5 +192,77 @@ describe('isJid', () => {
 
   it('should return true for @ at the end', () => {
     expect(isJid('user@')).toBe(true);
+  });
+});
+
+describe('normalizeJid', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.clearAllMocks();
+  });
+
+  it('should return input unchanged when already a JID', async () => {
+    const { normalizeJid } = await import('../../src/utils/jid.js');
+    const { getBaileysSocket } = await import('../../src/services/baileys.js');
+
+    const result = await normalizeJid('5491126726818@s.whatsapp.net');
+
+    expect(result).toBe('5491126726818@s.whatsapp.net');
+    expect(getBaileysSocket).not.toHaveBeenCalled();
+  });
+
+  it('should return jid from onWhatsApp when phone exists', async () => {
+    const onWhatsApp = vi
+      .fn()
+      .mockResolvedValue([{ exists: true, jid: '5491126726818@s.whatsapp.net' }]);
+    const { getBaileysSocket } = await import('../../src/services/baileys.js');
+    vi.mocked(getBaileysSocket).mockReturnValue({ onWhatsApp } as never);
+
+    const { normalizeJid } = await import('../../src/utils/jid.js');
+    const result = await normalizeJid('5491126726818');
+
+    expect(result).toBe('5491126726818@s.whatsapp.net');
+    expect(onWhatsApp).toHaveBeenCalledWith('5491126726818');
+  });
+
+  it('should throw "not registered" when exists is false', async () => {
+    const onWhatsApp = vi.fn().mockResolvedValue([{ exists: false }]);
+    const { getBaileysSocket } = await import('../../src/services/baileys.js');
+    vi.mocked(getBaileysSocket).mockReturnValue({ onWhatsApp } as never);
+
+    const { normalizeJid } = await import('../../src/utils/jid.js');
+
+    await expect(normalizeJid('5491126726818')).rejects.toThrow(
+      /is not registered on WhatsApp/
+    );
+  });
+
+  it('should throw "not registered" when onWhatsApp returns empty array', async () => {
+    const onWhatsApp = vi.fn().mockResolvedValue([]);
+    const { getBaileysSocket } = await import('../../src/services/baileys.js');
+    vi.mocked(getBaileysSocket).mockReturnValue({ onWhatsApp } as never);
+
+    const { normalizeJid } = await import('../../src/utils/jid.js');
+
+    await expect(normalizeJid('5491126726818')).rejects.toThrow(
+      /is not registered on WhatsApp/
+    );
+  });
+
+  // Regression: Baileys onWhatsApp can return undefined (socket disconnected /
+  // request timed out). Previously this crashed with "undefined is not iterable";
+  // then the null-guard silently mapped it to "not registered", masking socket
+  // failures as invalid numbers. It must now surface as a distinct lookup error.
+  it('should throw lookup-failed error when onWhatsApp returns undefined', async () => {
+    const onWhatsApp = vi.fn().mockResolvedValue(undefined);
+    const { getBaileysSocket } = await import('../../src/services/baileys.js');
+    vi.mocked(getBaileysSocket).mockReturnValue({ onWhatsApp } as never);
+
+    const { normalizeJid } = await import('../../src/utils/jid.js');
+
+    await expect(normalizeJid('5491126726818')).rejects.toThrow(/WhatsApp lookup failed/);
+    await expect(normalizeJid('5491126726818')).rejects.not.toThrow(
+      /is not registered on WhatsApp/
+    );
   });
 });

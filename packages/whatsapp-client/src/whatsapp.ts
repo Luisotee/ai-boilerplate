@@ -183,14 +183,27 @@ export async function initializeWhatsApp(): Promise<void> {
         const phone = phoneFromJid(whatsappJid) ?? undefined;
         const whatsappLid = isLid(whatsappJid) ? whatsappJid : undefined;
 
-        // Record received message metric
-        const msgType = normalizedMessage?.audioMessage
+        // Record received message metric. Keep the label set bounded — anything
+        // we don't explicitly recognize is bucketed as 'other' to avoid Prometheus
+        // cardinality creep.
+        const n = normalizedMessage;
+        const msgType = n?.audioMessage
           ? 'audio'
-          : normalizedMessage?.imageMessage
+          : n?.imageMessage
             ? 'image'
-            : normalizedMessage?.documentMessage
+            : n?.documentMessage
               ? 'document'
-              : 'text';
+              : n?.stickerMessage
+                ? 'sticker'
+                : n?.locationMessage
+                  ? 'location'
+                  : n?.contactMessage || n?.contactsArrayMessage
+                    ? 'contact'
+                    : n?.reactionMessage
+                      ? 'reaction'
+                      : n?.conversation || n?.extendedTextMessage
+                        ? 'text'
+                        : 'other';
         messagesReceived.inc({
           type: msgType,
           conversation_type: isGroup ? 'group' : 'private',

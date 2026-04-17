@@ -1,4 +1,4 @@
-"""Tests that update_tts_settings and update_stt_settings roll back the session on failure.
+"""Tests that settings tools roll back the shared session on failure.
 
 Without the explicit rollback, a failed commit leaves SQLAlchemy's session in a dirty
 state and poisons subsequent tool calls that share the session.
@@ -6,7 +6,12 @@ state and poisons subsequent tool calls that share the session.
 
 from unittest.mock import MagicMock, patch
 
-from ai_api.agent.tools.settings import update_stt_settings, update_tts_settings
+from ai_api.agent.tools.settings import (
+    clean_user_data,
+    get_user_settings,
+    update_stt_settings,
+    update_tts_settings,
+)
 
 
 def _make_ctx():
@@ -65,3 +70,54 @@ class TestUpdateSttSettingsRollback:
 
         ctx.deps.db.rollback.assert_called_once()
         assert result.startswith("Failed to update STT settings:")
+
+
+class TestGetUserSettingsRollback:
+    async def test_rollback_called_when_helper_raises(self):
+        """get_or_create_preferences commits internally; if it raises mid-commit the
+        shared session is left dirty. The tool must roll back so sibling tool calls
+        don't inherit pending state."""
+        ctx = _make_ctx()
+
+        with patch("ai_api.agent.tools.settings.get_or_create_preferences") as mock_prefs:
+            mock_prefs.side_effect = RuntimeError("integrity error")
+            result = await get_user_settings(ctx)
+
+        ctx.deps.db.rollback.assert_called_once()
+        assert result.startswith("Failed to retrieve settings:")
+
+    async def test_rollback_not_called_on_success(self):
+        ctx = _make_ctx()
+        with (
+            patch("ai_api.agent.tools.settings.get_or_create_preferences") as mock_prefs,
+            patch("ai_api.agent.tools.settings.format_settings") as mock_fmt,
+        ):
+            mock_prefs.return_value = MagicMock()
+            mock_fmt.return_value = "settings-blob"
+            result = await get_user_settings(ctx)
+
+        ctx.deps.db.rollback.assert_not_called()
+        assert result == "settings-blob"
+
+
+class TestCleanUserDataRollback:
+    async def test_rollback_called_when_handler_raises(self):
+        """handle_clean_command commits internally after multi-table deletes; a failure
+        mid-way leaves pending deletes on the shared session."""
+        ctx = _make_ctx()
+
+        with patch("ai_api.agent.tools.settings.handle_clean_command") as mock_handle:
+            mock_handle.side_effect = RuntimeError("delete failed")
+            result = await clean_user_data(ctx, level="all")
+
+        ctx.deps.db.rollback.assert_called_once()
+        assert result.startswith("Failed to clean user data:")
+
+    async def test_rollback_not_called_on_success(self):
+        ctx = _make_ctx()
+        with patch("ai_api.agent.tools.settings.handle_clean_command") as mock_handle:
+            mock_handle.return_value = "Cleared 42 messages."
+            result = await clean_user_data(ctx, level="messages")
+
+        ctx.deps.db.rollback.assert_not_called()
+        assert result == "Cleared 42 messages."

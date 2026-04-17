@@ -2,6 +2,7 @@ import './instrument.js';
 import { Sentry } from './instrument.js';
 import crypto from 'node:crypto';
 import { config } from './config.js';
+import { logger } from './logger.js';
 import Fastify from 'fastify';
 import FastifySwagger from '@fastify/swagger';
 import FastifySwaggerUI from '@fastify/swagger-ui';
@@ -200,14 +201,18 @@ async function start() {
   app.log.info('='.repeat(60));
 }
 
-start().catch((error) => {
-  Sentry.captureException(error);
-  console.error('Failed to start server:', error);
+async function shutdownWithError(err: unknown, message: string): Promise<never> {
+  Sentry.captureException(err);
+  logger.fatal({ err }, message);
+  // Sentry transport is async; flush before exiting or the event is lost.
+  await Sentry.close(2000);
   process.exit(1);
+}
+
+start().catch((error) => {
+  void shutdownWithError(error, 'Failed to start server');
 });
 
 process.on('unhandledRejection', (reason) => {
-  Sentry.captureException(reason);
-  console.error('Unhandled rejection:', reason);
-  process.exit(1);
+  void shutdownWithError(reason, 'Unhandled rejection');
 });
