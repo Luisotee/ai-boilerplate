@@ -20,9 +20,28 @@ from ai_api.processing import (
 )
 
 
+def _make_success_page(page_number: int, markdown: str | None) -> MagicMock:
+    """Build a mock of `MarkdownPageMarkdownResultPage` (success=True)."""
+    return MagicMock(markdown=markdown, page_number=page_number, success=True)
+
+
+def _make_failed_page(page_number: int, error: str = "ocr failure") -> MagicMock:
+    """Build a mock of `MarkdownPageFailedMarkdownPage` — no `.markdown` attribute."""
+    page = MagicMock(page_number=page_number, success=False, error=error)
+    # `MarkdownPageFailedMarkdownPage` has no `markdown` field. Auto-created
+    # MagicMock attrs would lie; force AttributeError on access to match reality.
+    del page.markdown
+    return page
+
+
 def _mock_llama_client_cls(pages_text: list[str | None]) -> MagicMock:
-    """Build a fake `llama_cloud.AsyncLlamaCloud` class supporting `async with`."""
-    page_mocks = [MagicMock(markdown=t) for t in pages_text]
+    """Build a fake `llama_cloud.AsyncLlamaCloud` class — each item is one success page."""
+    page_mocks = [_make_success_page(i + 1, t) for i, t in enumerate(pages_text)]
+    return _mock_llama_client_cls_with_pages(page_mocks)
+
+
+def _mock_llama_client_cls_with_pages(page_mocks: list[MagicMock]) -> MagicMock:
+    """Build a fake `AsyncLlamaCloud` class with explicit page objects."""
     result = MagicMock()
     result.markdown.pages = page_mocks
 
@@ -30,6 +49,7 @@ def _mock_llama_client_cls(pages_text: list[str | None]) -> MagicMock:
 
     instance = MagicMock()
     instance.files.create = AsyncMock(return_value=file_obj)
+    instance.files.delete = AsyncMock(return_value=None)
     instance.parsing.parse = AsyncMock(return_value=result)
     instance.__aenter__ = AsyncMock(return_value=instance)
     instance.__aexit__ = AsyncMock(return_value=None)
@@ -135,6 +155,66 @@ class TestLlamaParseAdapter:
             pages = await _parse_pdf_with_llamaparse("fake.pdf")
         assert pages == [(1, "page 1"), (3, "page 3")]
         assert any("None markdown for 1 page" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_uses_sdk_page_number_when_sparse(self, monkeypatch):
+        """Use `page.page_number` from the SDK, not enumerate — pages may be sparse."""
+        monkeypatch.setattr(settings, "llama_cloud_api_key", "llx-test")
+        # Simulate pages 2, 5, 7 — SDK could legitimately return non-contiguous indices.
+        page_mocks = [
+            _make_success_page(2, "second"),
+            _make_success_page(5, "fifth"),
+            _make_success_page(7, "seventh"),
+        ]
+        cls = _mock_llama_client_cls_with_pages(page_mocks)
+        with _patch_llama_module(cls):
+            pages = await _parse_pdf_with_llamaparse("fake.pdf")
+        assert pages == [(2, "second"), (5, "fifth"), (7, "seventh")]
+
+    @pytest.mark.asyncio
+    async def test_skips_failed_pages_without_crashing(self, monkeypatch, caplog):
+        """MarkdownPageFailedMarkdownPage has no .markdown attr — must not AttributeError."""
+        monkeypatch.setattr(settings, "llama_cloud_api_key", "llx-test")
+        page_mocks = [
+            _make_success_page(1, "first"),
+            _make_failed_page(2, error="bad OCR"),
+            _make_success_page(3, "third"),
+        ]
+        cls = _mock_llama_client_cls_with_pages(page_mocks)
+        with _patch_llama_module(cls), caplog.at_level("WARNING", logger="ai-api"):
+            pages = await _parse_pdf_with_llamaparse("fake.pdf")
+        assert pages == [(1, "first"), (3, "third")]
+        assert any("failed page 2" in r.message for r in caplog.records)
+        assert any("bad OCR" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_deletes_uploaded_file_on_success(self, monkeypatch):
+        monkeypatch.setattr(settings, "llama_cloud_api_key", "llx-test")
+        cls = _mock_llama_client_cls(["only"])
+        with _patch_llama_module(cls):
+            await _parse_pdf_with_llamaparse("fake.pdf")
+        cls._instance.files.delete.assert_awaited_once_with("fake-file-id")
+
+    @pytest.mark.asyncio
+    async def test_deletes_uploaded_file_on_parse_error(self, monkeypatch):
+        """Even if parse fails, we must still clean up the uploaded file."""
+        monkeypatch.setattr(settings, "llama_cloud_api_key", "llx-test")
+        cls = _mock_llama_client_cls(["only"])
+        cls._instance.parsing.parse = AsyncMock(side_effect=httpx.ConnectError("boom"))
+        with _patch_llama_module(cls), pytest.raises(httpx.ConnectError):
+            await _parse_pdf_with_llamaparse("fake.pdf")
+        cls._instance.files.delete.assert_awaited_once_with("fake-file-id")
+
+    @pytest.mark.asyncio
+    async def test_delete_failure_is_logged_not_raised(self, monkeypatch, caplog):
+        """A failed cleanup must not mask the successful parse result."""
+        monkeypatch.setattr(settings, "llama_cloud_api_key", "llx-test")
+        cls = _mock_llama_client_cls(["only"])
+        cls._instance.files.delete = AsyncMock(side_effect=RuntimeError("delete failed"))
+        with _patch_llama_module(cls), caplog.at_level("WARNING", logger="ai-api"):
+            pages = await _parse_pdf_with_llamaparse("fake.pdf")
+        assert pages == [(1, "only")]
+        assert any("Failed to delete uploaded LlamaCloud file" in r.message for r in caplog.records)
 
 
 class TestDoclingAdapter:
@@ -311,6 +391,27 @@ class TestParsePdfDispatcher:
         assert metadata["parser"] == "docling"
         docling_mock.assert_awaited_once()
 
+    @pytest.mark.asyncio
+    async def test_auto_falls_back_on_llama_api_error(self, monkeypatch):
+        """APIError from the real SDK must be recoverable — locks in the import at module load."""
+        from llama_cloud import APIConnectionError
+
+        monkeypatch.setattr(settings, "pdf_parser", "auto")
+        monkeypatch.setattr(settings, "llama_cloud_api_key", "llx-test")
+        # APIConnectionError is an APIError subclass; constructs with just a request.
+        fake_req = httpx.Request("POST", "https://api.cloud.llamaindex.ai/parse")
+        llama_mock = AsyncMock(side_effect=APIConnectionError(request=fake_req))
+        docling_mock = AsyncMock(return_value=[(1, "from docling")])
+        monkeypatch.setattr(processing, "_parse_pdf_with_llamaparse", llama_mock)
+        monkeypatch.setattr(processing, "_parse_pdf_with_docling", docling_mock)
+        monkeypatch.setattr(processing, "_docling_available", lambda: True)
+
+        pages, metadata = await _parse_pdf("fake.pdf")
+
+        assert pages == [(1, "from docling")]
+        assert metadata["parser"] == "docling"
+        docling_mock.assert_awaited_once()
+
 
 class TestChunkPagesTiktoken:
     @pytest.fixture
@@ -340,6 +441,27 @@ class TestChunkPagesTiktoken:
         assert "Main Title" in chunks[0].headings
         assert "Section One" in chunks[0].headings
         assert chunks[0].page_numbers == [3]
+
+    def test_heading_regex_ignores_fenced_code(self, encoder):
+        """`#` lines inside ``` fences must not be captured as headings."""
+        md = (
+            "# Real Heading\n\n"
+            "Intro paragraph.\n\n"
+            "```python\n"
+            "# not-a-heading python comment\n"
+            "## also-not-a-heading\n"
+            "def foo():\n"
+            "    pass\n"
+            "```\n\n"
+            "## Another Real Heading\n\n"
+            "Body text."
+        )
+        chunks = _chunk_pages_tiktoken([(1, md)], max_tokens=512, encoder=encoder)
+        assert len(chunks) == 1
+        headings = chunks[0].headings
+        assert "Real Heading" in headings
+        assert "Another Real Heading" in headings
+        assert all("not-a-heading" not in h for h in headings)
 
     def test_skips_empty_pages(self, encoder):
         chunks = _chunk_pages_tiktoken(

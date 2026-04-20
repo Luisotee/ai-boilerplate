@@ -28,6 +28,16 @@ PageContent = tuple[int, str]
 # Regex for markdown headings (ATX style): `# Heading`, `## Subheading`, etc.
 _HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$", re.MULTILINE)
 
+# Regex for fenced code blocks (```lang ... ``` or ~~~ ... ~~~). Non-greedy, DOTALL
+# so a single block on one page doesn't swallow the whole page.
+_CODE_FENCE_RE = re.compile(r"^[ \t]{0,3}(```|~~~).*?\n.*?^[ \t]{0,3}\1", re.MULTILINE | re.DOTALL)
+
+
+def _strip_code_fences(md: str) -> str:
+    """Remove fenced code blocks so `# comments` inside code aren't treated as headings."""
+    return _CODE_FENCE_RE.sub("", md)
+
+
 # Errors the auto-mode dispatcher will recover from by falling back to Docling.
 # Programming errors (TypeError, AttributeError, ImportError, KeyError) propagate
 # so SDK signature drift surfaces as a real bug instead of a silent reroute.
@@ -40,7 +50,10 @@ _PARSER_RECOVERABLE_BASES: list[type[BaseException]] = [
     ValueError,
 ]
 try:
-    from llama_cloud.core.api_error import ApiError as _LlamaApiError
+    # Public re-export in llama-cloud>=2.4. Base class for APIStatusError,
+    # APIConnectionError, APITimeoutError — covers HTTP 4xx/5xx responses
+    # plus transport errors the SDK wraps.
+    from llama_cloud import APIError as _LlamaApiError
 
     _PARSER_RECOVERABLE_BASES.append(_LlamaApiError)
 except ImportError:
@@ -77,25 +90,48 @@ async def _parse_pdf_with_llamaparse(file_path: str) -> list[PageContent]:
 
     async with AsyncLlamaCloud(api_key=settings.llama_cloud_api_key) as client:
         file_obj = await client.files.create(file=Path(file_path), purpose="parse")
-        result = await client.parsing.parse(
-            file_id=file_obj.id,
-            tier=settings.llamaparse_tier,
-            version="latest",
-            expand=["markdown"],
-        )
+        try:
+            result = await client.parsing.parse(
+                file_id=file_obj.id,
+                tier=settings.llamaparse_tier,
+                version="latest",
+                expand=["markdown"],
+            )
+        finally:
+            # LlamaCloud retains uploaded files indefinitely; always clean up so
+            # a parsing loop doesn't eventually hit account storage limits.
+            try:
+                await client.files.delete(file_obj.id)
+            except Exception as delete_err:
+                logger.warning(
+                    f"Failed to delete uploaded LlamaCloud file {file_obj.id}: {delete_err}"
+                )
 
     if result.markdown is None or not result.markdown.pages:
         raise ValueError("LlamaParse returned an empty result (no markdown pages).")
 
     pages: list[PageContent] = []
     skipped_blank = 0
+    skipped_failed = 0
     for i, page in enumerate(result.markdown.pages):
-        if page.markdown is None:
+        # `MarkdownPage` is a union: success pages have `.markdown`, failed pages
+        # have `.error` and no `.markdown` attribute. Handle both safely.
+        page_no = getattr(page, "page_number", i + 1)
+        if getattr(page, "success", True) is False:
+            skipped_failed += 1
+            logger.warning(
+                f"LlamaParse failed page {page_no}: {getattr(page, 'error', 'unknown error')}"
+            )
+            continue
+        md = getattr(page, "markdown", None)
+        if md is None:
             skipped_blank += 1
             continue
-        pages.append((i + 1, page.markdown))
+        pages.append((page_no, md))
     if skipped_blank:
         logger.warning(f"LlamaParse returned None markdown for {skipped_blank} page(s); skipped.")
+    if skipped_failed:
+        logger.warning(f"LlamaParse reported {skipped_failed} failed page(s); skipped.")
     return pages
 
 
@@ -214,7 +250,7 @@ def _chunk_pages_tiktoken(
         if not md or not md.strip():
             continue
 
-        page_headings = [m.group(2).strip() for m in _HEADING_RE.finditer(md)]
+        page_headings = [m.group(2).strip() for m in _HEADING_RE.finditer(_strip_code_fences(md))]
         paragraphs = [p for p in md.split("\n\n") if p.strip()]
         buf: list[str] = []
         buf_tokens = 0
@@ -224,7 +260,9 @@ def _chunk_pages_tiktoken(
             if not buf:
                 return
             text = "\n\n".join(buf)
-            inner_headings = [m.group(2).strip() for m in _HEADING_RE.finditer(text)]
+            inner_headings = [
+                m.group(2).strip() for m in _HEADING_RE.finditer(_strip_code_fences(text))
+            ]
             chunks.append(
                 ParsedChunk(
                     text=text,
