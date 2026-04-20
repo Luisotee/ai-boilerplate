@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+import httpx
 import tiktoken
 
 from .config import settings
@@ -26,6 +27,26 @@ PageContent = tuple[int, str]
 
 # Regex for markdown headings (ATX style): `# Heading`, `## Subheading`, etc.
 _HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$", re.MULTILINE)
+
+# Errors the auto-mode dispatcher will recover from by falling back to Docling.
+# Programming errors (TypeError, AttributeError, ImportError, KeyError) propagate
+# so SDK signature drift surfaces as a real bug instead of a silent reroute.
+_PARSER_RECOVERABLE_BASES: list[type[BaseException]] = [
+    httpx.HTTPError,
+    asyncio.TimeoutError,
+    TimeoutError,
+    ConnectionError,
+    OSError,
+    ValueError,
+]
+try:
+    from llama_cloud.core.api_error import ApiError as _LlamaApiError
+
+    _PARSER_RECOVERABLE_BASES.append(_LlamaApiError)
+except ImportError:
+    pass
+
+_RECOVERABLE_PARSER_ERRORS: tuple[type[BaseException], ...] = tuple(_PARSER_RECOVERABLE_BASES)
 
 
 @dataclass
@@ -54,17 +75,28 @@ async def _parse_pdf_with_llamaparse(file_path: str) -> list[PageContent]:
             "Get a key at https://cloud.llamaindex.ai or set PDF_PARSER=docling."
         )
 
-    client = AsyncLlamaCloud(api_key=settings.llama_cloud_api_key)
+    async with AsyncLlamaCloud(api_key=settings.llama_cloud_api_key) as client:
+        file_obj = await client.files.create(file=Path(file_path), purpose="parse")
+        result = await client.parsing.parse(
+            file_id=file_obj.id,
+            tier=settings.llamaparse_tier,
+            version="latest",
+            expand=["markdown"],
+        )
 
-    file_obj = await client.files.create(file=Path(file_path), purpose="parse")
-    result = await client.parsing.parse(
-        file_id=file_obj.id,
-        tier=settings.llamaparse_tier,
-        version="latest",
-        expand=["markdown"],
-    )
+    if result.markdown is None or not result.markdown.pages:
+        raise ValueError("LlamaParse returned an empty result (no markdown pages).")
 
-    return [(i + 1, page.markdown) for i, page in enumerate(result.markdown.pages)]
+    pages: list[PageContent] = []
+    skipped_blank = 0
+    for i, page in enumerate(result.markdown.pages):
+        if page.markdown is None:
+            skipped_blank += 1
+            continue
+        pages.append((i + 1, page.markdown))
+    if skipped_blank:
+        logger.warning(f"LlamaParse returned None markdown for {skipped_blank} page(s); skipped.")
+    return pages
 
 
 async def _parse_pdf_with_docling(file_path: str) -> list[PageContent]:
@@ -81,19 +113,24 @@ async def _parse_pdf_with_docling(file_path: str) -> list[PageContent]:
     def _convert() -> list[PageContent]:
         result = DocumentConverter().convert(file_path)
         doc = result.document
-        # Render the whole document to markdown and split by page.
-        # Docling exposes per-page markdown via `export_to_markdown(page_no=i)`.
         page_count = getattr(result.input, "page_count", None) or 1
-        pages: list[PageContent] = []
-        for page_no in range(1, page_count + 1):
-            try:
-                md = doc.export_to_markdown(page_no=page_no)
-            except TypeError:
-                # Older docling versions don't accept page_no — fall back to full dump on page 1
-                md = doc.export_to_markdown()
-                pages.append((page_no, md))
-                break
-            pages.append((page_no, md))
+
+        # Probe per-page export support once. Older docling versions don't accept
+        # the page_no kwarg — degrade to whole-doc dump and warn loudly so
+        # operators know citations are now inaccurate.
+        try:
+            first = doc.export_to_markdown(page_no=1)
+        except TypeError:
+            logger.warning(
+                "Docling lacks per-page export (page_no kwarg unsupported). "
+                "Returning whole document as page 1 — citations will be inaccurate. "
+                "Upgrade docling or set PDF_PARSER=llamaparse to fix."
+            )
+            return [(1, doc.export_to_markdown())]
+
+        pages: list[PageContent] = [(1, first)]
+        for page_no in range(2, page_count + 1):
+            pages.append((page_no, doc.export_to_markdown(page_no=page_no)))
         return pages
 
     return await asyncio.wait_for(
@@ -134,15 +171,14 @@ async def _parse_pdf(file_path: str) -> tuple[list[PageContent], dict]:
     if has_key:
         try:
             return await _run_llamaparse()
-        except Exception as e:
+        except _RECOVERABLE_PARSER_ERRORS as llama_err:
             if _docling_available():
-                logger.warning(
-                    f"LlamaParse failed ({type(e).__name__}: {e}); falling back to Docling."
-                )
-                return await _run_docling()
-            logger.error(
-                f"LlamaParse failed and Docling extra is not installed: {type(e).__name__}: {e}"
-            )
+                logger.warning("LlamaParse failed; falling back to Docling.", exc_info=True)
+                try:
+                    return await _run_docling()
+                except Exception as docling_err:
+                    raise docling_err from llama_err
+            logger.error("LlamaParse failed and Docling extra is not installed.", exc_info=True)
             raise
 
     # auto + no key
@@ -162,11 +198,15 @@ def _chunk_pages_tiktoken(
     encoder: "tiktoken.Encoding",
 ) -> list[ParsedChunk]:
     """
-    Split per-page markdown into token-limited chunks.
+    Split per-page markdown into token-limited chunks via paragraph-greedy packing.
 
-    Each chunk carries its source page number and any markdown headings found
-    inside it (for citation metadata). Pages are chunked independently — we
-    don't merge across page boundaries, which keeps page_number authoritative.
+    Paragraphs (split on blank lines) are packed into chunks up to `max_tokens`.
+    Pages are chunked independently — we don't merge across page boundaries, which
+    keeps `page_number` authoritative for citations.
+
+    Oversized single paragraphs fall back to byte-level token-window splitting,
+    decoded with `errors="ignore"` so multi-byte UTF-8 characters that span a
+    BPE token boundary don't produce U+FFFD garbage in the stored text.
     """
     chunks: list[ParsedChunk] = []
 
@@ -174,35 +214,55 @@ def _chunk_pages_tiktoken(
         if not md or not md.strip():
             continue
 
-        headings = [m.group(2).strip() for m in _HEADING_RE.finditer(md)]
-        token_ids = encoder.encode(md)
+        page_headings = [m.group(2).strip() for m in _HEADING_RE.finditer(md)]
+        paragraphs = [p for p in md.split("\n\n") if p.strip()]
+        buf: list[str] = []
+        buf_tokens = 0
 
-        if len(token_ids) <= max_tokens:
+        def _flush() -> None:
+            nonlocal buf, buf_tokens
+            if not buf:
+                return
+            text = "\n\n".join(buf)
+            inner_headings = [m.group(2).strip() for m in _HEADING_RE.finditer(text)]
             chunks.append(
                 ParsedChunk(
-                    text=md,
-                    token_count=len(token_ids),
+                    text=text,
+                    token_count=buf_tokens,
                     page_numbers=[page_no],
-                    headings=headings,
+                    headings=inner_headings or page_headings[:1],
                     doc_item_count=1,
                 )
             )
-            continue
+            buf = []
+            buf_tokens = 0
 
-        # Split into windows of max_tokens; decode each window back to text.
-        for start in range(0, len(token_ids), max_tokens):
-            window = token_ids[start : start + max_tokens]
-            window_text = encoder.decode(window)
-            window_headings = [m.group(2).strip() for m in _HEADING_RE.finditer(window_text)]
-            chunks.append(
-                ParsedChunk(
-                    text=window_text,
-                    token_count=len(window),
-                    page_numbers=[page_no],
-                    headings=window_headings,
-                    doc_item_count=1,
-                )
-            )
+        for para in paragraphs:
+            tokens = encoder.encode(para)
+            if len(tokens) > max_tokens:
+                _flush()
+                # Token-window split for a single oversized paragraph. Decode via
+                # bytes so split-codepoint sequences don't surface as U+FFFD.
+                for start in range(0, len(tokens), max_tokens):
+                    window = tokens[start : start + max_tokens]
+                    text = encoder.decode_bytes(window).decode("utf-8", errors="ignore")
+                    chunks.append(
+                        ParsedChunk(
+                            text=text,
+                            token_count=len(window),
+                            page_numbers=[page_no],
+                            headings=page_headings[:1],
+                            doc_item_count=1,
+                        )
+                    )
+                continue
+
+            if buf_tokens + len(tokens) > max_tokens:
+                _flush()
+            buf.append(para)
+            buf_tokens += len(tokens)
+
+        _flush()
 
     return chunks
 
