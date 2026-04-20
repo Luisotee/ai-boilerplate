@@ -8,7 +8,7 @@ A production-ready AI agent system that brings conversational AI to WhatsApp wit
 |-------|-------------|
 | **Client** | Node.js, TypeScript, Fastify, Baileys (WhatsApp Web), Zod |
 | **API** | Python 3.11+, FastAPI, Pydantic AI, SQLAlchemy 2.0 |
-| **AI/ML** | Google Gemini (LLM, Embeddings, TTS), Groq Whisper (STT) |
+| **AI/ML** | Google Gemini (LLM, Embeddings, TTS), Groq Whisper (STT), LlamaParse (PDF parsing) |
 | **Database** | PostgreSQL 16 + pgvector (vector similarity search) |
 | **Infrastructure** | Docker Compose, Redis Streams, Background Workers |
 
@@ -21,7 +21,7 @@ A production-ready AI agent system that brings conversational AI to WhatsApp wit
 - Semantic search through past conversations using vector embeddings
 
 ### RAG Knowledge Base
-- PDF document upload with background processing (Docling)
+- PDF document upload with background processing (LlamaParse cloud API; optional local Docling fallback)
 - Semantic chunking with token-aware splitting (512 tokens/chunk)
 - Vector similarity search using pgvector (3072-dim embeddings)
 - Auto-generated citations with document name, page number, and section
@@ -122,7 +122,7 @@ packages/
 - Node.js 18+ and pnpm
 - Python 3.11+ and uv
 - Docker and Docker Compose
-- API Keys: [Google Gemini](https://aistudio.google.com/apikey), [Groq](https://console.groq.com/keys) (optional)
+- API Keys: [Google Gemini](https://aistudio.google.com/apikey), [LlamaCloud](https://cloud.llamaindex.ai) (primary PDF parser), [Groq](https://console.groq.com/keys) (optional STT)
 
 ### Setup
 
@@ -213,7 +213,10 @@ pnpm format          # Format all code
 | Variable | Description |
 |----------|-------------|
 | `GEMINI_API_KEY` | Google Gemini API key (required) |
+| `LLAMA_CLOUD_API_KEY` | LlamaCloud API key for PDF parsing via LlamaParse (optional; required when `PDF_PARSER=llamaparse` or `auto` without the `[docling]` extra) |
 | `GROQ_API_KEY` | Groq API key (optional, for STT) |
+| `PDF_PARSER` | `auto` (default), `llamaparse`, or `docling` |
+| `LLAMAPARSE_TIER` | `cost_effective` (default), `fast`, `agentic`, or `agentic_plus` |
 | `DATABASE_URL` | PostgreSQL connection string |
 | `REDIS_URL` | Redis connection string |
 | `AI_API_URL` | AI API endpoint for WhatsApp client |

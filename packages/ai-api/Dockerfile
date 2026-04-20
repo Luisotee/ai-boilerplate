@@ -6,26 +6,39 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 WORKDIR /app
 
+# Install the optional [docling] extra at build time.
+# Default: false — LlamaParse is the primary parser and doesn't need Docling.
+# Set INSTALL_DOCLING=true to bundle Docling as a local fallback.
+ARG INSTALL_DOCLING=false
+
 # Copy dependency files and source (needed for package build)
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 
-# Create virtual environment and install dependencies
-RUN uv sync --frozen --no-dev
+# Install dependencies, conditionally including the [docling] extra
+RUN if [ "$INSTALL_DOCLING" = "true" ]; then \
+      uv sync --frozen --no-dev --extra docling; \
+    else \
+      uv sync --frozen --no-dev; \
+    fi
 
 # Stage 2: Runtime
 FROM python:3.11-slim-bookworm AS runtime
 
-# Install system dependencies required by docling for PDF parsing
-# - poppler-utils: PDF rendering (pdftoppm, pdfinfo)
-# - tesseract-ocr: OCR for scanned PDFs
-# - libmagic1: File type detection
-# - ffmpeg: Audio processing for pydub (TTS/STT)
+# Re-declare the build arg so the runtime stage can reference it.
+ARG INSTALL_DOCLING=false
+
+# Install system dependencies.
+# - ffmpeg: audio processing for pydub (TTS/STT) — always needed.
+# - poppler-utils, tesseract-ocr, libmagic1: only needed by Docling fallback.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    poppler-utils \
-    tesseract-ocr \
-    libmagic1 \
-    ffmpeg \
+      ffmpeg \
+    && if [ "$INSTALL_DOCLING" = "true" ]; then \
+         apt-get install -y --no-install-recommends \
+           poppler-utils \
+           tesseract-ocr \
+           libmagic1; \
+       fi \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy uv for runtime
