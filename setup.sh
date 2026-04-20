@@ -155,6 +155,7 @@ if [ "$SKIP_ENV" = false ]; then
     POSTGRES_PASSWORD REDIS_PASSWORD GEMINI_API_KEY AI_API_KEY
     WHATSAPP_API_KEY DATABASE_URL GROQ_API_KEY LLAMA_CLOUD_API_KEY
     META_PHONE_NUMBER_ID META_ACCESS_TOKEN META_APP_SECRET META_WEBHOOK_VERIFY_TOKEN
+    STT_PROVIDER WHISPER_MODEL
   )
   MISSING_KEYS=()
   for key in "${REQUIRED_KEYS[@]}"; do
@@ -287,6 +288,7 @@ if [ "$SKIP_ENV" = false ]; then
   # ── Optional: Groq ────────────────────────────────────
   echo ""
   read -rp "  Set up Groq API for speech-to-text? (y/N): " SETUP_GROQ
+  GROQ_CONFIGURED=0
   if [[ "$SETUP_GROQ" =~ ^[Yy]$ ]]; then
     echo -e "  ${YELLOW}Get your key at: https://console.groq.com/keys${NC}"
     read -rsp "  GROQ_API_KEY: " GROQ_KEY
@@ -295,11 +297,35 @@ if [ "$SKIP_ENV" = false ]; then
     if [ -n "$GROQ_KEY" ]; then
       sed -i "s|^GROQ_API_KEY=.*|GROQ_API_KEY=$(escape_sed "$GROQ_KEY")|" "$ENV_FILE"
       print_success "Groq API configured"
+      GROQ_CONFIGURED=1
     else
-      print_warning "GROQ_API_KEY left empty — audio transcription will be unavailable"
+      print_warning "GROQ_API_KEY left empty"
     fi
   else
-    print_warning "Skipped Groq — audio transcription will be unavailable"
+    print_warning "Skipped Groq"
+  fi
+
+  # ── Optional: Self-hosted Whisper ─────────────────────
+  echo ""
+  echo "  Self-hosted Whisper runs in an opt-in Docker container (profile: whisper)."
+  echo "  Not enabling it here means zero extra images/RAM — you can turn it on later."
+  read -rp "  Enable self-hosted Whisper for speech-to-text? (y/N): " SETUP_WHISPER
+  if [[ "$SETUP_WHISPER" =~ ^[Yy]$ ]]; then
+    # Uncomment the in-cluster default. Host-side dev can switch to http://127.0.0.1:8771.
+    sed -i "s|^# WHISPER_BASE_URL=.*|WHISPER_BASE_URL=http://whisper:8000|" "$ENV_FILE"
+    print_success "Self-hosted Whisper enabled (WHISPER_BASE_URL=http://whisper:8000)"
+    print_warning "Start the container with: docker compose --profile whisper up -d"
+    if [ "$GROQ_CONFIGURED" -eq 0 ]; then
+      echo "  With only self-hosted Whisper configured, STT_PROVIDER=auto will use it."
+    else
+      echo "  With both providers set, STT_PROVIDER=auto prefers Groq and falls back to self-hosted."
+    fi
+  else
+    if [ "$GROQ_CONFIGURED" -eq 0 ]; then
+      print_warning "No STT provider configured — audio transcription will return 503 until you set GROQ_API_KEY or start the whisper profile"
+    else
+      print_warning "Skipped self-hosted Whisper — enable later by uncommenting WHISPER_BASE_URL in .env"
+    fi
   fi
 fi
 
@@ -330,6 +356,7 @@ echo -e "  ${BOLD}Option A: Docker (recommended for production)${NC}"
 echo "    docker compose up -d                               # core stack"
 echo "    docker compose --profile dev up -d                 # + Adminer (DB GUI)"
 echo "    docker compose --profile cloud up -d               # + WhatsApp Cloud API"
+echo "    docker compose --profile whisper up -d             # + self-hosted Whisper (STT)"
 echo "    docker compose --profile dev --profile cloud up -d # everything"
 echo ""
 echo -e "  ${BOLD}Option B: Local development${NC}"

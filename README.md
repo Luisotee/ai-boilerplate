@@ -140,10 +140,23 @@ The script checks prerequisites, creates `.env` from the template (auto-generati
 docker compose up -d                                    # core: postgres, redis, api, worker, whatsapp
 docker compose --profile dev up -d                      # + Adminer (DB GUI on :8080)
 docker compose --profile cloud up -d                    # + WhatsApp Cloud API (port 3002)
+docker compose --profile whisper up -d                  # + self-hosted Whisper (port 8771)
 docker compose --profile dev --profile cloud up -d      # everything
 ```
 
-Profiles are opt-in: without `--profile`, Adminer and the Cloud API client stay stopped. Infrastructure ports (`5432`, `6379`, `8080`) bind to `127.0.0.1` only — application services (`8000`, `3001`, `3002`) remain on all interfaces so they can be reached from host tooling and the WhatsApp client.
+Profiles are opt-in: without `--profile`, Adminer, the Cloud API client, and the self-hosted Whisper server stay stopped. Infrastructure ports (`5432`, `6379`, `8080`, `8771`) bind to `127.0.0.1` only — application services (`8000`, `3001`, `3002`) remain on all interfaces so they can be reached from host tooling and the WhatsApp client.
+
+### Self-hosted STT (optional)
+
+Groq Whisper is the default cloud STT. If you prefer to run Whisper locally (privacy, cost, offline), start the `whisper` profile — it launches `ghcr.io/speaches-ai/speaches:latest-cpu`, exposing an OpenAI-compatible `POST /v1/audio/transcriptions` at `http://whisper:8000` inside the Docker network (and `http://127.0.0.1:8771` from the host). Then in `.env` set:
+
+```
+STT_PROVIDER=whisper                         # or "auto" to prefer Groq with self-hosted fallback
+WHISPER_BASE_URL=http://whisper:8000
+WHISPER_MODEL=Systran/faster-distil-whisper-large-v3
+```
+
+The first transcription request lazy-downloads the model (~1–2 minutes for `distil-large-v3`). `WHISPER_BASE_URL` points at any OpenAI-compatible Whisper server, so you can swap speaches for another image if you prefer.
 
 ### Run locally (no Docker for app services)
 

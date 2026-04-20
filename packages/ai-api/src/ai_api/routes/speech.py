@@ -1,5 +1,3 @@
-from io import BytesIO
-
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
 from sqlalchemy.orm import Session
 from starlette.requests import Request
@@ -9,7 +7,11 @@ from ..database import get_db, get_user_preferences
 from ..deps import limiter
 from ..logger import logger
 from ..schemas import TranscribeResponse, TTSRequest
-from ..transcription import create_groq_client, transcribe_audio, validate_audio_file
+from ..transcription import (
+    SttNotConfiguredError,
+    transcribe_audio_dispatcher,
+    validate_audio_file,
+)
 from ..tts import (
     create_genai_client,
     get_audio_mimetype,
@@ -88,22 +90,21 @@ async def transcribe_audio_endpoint(
                 effective_language = prefs.stt_language
                 logger.info(f"Using STT language from preferences: {effective_language}")
 
-        # Step 3: Create Groq client
-        groq_client = create_groq_client(settings.groq_api_key)
-        if not groq_client:
+        # Step 3: Dispatch to the configured STT backend (Groq / self-hosted / auto).
+        try:
+            transcription_text, transcription_error = await transcribe_audio_dispatcher(
+                audio_content,
+                file.filename or f"audio.{file_format}",
+                language=effective_language,
+            )
+        except SttNotConfiguredError as e:
+            logger.warning(f"STT not configured: {e}")
             raise HTTPException(
                 status_code=503,
-                detail="Speech-to-text service not configured. Please set GROQ_API_KEY environment variable.",
+                detail=(
+                    "Speech-to-text service not configured. Set GROQ_API_KEY or WHISPER_BASE_URL."
+                ),
             )
-
-        # Step 4: Transcribe audio
-        audio_file_obj = BytesIO(audio_content)
-        transcription_text, transcription_error = await transcribe_audio(
-            groq_client,
-            audio_file_obj,
-            file.filename or f"audio.{file_format}",
-            language=effective_language,
-        )
 
         if transcription_error:
             raise HTTPException(status_code=500, detail=transcription_error)

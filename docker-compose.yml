@@ -202,6 +202,51 @@ services:
           memory: 512M
           cpus: "0.5"
 
+  # Self-hosted Whisper (OpenAI-compatible STT). Opt-in:
+  #   docker compose --profile whisper up -d
+  # Point the AI API at it by setting WHISPER_BASE_URL=http://whisper:8000 in .env.
+  # Switch to `:latest-cuda` + uncomment the deploy.reservations block for GPU.
+  whisper:
+    image: ghcr.io/speaches-ai/speaches:latest-cpu
+    container_name: aiagent-whisper
+    restart: unless-stopped
+    profiles: ["whisper"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    ports:
+      - "127.0.0.1:8771:8000"
+    volumes:
+      - whisper-cache:/home/ubuntu/.cache/huggingface/hub
+    environment:
+      UVICORN_HOST: 0.0.0.0
+      UVICORN_PORT: 8000
+      LOG_LEVEL: info
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      # First request lazy-loads the model (~1 GB for distil-large-v3) — give
+      # the container enough time to finish the download on a cold start.
+      start_period: 120s
+      retries: 5
+    networks:
+      - aiagent-network
+    deploy:
+      resources:
+        limits:
+          memory: 3G
+          cpus: "2.0"
+      # GPU (uncomment and switch image tag to `:latest-cuda`):
+      # resources:
+      #   reservations:
+      #     devices:
+      #       - driver: nvidia
+      #         count: 1
+      #         capabilities: [gpu]
+
   whatsapp-cloud:
     build:
       context: .
@@ -242,6 +287,7 @@ volumes:
   redis-data:
   knowledge-base-data:
   whatsapp-session:
+  whisper-cache:
 
 networks:
   aiagent-network:
