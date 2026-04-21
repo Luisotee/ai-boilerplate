@@ -41,7 +41,7 @@ AUDIO_MIME_TYPES = {
 # from Groq to self-hosted. Mirrors `_RECOVERABLE_PARSER_ERRORS` in processing.py.
 # Programming errors (TypeError, AttributeError, ImportError) are intentionally
 # NOT included so SDK signature drift surfaces as a real bug.
-_RECOVERABLE_STT_ERRORS: tuple[type[BaseException], ...] = (
+RECOVERABLE_STT_ERRORS: tuple[type[BaseException], ...] = (
     httpx.HTTPError,
     httpx.TimeoutException,
     ConnectionError,
@@ -201,7 +201,7 @@ async def transcribe_audio(
         logger.info(f"Transcription successful ({len(transcription_text)} characters)")
         return transcription_text, None
 
-    except _RECOVERABLE_STT_ERRORS:
+    except RECOVERABLE_STT_ERRORS:
         # Let the dispatcher decide whether to fall back — don't swallow here.
         raise
     except Exception as e:
@@ -232,7 +232,7 @@ async def transcribe_audio_via_whisper(
         Tuple of (transcription_text, error_message).
 
     Raises:
-        `_RECOVERABLE_STT_ERRORS`: surfaced to the dispatcher so explicit-mode
+        `RECOVERABLE_STT_ERRORS`: surfaced to the dispatcher so explicit-mode
         callers see real errors and auto-mode can stop falling back further.
     """
     url = f"{base_url.rstrip('/')}/v1/audio/transcriptions"
@@ -260,7 +260,7 @@ async def transcribe_audio_via_whisper(
             resp = await client.post(url, files=files, data=data)
             resp.raise_for_status()
             payload = resp.json()
-    except _RECOVERABLE_STT_ERRORS:
+    except RECOVERABLE_STT_ERRORS:
         raise
     except Exception as e:
         error_msg = f"Self-hosted Whisper request failed: {str(e)}"
@@ -290,7 +290,7 @@ async def transcribe_audio_dispatcher(
     Decision tree:
       - "groq":    require GROQ_API_KEY; call Groq only (no fallback).
       - "whisper": require WHISPER_BASE_URL; call self-hosted only (no fallback).
-      - "auto":    try Groq if key is set; on `_RECOVERABLE_STT_ERRORS` fall
+      - "auto":    try Groq if key is set; on `RECOVERABLE_STT_ERRORS` fall
                    back to self-hosted if `WHISPER_BASE_URL` is set. Otherwise
                    use self-hosted directly. Raises SttNotConfiguredError if
                    neither is available.
@@ -316,7 +316,11 @@ async def transcribe_audio_dispatcher(
         return await transcribe_audio(client, BytesIO(audio_bytes), filename, language=language)
 
     async def _via_whisper() -> tuple[str | None, str | None]:
-        assert settings.whisper_base_url is not None  # narrowed by caller
+        if settings.whisper_base_url is None:
+            # Should be unreachable — callers must check has_whisper first.
+            raise SttNotConfiguredError(
+                "WHISPER_BASE_URL is not set; cannot call self-hosted Whisper."
+            )
         return await transcribe_audio_via_whisper(
             settings.whisper_base_url, audio_bytes, filename, language=language
         )
@@ -335,7 +339,7 @@ async def transcribe_audio_dispatcher(
     if has_groq:
         try:
             return await _via_groq()
-        except _RECOVERABLE_STT_ERRORS:
+        except RECOVERABLE_STT_ERRORS:
             if has_whisper:
                 logger.warning(
                     "Groq STT failed; falling back to self-hosted whisper.", exc_info=True

@@ -8,6 +8,7 @@ from ..deps import limiter
 from ..logger import logger
 from ..schemas import TranscribeResponse, TTSRequest
 from ..transcription import (
+    RECOVERABLE_STT_ERRORS,
     SttNotConfiguredError,
     transcribe_audio_dispatcher,
     validate_audio_file,
@@ -104,6 +105,12 @@ async def transcribe_audio_endpoint(
                 detail=(
                     "Speech-to-text service not configured. Set GROQ_API_KEY or WHISPER_BASE_URL."
                 ),
+            )
+        except RECOVERABLE_STT_ERRORS as e:
+            logger.error(f"STT upstream error: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=502,
+                detail=f"Transcription upstream error: {e}",
             )
 
         if transcription_error:
