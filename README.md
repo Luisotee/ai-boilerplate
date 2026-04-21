@@ -8,7 +8,7 @@ A production-ready AI agent system that brings conversational AI to WhatsApp wit
 |-------|-------------|
 | **Client** | Node.js, TypeScript, Fastify, Baileys (WhatsApp Web), Zod |
 | **API** | Python 3.11+, FastAPI, Pydantic AI, SQLAlchemy 2.0 |
-| **AI/ML** | Google Gemini (LLM, Embeddings, TTS), Groq Whisper (STT), LlamaParse (PDF parsing) |
+| **AI/ML** | Google Gemini (LLM, Embeddings, TTS), Groq Whisper or self-hosted Whisper (STT), LlamaParse (PDF parsing) |
 | **Database** | PostgreSQL 16 + pgvector (vector similarity search) |
 | **Infrastructure** | Docker Compose, Redis Streams, Background Workers |
 

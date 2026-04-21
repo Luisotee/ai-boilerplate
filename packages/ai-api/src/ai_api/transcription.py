@@ -39,15 +39,24 @@ AUDIO_MIME_TYPES = {
 
 # Errors the auto-mode dispatcher treats as transient — they trigger fallback
 # from Groq to self-hosted. Mirrors `_RECOVERABLE_PARSER_ERRORS` in processing.py.
-# Programming errors (TypeError, AttributeError, ImportError) are intentionally
-# NOT included so SDK signature drift surfaces as a real bug.
+#
+# Deliberately excluded:
+# - Programming errors (TypeError, AttributeError, ImportError) so SDK signature
+#   drift surfaces as a real bug instead of silently rerouting.
+# - groq.APIStatusError as a base — it also covers 4xx client errors (e.g.
+#   BadRequestError for invalid audio), which would pointlessly cascade to the
+#   self-hosted backend. Only its retryable subclasses are listed.
+#
+# Note: httpx.HTTPError covers httpx.TimeoutException and httpx.HTTPStatusError
+# via the standard httpx exception hierarchy.
 RECOVERABLE_STT_ERRORS: tuple[type[BaseException], ...] = (
     httpx.HTTPError,
-    httpx.TimeoutException,
     ConnectionError,
     TimeoutError,
     groq.APIConnectionError,
-    groq.APIStatusError,
+    groq.APITimeoutError,
+    groq.InternalServerError,
+    groq.RateLimitError,
 )
 
 

@@ -6,6 +6,7 @@ descriptive 502 Bad Gateway, rather than being swallowed by the generic
 catch-all 500 handler.
 """
 
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -43,11 +44,12 @@ def _cleanup_overrides():
 @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
 @patch("ai_api.main.cleanup_expired_documents")
 async def test_transcribe_maps_recoverable_upstream_error_to_502(
-    mock_cleanup, mock_redis, mock_init_db, monkeypatch
+    mock_cleanup, mock_redis, mock_init_db, monkeypatch, caplog
 ):
     """A recoverable upstream error (e.g. httpx.ConnectError) from the
-    dispatcher must surface as 502 with the original error message in detail,
-    not the generic 500 'Internal server error' from the catch-all."""
+    dispatcher must surface as 502 with a generic, stable detail — the raw
+    SDK error must still be captured in logs for operators, just not echoed
+    back to API clients."""
     app = _get_app_with_db_override(_make_mock_db())
 
     async def _raise_upstream(*_args, **_kwargs):
@@ -59,14 +61,21 @@ async def test_transcribe_maps_recoverable_upstream_error_to_502(
 
     transport = ASGITransport(app=app)
     try:
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.post(
-                "/transcribe",
-                headers=AUTH_HEADERS,
-                files={"file": ("clip.mp3", b"fake-audio-bytes", "audio/mpeg")},
-            )
+        with caplog.at_level(logging.ERROR, logger="ai-api"):
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                response = await client.post(
+                    "/transcribe",
+                    headers=AUTH_HEADERS,
+                    files={"file": ("clip.mp3", b"fake-audio-bytes", "audio/mpeg")},
+                )
     finally:
         _cleanup_overrides()
 
     assert response.status_code == 502, response.text
-    assert "upstream down" in response.json()["detail"]
+    assert (
+        response.json()["detail"]
+        == "Transcription service is temporarily unavailable. Please try again."
+    )
+    assert any("upstream down" in r.message for r in caplog.records), (
+        "raw upstream error must still be logged for operators"
+    )

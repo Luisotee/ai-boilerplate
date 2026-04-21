@@ -106,6 +106,44 @@ class TestDispatcherAutoMode:
         groq_mock.assert_awaited_once()
         whisper_mock.assert_not_awaited()
 
+    async def test_auto_does_not_fall_back_on_groq_4xx(self, monkeypatch):
+        """A client error from Groq (e.g. BadRequestError for invalid audio)
+        must NOT trigger fallback — the same audio would fail at self-hosted
+        too, wasting time and cost. Only transient/server errors cascade."""
+        monkeypatch.setattr(settings, "stt_provider", "auto")
+        monkeypatch.setattr(settings, "groq_api_key", "gsk-test")
+        monkeypatch.setattr(settings, "whisper_base_url", "http://whisper:8000")
+
+        request = httpx.Request("POST", "http://groq.test")
+        response = httpx.Response(400, request=request)
+        err = groq.BadRequestError("invalid audio", response=response, body=None)
+        groq_mock, _ = _mock_groq_path(monkeypatch, side_effect=err)
+        whisper_mock = _mock_whisper_path(monkeypatch)
+
+        with pytest.raises(groq.BadRequestError):
+            await transcribe_audio_dispatcher(AUDIO, FILENAME)
+        groq_mock.assert_awaited_once()
+        whisper_mock.assert_not_awaited()
+
+    async def test_auto_falls_back_on_groq_5xx(self, monkeypatch):
+        """A 5xx from Groq is transient — the dispatcher should still fall
+        back to self-hosted so short-lived Groq outages don't break STT."""
+        monkeypatch.setattr(settings, "stt_provider", "auto")
+        monkeypatch.setattr(settings, "groq_api_key", "gsk-test")
+        monkeypatch.setattr(settings, "whisper_base_url", "http://whisper:8000")
+
+        request = httpx.Request("POST", "http://groq.test")
+        response = httpx.Response(503, request=request)
+        err = groq.InternalServerError("groq is down", response=response, body=None)
+        groq_mock, _ = _mock_groq_path(monkeypatch, side_effect=err)
+        whisper_mock = _mock_whisper_path(monkeypatch, text="fallback text")
+
+        text, error = await transcribe_audio_dispatcher(AUDIO, FILENAME)
+
+        assert (text, error) == ("fallback text", None)
+        groq_mock.assert_awaited_once()
+        whisper_mock.assert_awaited_once()
+
     async def test_auto_raises_when_nothing_configured(self, monkeypatch):
         monkeypatch.setattr(settings, "stt_provider", "auto")
         monkeypatch.setattr(settings, "groq_api_key", None)

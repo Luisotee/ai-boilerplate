@@ -219,6 +219,8 @@ services:
     ports:
       - "127.0.0.1:8771:8000"
     volumes:
+      # speaches runs as non-root `ubuntu` with $HOME=/home/ubuntu — this
+      # mount target must match or model downloads won't persist across restarts.
       - whisper-cache:/home/ubuntu/.cache/huggingface/hub
     environment:
       UVICORN_HOST: 0.0.0.0

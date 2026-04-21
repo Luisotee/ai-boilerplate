@@ -102,15 +102,13 @@ async def transcribe_audio_endpoint(
             logger.warning(f"STT not configured: {e}")
             raise HTTPException(
                 status_code=503,
-                detail=(
-                    "Speech-to-text service not configured. Set GROQ_API_KEY or WHISPER_BASE_URL."
-                ),
+                detail=f"Speech-to-text not configured: {e}",
             )
         except RECOVERABLE_STT_ERRORS as e:
             logger.error(f"STT upstream error: {e}", exc_info=True)
             raise HTTPException(
                 status_code=502,
-                detail=f"Transcription upstream error: {e}",
+                detail="Transcription service is temporarily unavailable. Please try again.",
             )
 
         if transcription_error:
