@@ -11,11 +11,11 @@ The public dispatcher `transcribe_audio_dispatcher` picks a backend based on
 """
 
 from io import BytesIO
-from typing import BinaryIO
+from typing import Any, BinaryIO
 
 import groq
 import httpx
-from groq import Groq
+from groq import AsyncGroq
 
 from .config import settings
 from .logger import logger
@@ -127,9 +127,9 @@ def validate_audio_file(
     return True, None, file_format
 
 
-def create_groq_client(api_key: str | None) -> Groq | None:
+def create_groq_client(api_key: str | None) -> AsyncGroq | None:
     """
-    Create Groq client from API key.
+    Create an AsyncGroq client from an API key.
 
     Factory function for initializing the service with proper error handling.
     Follows the same pattern as create_embedding_service() from embeddings.py.
@@ -138,23 +138,40 @@ def create_groq_client(api_key: str | None) -> Groq | None:
         api_key: Groq API key
 
     Returns:
-        Groq client instance or None if API key not provided
+        AsyncGroq client instance or None if API key not provided
     """
     if not api_key:
         logger.warning("GROQ_API_KEY not set - speech-to-text will be disabled")
         return None
 
     try:
-        client = Groq(api_key=api_key)
-        logger.info(f"Groq client initialized (model: {settings.stt_model})")
+        client = AsyncGroq(api_key=api_key)
+        logger.info(f"Groq client initialized (model: {settings.groq_stt_model})")
         return client
     except Exception as e:
         logger.error(f"Failed to create Groq client: {str(e)}", exc_info=True)
         return None
 
 
+# Process-wide cache for the AsyncGroq client. Rebuilt only when the configured
+# API key changes, so tests that `monkeypatch.setattr(settings, "groq_api_key", ...)`
+# still see a fresh client without needing a conftest fixture.
+_MISSING: Any = object()
+_cached_async_groq: AsyncGroq | None = None
+_cached_async_groq_key: Any = _MISSING
+
+
+def get_async_groq_client() -> AsyncGroq | None:
+    """Return a process-wide AsyncGroq client, rebuilt only when the key changes."""
+    global _cached_async_groq, _cached_async_groq_key
+    if settings.groq_api_key != _cached_async_groq_key:
+        _cached_async_groq = create_groq_client(settings.groq_api_key)
+        _cached_async_groq_key = settings.groq_api_key
+    return _cached_async_groq
+
+
 async def transcribe_audio(
-    client: Groq, audio_file: BinaryIO, filename: str, language: str | None = None
+    client: AsyncGroq, audio_file: BinaryIO, filename: str, language: str | None = None
 ) -> tuple[str | None, str | None]:
     """
     Transcribe audio file using Groq's Whisper API.
@@ -181,7 +198,7 @@ async def transcribe_audio(
         # Build parameters
         params = {
             "file": (filename, audio_content),
-            "model": settings.stt_model,
+            "model": settings.groq_stt_model,
             "response_format": "json",  # Simple JSON with just text
             "temperature": 0.0,  # Deterministic output
         }
@@ -193,9 +210,9 @@ async def transcribe_audio(
 
         # Call Groq Whisper API
         logger.info(
-            f"Transcribing audio with {settings.stt_model} (size: {len(audio_content)} bytes)"
+            f"Transcribing audio with {settings.groq_stt_model} (size: {len(audio_content)} bytes)"
         )
-        transcription = client.audio.transcriptions.create(**params)
+        transcription = await client.audio.transcriptions.create(**params)
 
         # Extract text from response
         transcription_text = transcription.text.strip()
@@ -269,6 +286,19 @@ async def transcribe_audio_via_whisper(
             resp = await client.post(url, files=files, data=data)
             resp.raise_for_status()
             payload = resp.json()
+    except httpx.HTTPStatusError as e:
+        # 4xx is a client-side problem (bad audio, wrong model) — don't cascade
+        # to the dispatcher as transient, or the route will mislabel it as a
+        # 502 "temporarily unavailable". 5xx falls through to RECOVERABLE_STT_ERRORS
+        # so transient server failures still surface as 502.
+        if 400 <= e.response.status_code < 500:
+            reason = e.response.reason_phrase or ""
+            error_msg = (
+                f"Self-hosted Whisper rejected request ({e.response.status_code} {reason})".rstrip()
+            )
+            logger.warning(error_msg, exc_info=True)
+            return None, error_msg
+        raise
     except RECOVERABLE_STT_ERRORS:
         raise
     except Exception as e:
@@ -314,7 +344,7 @@ async def transcribe_audio_dispatcher(
     has_whisper = bool(settings.whisper_base_url)
 
     async def _via_groq() -> tuple[str | None, str | None]:
-        client = create_groq_client(settings.groq_api_key)
+        client = get_async_groq_client()
         if client is None:
             # Factory logged the reason. Treat as a hard config failure so
             # auto-mode doesn't loop trying to re-create a client that can't

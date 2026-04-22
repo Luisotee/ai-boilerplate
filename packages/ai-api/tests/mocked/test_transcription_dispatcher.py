@@ -20,10 +20,10 @@ FILENAME = "clip.mp3"
 
 
 def _mock_groq_path(monkeypatch, *, text="groq result", error=None, side_effect=None):
-    """Stub `create_groq_client` + `transcribe_audio` so the Groq path is observable."""
+    """Stub `get_async_groq_client` + `transcribe_audio` so the Groq path is observable."""
     client_sentinel = MagicMock(name="groq-client")
     monkeypatch.setattr(
-        transcription, "create_groq_client", MagicMock(return_value=client_sentinel)
+        transcription, "get_async_groq_client", MagicMock(return_value=client_sentinel)
     )
     groq_mock = (
         AsyncMock(side_effect=side_effect) if side_effect else AsyncMock(return_value=(text, error))
@@ -61,14 +61,14 @@ class TestDispatcherAutoMode:
         monkeypatch.setattr(settings, "groq_api_key", None)
         monkeypatch.setattr(settings, "whisper_base_url", "http://whisper:8000")
 
-        groq_create = MagicMock(name="groq-create-should-not-run")
-        monkeypatch.setattr(transcription, "create_groq_client", groq_create)
+        groq_factory = MagicMock(name="groq-factory-should-not-run")
+        monkeypatch.setattr(transcription, "get_async_groq_client", groq_factory)
         whisper_mock = _mock_whisper_path(monkeypatch, text="from whisper")
 
         text, error = await transcribe_audio_dispatcher(AUDIO, FILENAME)
 
         assert (text, error) == ("from whisper", None)
-        groq_create.assert_not_called()
+        groq_factory.assert_not_called()
         whisper_mock.assert_awaited_once()
 
     async def test_auto_falls_back_to_whisper_on_recoverable_groq_error(self, monkeypatch, caplog):
@@ -201,13 +201,13 @@ class TestDispatcherExplicitModes:
 
         err = httpx.ConnectError("whisper unreachable")
         whisper_mock = _mock_whisper_path(monkeypatch, side_effect=err)
-        groq_create = MagicMock(name="groq-create-should-not-run")
-        monkeypatch.setattr(transcription, "create_groq_client", groq_create)
+        groq_factory = MagicMock(name="groq-factory-should-not-run")
+        monkeypatch.setattr(transcription, "get_async_groq_client", groq_factory)
 
         with pytest.raises(httpx.ConnectError):
             await transcribe_audio_dispatcher(AUDIO, FILENAME)
         whisper_mock.assert_awaited_once()
-        groq_create.assert_not_called()
+        groq_factory.assert_not_called()
 
 
 class TestWhisperAdapter:
@@ -276,3 +276,19 @@ class TestWhisperAdapter:
 
         with pytest.raises(httpx.HTTPStatusError):
             await transcribe_audio_via_whisper("http://whisper:8000", AUDIO, FILENAME)
+
+    async def test_returns_error_tuple_on_4xx(self, monkeypatch):
+        """4xx from self-hosted (e.g. unsupported audio) must not cascade as
+        transient — it belongs as (None, error_msg) so the route doesn't
+        mislabel a client-side error as a 502 'temporarily unavailable'."""
+        transport = httpx.MockTransport(lambda _req: httpx.Response(400, text="unsupported format"))
+        real_cls = httpx.AsyncClient
+        monkeypatch.setattr(
+            httpx,
+            "AsyncClient",
+            lambda **kw: real_cls(transport=transport, **kw),
+        )
+
+        text, error = await transcribe_audio_via_whisper("http://whisper:8000", AUDIO, FILENAME)
+        assert text is None
+        assert error and "400" in error

@@ -121,7 +121,8 @@ class Settings(BaseSettings):
     #   groq    - always use Groq (no fallback)
     #   whisper - always use self-hosted Whisper (no fallback)
     stt_provider: Literal["auto", "groq", "whisper"] = "auto"
-    stt_model: str = "whisper-large-v3"
+    # Groq-specific Whisper model. Paired with `whisper_model` (self-hosted) for symmetry.
+    groq_stt_model: str = "whisper-large-v3"
     stt_max_file_size_mb: int = 25
     stt_supported_formats: str = "mp3,mp4,mpeg,mpga,m4a,wav,webm,ogg,flac"
 
