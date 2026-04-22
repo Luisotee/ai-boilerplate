@@ -130,14 +130,16 @@ export async function handleTextMessage(
       }
     } catch (burstErr) {
       if (sentCount === 0) throw burstErr;
+      // Partial delivery preferred over an error reaction: user already has content.
       logger.warn(
         { error: burstErr, whatsappJid, sentCount, totalChunks: chunks.length },
         'Burst send failed mid-stream; partial response delivered'
       );
     }
-    logger.info(
+    const partial = sentCount < chunks.length;
+    logger[partial ? 'warn' : 'info'](
       { to: whatsappJid, responseLength: response.length, chunkCount: chunks.length, sentCount },
-      'Sent AI response'
+      partial ? 'Partially sent AI response' : 'Sent AI response'
     );
 
     // Check if TTS is enabled and send voice message

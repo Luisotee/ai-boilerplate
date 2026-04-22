@@ -25,6 +25,15 @@ vi.mock('../../src/api-client.js', () => ({
   textToSpeech: vi.fn(),
 }));
 
+vi.mock('../../src/logger.js', () => ({
+  logger: {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+  },
+}));
+
 vi.mock('../../src/utils/message-split.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/utils/message-split.js')>();
   return {
@@ -36,9 +45,12 @@ vi.mock('../../src/utils/message-split.js', async (importOriginal) => {
 import { handleTextMessage } from '../../src/handlers/text.js';
 import { sendMessageToAI } from '../../src/api-client.js';
 import { sleep } from '../../src/utils/message-split.js';
+import { logger } from '../../src/logger.js';
 
 const mockSendMessageToAI = sendMessageToAI as ReturnType<typeof vi.fn>;
 const mockSleep = sleep as ReturnType<typeof vi.fn>;
+const mockLoggerWarn = logger.warn as unknown as ReturnType<typeof vi.fn>;
+const mockLoggerInfo = logger.info as unknown as ReturnType<typeof vi.fn>;
 
 describe('handleTextMessage — burst sending', () => {
   beforeEach(() => {
@@ -180,5 +192,48 @@ describe('handleTextMessage — burst sending', () => {
       ([, payload]) => 'text' in (payload as { text?: string })
     );
     expect(textCalls).toHaveLength(0);
+  });
+
+  it('delivers partial burst, swallows mid-stream send error, and logs warn (not info)', async () => {
+    const sock = makeMockSocket();
+    sock.sendMessage
+      .mockResolvedValueOnce({ key: { id: 'SENT_1' } })
+      .mockRejectedValueOnce(new Error('send broke'));
+    const msg = makeTextMsg('hey');
+    mockSendMessageToAI.mockResolvedValueOnce('first\n---\nsecond\n---\nthird');
+
+    await handleTextMessage(sock as never, msg as never, 'hey');
+
+    const textCalls = sock.sendMessage.mock.calls.filter(
+      ([, payload]) => 'text' in (payload as { text?: string })
+    );
+    // 1 delivered, 1 attempted-and-failed; we never try the 3rd
+    expect(textCalls).toHaveLength(2);
+    expect((textCalls[0][1] as { text: string }).text).toBe('first');
+    expect((textCalls[1][1] as { text: string }).text).toBe('second');
+
+    // No error reaction was sent (outer catch should not have fired)
+    const errorReplies = sock.sendMessage.mock.calls.filter(([, payload]) => {
+      const text = (payload as { text?: string }).text;
+      return typeof text === 'string' && text.startsWith('Sorry, I encountered an error');
+    });
+    expect(errorReplies).toHaveLength(0);
+
+    // Both the mid-stream warn and the summary warn fired; no success info log.
+    const burstWarn = mockLoggerWarn.mock.calls.find(
+      ([, message]) => message === 'Burst send failed mid-stream; partial response delivered'
+    );
+    expect(burstWarn).toBeDefined();
+    const partialSummary = mockLoggerWarn.mock.calls.find(
+      ([fields, message]) =>
+        message === 'Partially sent AI response' &&
+        (fields as { sentCount: number }).sentCount === 1 &&
+        (fields as { chunkCount: number }).chunkCount === 3
+    );
+    expect(partialSummary).toBeDefined();
+    const successInfo = mockLoggerInfo.mock.calls.find(
+      ([, message]) => message === 'Sent AI response'
+    );
+    expect(successInfo).toBeUndefined();
   });
 });

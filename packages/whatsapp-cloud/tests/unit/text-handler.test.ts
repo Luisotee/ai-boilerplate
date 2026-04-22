@@ -40,14 +40,26 @@ vi.mock('../../src/utils/message-split.js', async (importOriginal) => {
   };
 });
 
+vi.mock('../../src/logger.js', () => ({
+  logger: {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+  },
+}));
+
 import { handleTextMessage } from '../../src/handlers/text.js';
 import { sendMessageToAI } from '../../src/api-client.js';
 import * as graphApi from '../../src/services/graph-api.js';
 import { sleep } from '../../src/utils/message-split.js';
+import { logger } from '../../src/logger.js';
 
 const mockSendMessageToAI = sendMessageToAI as ReturnType<typeof vi.fn>;
 const mockSendText = graphApi.sendText as ReturnType<typeof vi.fn>;
 const mockTyping = graphApi.sendTypingIndicator as ReturnType<typeof vi.fn>;
+const mockLoggerWarn = logger.warn as unknown as ReturnType<typeof vi.fn>;
+const mockLoggerInfo = logger.info as unknown as ReturnType<typeof vi.fn>;
 const mockReaction = graphApi.sendReaction as ReturnType<typeof vi.fn>;
 const mockSleep = sleep as ReturnType<typeof vi.fn>;
 
@@ -174,5 +186,38 @@ describe('handleTextMessage (Cloud) — burst sending', () => {
 
     expect(mockSendText).toHaveBeenCalledTimes(2);
     expect(mockReaction).not.toHaveBeenCalled();
+  });
+
+  it('delivers partial burst, swallows mid-stream send error, and logs warn (not info)', async () => {
+    mockSendText
+      .mockResolvedValueOnce('wamid.sent.1')
+      .mockRejectedValueOnce(new Error('send broke'));
+    mockSendMessageToAI.mockResolvedValueOnce('first\n---\nsecond\n---\nthird');
+
+    await handleTextMessage('16505551234', 'wamid.abc', 'hi', 'Test User');
+
+    // 1 delivered, 1 attempted-and-failed; we never try the 3rd
+    expect(mockSendText).toHaveBeenCalledTimes(2);
+    expect(mockSendText.mock.calls[0][1]).toBe('first');
+    expect(mockSendText.mock.calls[1][1]).toBe('second');
+
+    // No failure reaction fired (outer catch should not have triggered).
+    expect(mockReaction).not.toHaveBeenCalled();
+
+    const burstWarn = mockLoggerWarn.mock.calls.find(
+      ([, message]) => message === 'Burst send failed mid-stream; partial response delivered'
+    );
+    expect(burstWarn).toBeDefined();
+    const partialSummary = mockLoggerWarn.mock.calls.find(
+      ([fields, message]) =>
+        message === 'Partially sent AI response' &&
+        (fields as { sentCount: number }).sentCount === 1 &&
+        (fields as { chunkCount: number }).chunkCount === 3
+    );
+    expect(partialSummary).toBeDefined();
+    const successInfo = mockLoggerInfo.mock.calls.find(
+      ([, message]) => message === 'Sent AI response'
+    );
+    expect(successInfo).toBeUndefined();
   });
 });

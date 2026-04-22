@@ -1,5 +1,3 @@
-import { logger } from '../logger.js';
-
 export interface SplitOptions {
   maxChunks?: number;
   disabled?: boolean;
@@ -13,7 +11,6 @@ const DEFAULT_MAX_CHUNKS = 5;
 function parseDelimiterLines(text: string): {
   lines: string[];
   boundaries: number[];
-  unclosedFence: boolean;
 } {
   const lines = text.split('\n');
   const boundaries: number[] = [];
@@ -27,7 +24,7 @@ function parseDelimiterLines(text: string): {
       boundaries.push(i);
     }
   }
-  return { lines, boundaries, unclosedFence: inFence };
+  return { lines, boundaries };
 }
 
 /**
@@ -45,14 +42,7 @@ export function splitResponseIntoBursts(text: string, options: SplitOptions = {}
   if (disabled) return [stripSplitDelimiters(text)];
   if (!text.trim()) return [text];
 
-  const { lines, boundaries, unclosedFence } = parseDelimiterLines(text);
-
-  if (unclosedFence) {
-    logger.warn(
-      { preview: text.slice(0, 100) },
-      'Unclosed fenced code block in AI response; splitting may be unreliable'
-    );
-  }
+  const { lines, boundaries } = parseDelimiterLines(text);
 
   if (boundaries.length === 0) return [text];
 
