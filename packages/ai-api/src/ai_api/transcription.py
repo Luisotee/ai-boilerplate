@@ -176,8 +176,6 @@ async def transcribe_audio(
     """
     Transcribe audio file using Groq's Whisper API.
 
-    Pure async function that calls external API and returns results.
-
     Args:
         client: Authenticated Groq client
         audio_file: Audio file buffer (BinaryIO)
@@ -189,6 +187,11 @@ async def transcribe_audio(
         Tuple of (transcription_text, error_message)
         - transcription_text: Transcribed text if successful, None otherwise
         - error_message: Human-readable error if failed, None otherwise
+
+    Raises:
+        `RECOVERABLE_STT_ERRORS`: transient upstream failures are re-raised so
+        the dispatcher can fall back in auto mode and so explicit-mode callers
+        see the real error instead of a masked (None, error_msg) tuple.
     """
     try:
         # Prepare transcription request

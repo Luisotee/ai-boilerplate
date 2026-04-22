@@ -227,6 +227,8 @@ services:
       UVICORN_PORT: 8000
       LOG_LEVEL: info
     healthcheck:
+      # speaches-specific — `/health` is exposed by the speaches image. If you
+      # swap images, update this healthcheck (or remove it and rely on depends_on).
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
       timeout: 10s
@@ -256,6 +258,11 @@ services:
   # returns 404 until a model is registered via POST /v1/models/{id}. This
   # blocks `docker compose up` until the model is ready on a cold cache, and
   # is a fast no-op on warm starts (the volume keeps models across restarts).
+  #
+  # NOTE: this sidecar is speaches-specific (it POSTs to speaches's
+  # /v1/models/{id} pull endpoint). If you swap the `whisper` image for a
+  # different OpenAI-compatible server, remove or rewrite this service and
+  # pre-load models yourself.
   whisper-init:
     image: curlimages/curl:8.10.1
     container_name: aiagent-whisper-init

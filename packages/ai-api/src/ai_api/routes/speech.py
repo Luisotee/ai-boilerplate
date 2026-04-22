@@ -35,7 +35,7 @@ async def transcribe_audio_endpoint(
     db: Session = Depends(get_db),
 ):
     """
-    Transcribe audio to text using Groq Whisper API
+    Transcribe audio to text using the configured STT provider (Groq or self-hosted Whisper)
 
     This endpoint ONLY does audio-to-text transcription. It does NOT:
     - Save messages to database
@@ -102,7 +102,7 @@ async def transcribe_audio_endpoint(
             logger.warning(f"STT not configured: {e}")
             raise HTTPException(
                 status_code=503,
-                detail=f"Speech-to-text not configured: {e}",
+                detail="Speech-to-text is not configured on the server.",
             )
         except RECOVERABLE_STT_ERRORS as e:
             logger.error(f"STT upstream error: {e}", exc_info=True)
