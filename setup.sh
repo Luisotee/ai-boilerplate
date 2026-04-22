@@ -315,6 +315,7 @@ if [ "$SKIP_ENV" = false ]; then
     sed -i "s|^# WHISPER_BASE_URL=.*|WHISPER_BASE_URL=http://whisper:8000|" "$ENV_FILE"
     print_success "Self-hosted Whisper enabled (WHISPER_BASE_URL=http://whisper:8000)"
     print_warning "Start the container with: docker compose --profile whisper up -d"
+    echo "  First startup blocks ~1–2 min while the whisper-init sidecar pulls the model."
     if [ "$GROQ_CONFIGURED" -eq 0 ]; then
       echo "  With only self-hosted Whisper configured, STT_PROVIDER=auto will use it."
     else

@@ -230,8 +230,10 @@ services:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
       timeout: 10s
-      # First request lazy-loads the model (~1 GB for distil-large-v3) — give
-      # the container enough time to finish the download on a cold start.
+      # speaches starts serving /health immediately, but models are NOT lazy-
+      # loaded on first transcription (it returns 404 until a model is pulled).
+      # The whisper-init sidecar below explicitly pulls WHISPER_MODEL once
+      # whisper is healthy. start_period is generous to cover slow image pulls.
       start_period: 120s
       retries: 5
     networks:
@@ -248,6 +250,33 @@ services:
       #       - driver: nvidia
       #         count: 1
       #         capabilities: [gpu]
+
+  # One-shot sidecar that pulls the configured WHISPER_MODEL into the speaches
+  # container. speaches does NOT lazy-download on first transcription — it
+  # returns 404 until a model is registered via POST /v1/models/{id}. This
+  # blocks `docker compose up` until the model is ready on a cold cache, and
+  # is a fast no-op on warm starts (the volume keeps models across restarts).
+  whisper-init:
+    image: curlimages/curl:8.10.1
+    container_name: aiagent-whisper-init
+    profiles: ["whisper"]
+    restart: "no"
+    depends_on:
+      whisper:
+        condition: service_healthy
+    environment:
+      WHISPER_MODEL: ${WHISPER_MODEL:-Systran/faster-distil-whisper-large-v3}
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        echo "Ensuring Whisper model '$${WHISPER_MODEL}' is downloaded (first run ~1-2 min)..."
+        curl -fsS --max-time 600 -X POST "http://whisper:8000/v1/models/$${WHISPER_MODEL}"
+        echo
+        echo "Whisper model ready."
+    networks:
+      - aiagent-network
 
   whatsapp-cloud:
     build:

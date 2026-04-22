@@ -156,7 +156,7 @@ WHISPER_BASE_URL=http://whisper:8000
 WHISPER_MODEL=Systran/faster-distil-whisper-large-v3
 ```
 
-The first transcription request lazy-downloads the model (~1–2 minutes for `distil-large-v3`). `WHISPER_BASE_URL` points at any OpenAI-compatible Whisper server, so you can swap speaches for another image if you prefer.
+Starting the profile also launches a one-shot `whisper-init` sidecar that pulls the configured `WHISPER_MODEL` into the speaches container before `up -d` returns — first-time startup blocks ~1–2 minutes while `distil-large-v3` downloads; subsequent starts are instant since the model is cached in the `whisper-cache` volume. `WHISPER_BASE_URL` points at any OpenAI-compatible Whisper server, so you can swap speaches for another image if you prefer (the sidecar is speaches-specific — with a different image you'd need to pre-load models yourself).
 
 ### Run locally (no Docker for app services)
 
