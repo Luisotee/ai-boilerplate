@@ -1,6 +1,7 @@
 """Tests for the STT provider dispatcher and self-hosted Whisper adapter."""
 
 import json
+from io import BytesIO
 from unittest.mock import AsyncMock, MagicMock
 
 import groq
@@ -10,7 +11,9 @@ import pytest
 from ai_api import transcription
 from ai_api.config import settings
 from ai_api.transcription import (
+    SttClientError,
     SttNotConfiguredError,
+    transcribe_audio,
     transcribe_audio_dispatcher,
     transcribe_audio_via_whisper,
 )
@@ -277,10 +280,11 @@ class TestWhisperAdapter:
         with pytest.raises(httpx.HTTPStatusError):
             await transcribe_audio_via_whisper("http://whisper:8000", AUDIO, FILENAME)
 
-    async def test_returns_error_tuple_on_4xx(self, monkeypatch):
-        """4xx from self-hosted (e.g. unsupported audio) must not cascade as
-        transient — it belongs as (None, error_msg) so the route doesn't
-        mislabel a client-side error as a 502 'temporarily unavailable'."""
+    async def test_raises_client_error_on_4xx(self, monkeypatch):
+        """4xx from self-hosted (e.g. unsupported audio) must raise
+        SttClientError so the route surfaces it as HTTP 400 with the
+        backend-provided detail — not a generic 500 (old tuple behavior)
+        and not a 502 'temporarily unavailable' (recoverable-error path)."""
         transport = httpx.MockTransport(lambda _req: httpx.Response(400, text="unsupported format"))
         real_cls = httpx.AsyncClient
         monkeypatch.setattr(
@@ -289,6 +293,24 @@ class TestWhisperAdapter:
             lambda **kw: real_cls(transport=transport, **kw),
         )
 
-        text, error = await transcribe_audio_via_whisper("http://whisper:8000", AUDIO, FILENAME)
-        assert text is None
-        assert error and "400" in error
+        with pytest.raises(SttClientError, match="400"):
+            await transcribe_audio_via_whisper("http://whisper:8000", AUDIO, FILENAME)
+
+
+class TestGroqAdapter4xxWrapping:
+    """Ensures non-retryable Groq 4xx errors surface as SttClientError rather
+    than silently returning (None, error_msg) — which the route would have
+    mislabeled as a 500."""
+
+    async def test_groq_bad_request_raises_client_error(self, monkeypatch):
+        request = httpx.Request("POST", "http://groq.test")
+        response = httpx.Response(400, request=request)
+        err = groq.BadRequestError("invalid audio", response=response, body=None)
+
+        client = MagicMock(name="groq-client")
+        client.audio = MagicMock()
+        client.audio.transcriptions = MagicMock()
+        client.audio.transcriptions.create = AsyncMock(side_effect=err)
+
+        with pytest.raises(SttClientError, match="400"):
+            await transcribe_audio(client, BytesIO(AUDIO), FILENAME)

@@ -1,3 +1,4 @@
+import groq
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
 from sqlalchemy.orm import Session
 from starlette.requests import Request
@@ -9,6 +10,7 @@ from ..logger import logger
 from ..schemas import TranscribeResponse, TTSRequest
 from ..transcription import (
     RECOVERABLE_STT_ERRORS,
+    SttClientError,
     SttNotConfiguredError,
     transcribe_audio_dispatcher,
     validate_audio_file,
@@ -103,13 +105,33 @@ async def transcribe_audio_endpoint(
             raise HTTPException(
                 status_code=503,
                 detail="Speech-to-text is not configured on the server.",
-            )
+            ) from e
+        except SttClientError as e:
+            # 4xx from the backend — bad input, unsupported model, etc. Surface
+            # as 400 with the backend-provided detail so the caller can fix it.
+            logger.warning(f"STT client error: {e}")
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except groq.RateLimitError as e:
+            # Groq is throttling — surface as 429 with any Retry-After hint the
+            # provider sent, instead of masquerading as a 502. Only reachable in
+            # explicit `groq` mode; auto mode falls back inside the dispatcher.
+            logger.warning(f"STT rate limited by Groq: {e}", exc_info=True)
+            headers: dict[str, str] = {}
+            response = getattr(e, "response", None)
+            retry_after = response.headers.get("retry-after") if response is not None else None
+            if retry_after:
+                headers["Retry-After"] = retry_after
+            raise HTTPException(
+                status_code=429,
+                detail="Transcription provider rate limit exceeded. Please try again later.",
+                headers=headers or None,
+            ) from e
         except RECOVERABLE_STT_ERRORS as e:
             logger.error(f"STT upstream error: {e}", exc_info=True)
             raise HTTPException(
                 status_code=502,
                 detail="Transcription service is temporarily unavailable. Please try again.",
-            )
+            ) from e
 
         if transcription_error:
             raise HTTPException(status_code=500, detail=transcription_error)

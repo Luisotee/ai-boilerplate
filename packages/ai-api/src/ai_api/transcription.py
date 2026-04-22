@@ -64,6 +64,15 @@ class SttNotConfiguredError(RuntimeError):
     """Raised when no STT provider is configured for the requested mode."""
 
 
+class SttClientError(RuntimeError):
+    """Raised when the STT backend rejects the request with a 4xx status.
+
+    Indicates a caller-side problem (unsupported codec, malformed audio,
+    unknown model) rather than a transient upstream failure — so the route
+    can surface it as HTTP 400 instead of masking it as a 500.
+    """
+
+
 def validate_audio_file(
     filename: str, content_type: str | None, file_size: int
 ) -> tuple[bool, str | None, str | None]:
@@ -233,6 +242,16 @@ async def transcribe_audio(
     except RECOVERABLE_STT_ERRORS:
         # Let the dispatcher decide whether to fall back — don't swallow here.
         raise
+    except groq.APIStatusError as e:
+        # Anything reaching this branch is a non-retryable 4xx (RateLimitError
+        # and InternalServerError are in RECOVERABLE_STT_ERRORS above). Surface
+        # as SttClientError so the route can map to HTTP 400 instead of 500.
+        status = getattr(e, "status_code", None) or getattr(
+            getattr(e, "response", None), "status_code", "?"
+        )
+        error_msg = f"Groq rejected request ({status}): {e}"
+        logger.warning(error_msg, exc_info=True)
+        raise SttClientError(error_msg) from e
     except Exception as e:
         error_msg = f"Transcription failed: {str(e)}"
         logger.error(error_msg, exc_info=True)
@@ -290,17 +309,18 @@ async def transcribe_audio_via_whisper(
             resp.raise_for_status()
             payload = resp.json()
     except httpx.HTTPStatusError as e:
-        # 4xx is a client-side problem (bad audio, wrong model) — don't cascade
-        # to the dispatcher as transient, or the route will mislabel it as a
-        # 502 "temporarily unavailable". 5xx falls through to RECOVERABLE_STT_ERRORS
-        # so transient server failures still surface as 502.
+        # 4xx is a client-side problem (bad audio, wrong model) — raise
+        # SttClientError so the route maps it to HTTP 400 instead of the
+        # generic 500 it would get from a (None, error_msg) tuple return.
+        # 5xx falls through to RECOVERABLE_STT_ERRORS so transient server
+        # failures still surface as 502.
         if 400 <= e.response.status_code < 500:
             reason = e.response.reason_phrase or ""
             error_msg = (
                 f"Self-hosted Whisper rejected request ({e.response.status_code} {reason})".rstrip()
             )
             logger.warning(error_msg, exc_info=True)
-            return None, error_msg
+            raise SttClientError(error_msg) from e
         raise
     except RECOVERABLE_STT_ERRORS:
         raise
