@@ -155,7 +155,7 @@ if [ "$SKIP_ENV" = false ]; then
     POSTGRES_PASSWORD REDIS_PASSWORD GEMINI_API_KEY AI_API_KEY
     WHATSAPP_API_KEY DATABASE_URL GROQ_API_KEY LLAMA_CLOUD_API_KEY
     META_PHONE_NUMBER_ID META_ACCESS_TOKEN META_APP_SECRET META_WEBHOOK_VERIFY_TOKEN
-    STT_PROVIDER WHISPER_MODEL WHISPER_TIMEOUT_SECONDS
+    STT_PROVIDER WHISPER_MODEL WHISPER_TIMEOUT_SECONDS INSTALL_DOCLING
   )
   MISSING_KEYS=()
   for key in "${REQUIRED_KEYS[@]}"; do
@@ -268,6 +268,8 @@ if [ "$SKIP_ENV" = false ]; then
   fi
 
   # ── Optional: LlamaParse ──────────────────────────────
+  LLAMA_CONFIGURED=0
+  USE_DOCLING=0
   echo ""
   read -rp "  Set up LlamaParse for PDF parsing (primary parser)? (y/N): " SETUP_LLAMA
   if [[ "$SETUP_LLAMA" =~ ^[Yy]$ ]]; then
@@ -278,11 +280,54 @@ if [ "$SKIP_ENV" = false ]; then
     if [ -n "$LLAMA_KEY" ]; then
       sed -i "s|^LLAMA_CLOUD_API_KEY=.*|LLAMA_CLOUD_API_KEY=$(escape_sed "$LLAMA_KEY")|" "$ENV_FILE"
       print_success "LlamaParse configured"
+      LLAMA_CONFIGURED=1
     else
-      print_warning "LLAMA_CLOUD_API_KEY left empty — PDF parsing requires the [docling] extra"
+      print_warning "LLAMA_CLOUD_API_KEY left empty"
     fi
   else
-    print_warning "Skipped LlamaParse — set LLAMA_CLOUD_API_KEY in .env or install the [docling] extra later"
+    print_warning "Skipped LlamaParse"
+  fi
+
+  # ── Optional: Docling (local PDF parser) ──────────────
+  echo ""
+  if [ "$LLAMA_CONFIGURED" -eq 1 ]; then
+    echo "  Docling is a local PDF parser — slower than LlamaParse but no API key, no network."
+    echo "  With both configured, PDF_PARSER=auto falls back to Docling on LlamaParse errors."
+    read -rp "  Also set up Docling as a local fallback? (y/N): " SETUP_DOCLING
+  else
+    echo "  No LlamaParse key set. Docling is a local PDF parser (no API key, no network)."
+    echo "  Trade-offs: ~1 GB larger Docker image, slower first build, CPU-heavy parsing."
+    read -rp "  Set up Docling as your PDF parser? (y/N): " SETUP_DOCLING
+  fi
+  if [[ "$SETUP_DOCLING" =~ ^[Yy]$ ]]; then
+    USE_DOCLING=1
+    sed -i "s|^INSTALL_DOCLING=.*|INSTALL_DOCLING=true|" "$ENV_FILE"
+    if [ "$LLAMA_CONFIGURED" -eq 0 ]; then
+      sed -i "s|^PDF_PARSER=.*|PDF_PARSER=docling|" "$ENV_FILE"
+      print_success "Docling enabled as sole PDF parser (PDF_PARSER=docling)"
+    else
+      print_success "Docling enabled as auto-fallback (PDF_PARSER=auto)"
+    fi
+    echo ""
+    echo -e "  ${YELLOW}Docling needs system packages for local (non-Docker) dev:${NC}"
+    if command -v apt-get &>/dev/null; then
+      echo "    sudo apt-get install -y poppler-utils tesseract-ocr libmagic1"
+    elif command -v dnf &>/dev/null; then
+      echo "    sudo dnf install -y poppler-utils tesseract file-libs"
+    elif command -v pacman &>/dev/null; then
+      echo "    sudo pacman -S --needed poppler tesseract file"
+    elif command -v brew &>/dev/null; then
+      echo "    brew install poppler tesseract libmagic"
+    else
+      echo "    Install poppler-utils, tesseract-ocr, and libmagic via your package manager."
+    fi
+    print_warning "Docker builds install these automatically; only needed for 'pnpm dev:server'."
+  else
+    if [ "$LLAMA_CONFIGURED" -eq 0 ]; then
+      print_warning "No PDF parser configured — PDF uploads will fail until LLAMA_CLOUD_API_KEY is set or Docling is enabled"
+    else
+      print_warning "Skipped Docling — install later with: (cd packages/ai-api && uv sync --extra docling)"
+    fi
   fi
 
   # ── Optional: Groq ────────────────────────────────────
@@ -349,6 +394,18 @@ fi
 
 print_success "All dependencies installed"
 
+if [ "${USE_DOCLING:-0}" -eq 1 ]; then
+  echo ""
+  echo "  Installing Docling Python extra (this can take a minute)..."
+  if ! (cd packages/ai-api && uv sync --extra docling); then
+    echo ""
+    print_error "Failed to install the [docling] extra."
+    print_error "Retry manually: (cd packages/ai-api && uv sync --extra docling)"
+    exit 1
+  fi
+  print_success "Docling Python extra installed"
+fi
+
 # ── 4. Next steps ───────────────────────────────────────
 print_header "Setup complete!"
 
@@ -359,6 +416,12 @@ echo "    docker compose --profile dev up -d                 # + Adminer (DB GUI
 echo "    docker compose --profile cloud up -d               # + WhatsApp Cloud API"
 echo "    docker compose --profile whisper up -d             # + self-hosted Whisper (STT)"
 echo "    docker compose --profile dev --profile cloud up -d # everything"
+
+if [ "${USE_DOCLING:-0}" -eq 1 ]; then
+  echo ""
+  echo -e "    ${YELLOW}Note: INSTALL_DOCLING=true is set in .env.${NC}"
+  echo "    Docker builds will include Docling + OCR system deps (~1 GB larger image, slower first build)."
+fi
 echo ""
 echo -e "  ${BOLD}Option B: Local development${NC}"
 echo "    1. Start infrastructure:  docker compose up -d postgres redis"
