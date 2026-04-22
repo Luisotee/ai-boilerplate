@@ -106,7 +106,7 @@ cd packages/ai-api && uv run pytest tests/unit  # AI API unit tests only
 
 ## Observability
 
-- **Prometheus metrics**: Both TypeScript clients expose `GET /metrics` (Prometheus exposition format). The route is exempt from API-key auth and rate limiting so scrapers can reach it directly. Counters: `whatsapp_messages_received_total{type,conversation_type}`, `whatsapp_messages_sent_total{type}`. Histogram: `ai_api_poll_duration_seconds{status}`. Default Node process metrics are also included.
+- **Prometheus metrics**: Both TypeScript clients expose `GET /metrics` (Prometheus exposition format). The route is exempt from API-key auth and rate limiting so scrapers can reach it directly. Counters: `whatsapp_messages_received_total{type,conversation_type}`, `whatsapp_messages_sent_total{type}`. Histogram: `ai_api_poll_duration_seconds{status}`. Default Node process metrics are also included. Note: `whatsapp_messages_sent_total{type="text"}` counts outbound chunks, not AI responses — a single AI reply split into N bursts produces N increments
 - **Sentry**: Error tracking is opt-in via `SENTRY_DSN_NODE`. Each TS package has `src/instrument.ts` which must be imported first in `main.ts` (before `config.ts`) so Sentry's OpenTelemetry hooks load before other modules. When `SENTRY_DSN_NODE` is unset, `instrument.ts` is a no-op and `Sentry.setupFastifyErrorHandler` is skipped.
 
 ## Database

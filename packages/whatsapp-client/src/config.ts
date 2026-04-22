@@ -36,6 +36,17 @@ const whitelistPhones = new Set(
     .filter(Boolean)
 );
 
+function parseNonNegativeInt(name: string, defaultValue: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return defaultValue;
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 0) {
+    console.warn(`[config] Invalid value for ${name}: "${raw}", using default ${defaultValue}`);
+    return defaultValue;
+  }
+  return n;
+}
+
 export const config = {
   whitelistPhones,
   aiApiUrl: process.env.AI_API_URL || 'http://localhost:8000',
@@ -70,12 +81,11 @@ export const config = {
     maxAttempts: parseInt(process.env.RECONNECT_MAX_ATTEMPTS || '10', 10),
     jitterMs: parseInt(process.env.RECONNECT_JITTER_MS || '500', 10),
   },
-  // Human-like message bursts (splits a single AI response into multiple WhatsApp messages)
   messageSplit: {
     enabled: process.env.MESSAGE_SPLIT_ENABLED !== 'false',
-    baseDelayMs: parseInt(process.env.MESSAGE_SPLIT_BASE_DELAY_MS || '600', 10),
-    perCharMs: parseInt(process.env.MESSAGE_SPLIT_PER_CHAR_MS || '25', 10),
-    maxDelayMs: parseInt(process.env.MESSAGE_SPLIT_MAX_DELAY_MS || '3500', 10),
-    maxChunks: parseInt(process.env.MESSAGE_SPLIT_MAX_CHUNKS || '5', 10),
+    baseDelayMs: parseNonNegativeInt('MESSAGE_SPLIT_BASE_DELAY_MS', 600),
+    perCharMs: parseNonNegativeInt('MESSAGE_SPLIT_PER_CHAR_MS', 25),
+    maxDelayMs: parseNonNegativeInt('MESSAGE_SPLIT_MAX_DELAY_MS', 3500),
+    maxChunks: parseNonNegativeInt('MESSAGE_SPLIT_MAX_CHUNKS', 5),
   },
 } as const;

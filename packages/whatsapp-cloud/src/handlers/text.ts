@@ -93,7 +93,6 @@ export async function handleTextMessage(
 
     if (!response) return; // saveOnly mode or empty response
 
-    // Split into human-like bursts; groups and disabled mode get a single message.
     // Cloud API typing indicator only attaches to the inbound message ID and is
     // consumed on the first outbound send, so we do not re-trigger it between chunks.
     const chunks = splitResponseIntoBursts(response, {
@@ -101,19 +100,29 @@ export async function handleTextMessage(
       maxChunks: config.messageSplit.maxChunks,
     });
 
-    for (let i = 0; i < chunks.length; i++) {
-      if (i > 0) {
-        const delay = Math.min(
-          config.messageSplit.maxDelayMs,
-          config.messageSplit.baseDelayMs + chunks[i].length * config.messageSplit.perCharMs
-        );
-        await sleep(delay);
+    let sentCount = 0;
+    try {
+      for (let i = 0; i < chunks.length; i++) {
+        if (i > 0) {
+          const delay = Math.min(
+            config.messageSplit.maxDelayMs,
+            config.messageSplit.baseDelayMs + chunks[i].length * config.messageSplit.perCharMs
+          );
+          await sleep(delay);
+        }
+        await graphApi.sendText(to, chunks[i]);
+        sentCount++;
+        messagesSent.inc({ type: 'text' });
       }
-      await graphApi.sendText(to, chunks[i]);
-      messagesSent.inc({ type: 'text' });
+    } catch (burstErr) {
+      if (sentCount === 0) throw burstErr;
+      logger.warn(
+        { error: burstErr, whatsappJid, sentCount, totalChunks: chunks.length },
+        'Burst send failed mid-stream; partial response delivered'
+      );
     }
     logger.info(
-      { to: whatsappJid, responseLength: response.length, chunkCount: chunks.length },
+      { to: whatsappJid, responseLength: response.length, chunkCount: chunks.length, sentCount },
       'Sent AI response'
     );
 

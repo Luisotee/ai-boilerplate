@@ -40,9 +40,9 @@ describe('splitResponseIntoBursts', () => {
     expect(result[1]).toBe('Here is code:\n```\na\n---\nb\n```\nDone.');
   });
 
-  it('returns single chunk when disabled is true even with delimiters', () => {
+  it('returns single delimiter-free chunk when disabled is true', () => {
     const text = 'a\n---\nb\n---\nc';
-    expect(splitResponseIntoBursts(text, { disabled: true })).toEqual([text]);
+    expect(splitResponseIntoBursts(text, { disabled: true })).toEqual(['a\n\nb\n\nc']);
   });
 
   it('caps chunks at maxChunks by joining the tail with blank lines', () => {
@@ -64,10 +64,11 @@ describe('splitResponseIntoBursts', () => {
     expect(splitResponseIntoBursts('   \n\t\n')).toEqual(['   \n\t\n']);
   });
 
-  it('returns original text when delimiter produces only one non-empty chunk', () => {
-    // e.g. trailing `---` with no content after — should NOT force a split
+  it('strips trailing `---` when it produces only one non-empty chunk', () => {
+    // trailing delimiter with no content after — do not split, but also do not
+    // leak the raw `---` to the user
     const text = 'just one thing\n---\n';
-    expect(splitResponseIntoBursts(text)).toEqual([text]);
+    expect(splitResponseIntoBursts(text)).toEqual(['just one thing']);
   });
 
   it('ignores `---` that is not on its own line', () => {
@@ -85,6 +86,25 @@ describe('splitResponseIntoBursts', () => {
     const text = parts.join('\n---\n');
     const result = splitResponseIntoBursts(text, { maxChunks: 1000 });
     expect(result).toHaveLength(10); // HARD_CAP
+  });
+
+  it('clamps maxChunks=0 to 1', () => {
+    const text = 'a\n---\nb\n---\nc';
+    const result = splitResponseIntoBursts(text, { maxChunks: 0 });
+    expect(result).toHaveLength(1);
+  });
+
+  it('clamps negative maxChunks to 1', () => {
+    const text = 'a\n---\nb\n---\nc';
+    const result = splitResponseIntoBursts(text, { maxChunks: -5 });
+    expect(result).toHaveLength(1);
+  });
+
+  it('falls back to the default when maxChunks is NaN', () => {
+    const parts = Array.from({ length: 8 }, (_, i) => `m${i + 1}`);
+    const text = parts.join('\n---\n');
+    const result = splitResponseIntoBursts(text, { maxChunks: Number.NaN });
+    expect(result).toHaveLength(5);
   });
 });
 
@@ -104,6 +124,13 @@ describe('stripSplitDelimiters', () => {
 
   it('trims leading and trailing whitespace', () => {
     expect(stripSplitDelimiters('\n\n---\nhello\n---\n\n')).toBe('hello');
+  });
+
+  it('preserves `---` lines inside fenced code blocks', () => {
+    const text = 'before\n---\n```\ninside\n---\nstill\n```\n---\nafter';
+    expect(stripSplitDelimiters(text)).toBe(
+      'before\n\n```\ninside\n---\nstill\n```\n\nafter'
+    );
   });
 });
 

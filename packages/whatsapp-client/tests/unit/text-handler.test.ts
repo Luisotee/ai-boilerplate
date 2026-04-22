@@ -1,6 +1,24 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { makeTextMsg, makeGroupTextMsg, makeMockSocket } from '../helpers/fixtures.js';
 
+const mockSplitConfig = vi.hoisted(() => ({
+  enabled: true,
+  baseDelayMs: 600,
+  perCharMs: 25,
+  maxDelayMs: 3500,
+  maxChunks: 5,
+}));
+
+vi.mock('../../src/config.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/config.js')>();
+  return {
+    config: {
+      ...actual.config,
+      messageSplit: mockSplitConfig,
+    },
+  };
+});
+
 vi.mock('../../src/api-client.js', () => ({
   sendMessageToAI: vi.fn(),
   getUserPreferences: vi.fn().mockResolvedValue({ tts_enabled: false }),
@@ -25,6 +43,11 @@ const mockSleep = sleep as ReturnType<typeof vi.fn>;
 describe('handleTextMessage — burst sending', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockSplitConfig.enabled = true;
+    mockSplitConfig.baseDelayMs = 600;
+    mockSplitConfig.perCharMs = 25;
+    mockSplitConfig.maxDelayMs = 3500;
+    mockSplitConfig.maxChunks = 5;
   });
 
   it('sends a single message when the response has no delimiters', async () => {
@@ -69,7 +92,7 @@ describe('handleTextMessage — burst sending', () => {
     expect(mockSleep).toHaveBeenCalledTimes(2);
   });
 
-  it('does not split group-chat messages even when delimiters are present', async () => {
+  it('merges group-chat messages into a single delimiter-free message', async () => {
     const sock = makeMockSocket();
     const msg = makeGroupTextMsg('hey @bot');
     mockSendMessageToAI.mockResolvedValueOnce('first\n---\nsecond');
@@ -80,7 +103,7 @@ describe('handleTextMessage — burst sending', () => {
       ([, payload]) => 'text' in (payload as { text?: string })
     );
     expect(textCalls).toHaveLength(1);
-    expect(textCalls[0][1]).toEqual({ text: 'first\n---\nsecond' });
+    expect(textCalls[0][1]).toEqual({ text: 'first\n\nsecond' });
     expect(mockSleep).not.toHaveBeenCalled();
   });
 
@@ -99,5 +122,63 @@ describe('handleTextMessage — burst sending', () => {
 
     expect(mockTts).toHaveBeenCalledTimes(1);
     expect(mockTts.mock.calls[0][0]).toBe('First.\n\nSecond.');
+  });
+
+  it('sends a single delimiter-free message when MESSAGE_SPLIT_ENABLED is disabled', async () => {
+    mockSplitConfig.enabled = false;
+    const sock = makeMockSocket();
+    const msg = makeTextMsg('hey');
+    mockSendMessageToAI.mockResolvedValueOnce('first\n---\nsecond\n---\nthird');
+
+    await handleTextMessage(sock as never, msg as never, 'hey');
+
+    const textCalls = sock.sendMessage.mock.calls.filter(
+      ([, payload]) => 'text' in (payload as { text?: string })
+    );
+    expect(textCalls).toHaveLength(1);
+    expect(textCalls[0][1]).toEqual({ text: 'first\n\nsecond\n\nthird' });
+    expect(mockSleep).not.toHaveBeenCalled();
+  });
+
+  it('passes the correct delay (base + per-char × next chunk length) to sleep', async () => {
+    mockSplitConfig.baseDelayMs = 100;
+    mockSplitConfig.perCharMs = 10;
+    mockSplitConfig.maxDelayMs = 10_000;
+    const sock = makeMockSocket();
+    const msg = makeTextMsg('hey');
+    mockSendMessageToAI.mockResolvedValueOnce('first\n---\nabcdef');
+
+    await handleTextMessage(sock as never, msg as never, 'hey');
+
+    expect(mockSleep).toHaveBeenCalledTimes(1);
+    expect(mockSleep.mock.calls[0][0]).toBe(100 + 6 * 10);
+  });
+
+  it('clamps inter-chunk delay to maxDelayMs for long chunks', async () => {
+    mockSplitConfig.baseDelayMs = 500;
+    mockSplitConfig.perCharMs = 25;
+    mockSplitConfig.maxDelayMs = 1000;
+    const longChunk = 'a'.repeat(500);
+    const sock = makeMockSocket();
+    const msg = makeTextMsg('hey');
+    mockSendMessageToAI.mockResolvedValueOnce(`first\n---\n${longChunk}`);
+
+    await handleTextMessage(sock as never, msg as never, 'hey');
+
+    expect(mockSleep).toHaveBeenCalledTimes(1);
+    expect(mockSleep.mock.calls[0][0]).toBe(1000);
+  });
+
+  it('does not send outbound messages when AI returns null', async () => {
+    const sock = makeMockSocket();
+    const msg = makeTextMsg('hey');
+    mockSendMessageToAI.mockResolvedValueOnce(null);
+
+    await handleTextMessage(sock as never, msg as never, 'hey');
+
+    const textCalls = sock.sendMessage.mock.calls.filter(
+      ([, payload]) => 'text' in (payload as { text?: string })
+    );
+    expect(textCalls).toHaveLength(0);
   });
 });
