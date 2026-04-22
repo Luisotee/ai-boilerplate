@@ -1,7 +1,9 @@
 import * as graphApi from '../services/graph-api.js';
 import { sendMessageToAI, getUserPreferences, textToSpeech } from '../api-client.js';
+import { config } from '../config.js';
 import { phoneToJid, isGroupChat, phoneFromJid } from '../utils/jid.js';
 import { logger } from '../logger.js';
+import { splitResponseIntoBursts, stripSplitDelimiters, sleep } from '../utils/message-split.js';
 import { messagesSent } from '../routes/metrics.js';
 
 interface ImageData {
@@ -91,10 +93,29 @@ export async function handleTextMessage(
 
     if (!response) return; // saveOnly mode or empty response
 
-    // Send text response via Graph API
-    await graphApi.sendText(to, response);
-    messagesSent.inc({ type: 'text' });
-    logger.info({ to: whatsappJid, responseLength: response.length }, 'Sent AI response');
+    // Split into human-like bursts; groups and disabled mode get a single message.
+    // Cloud API typing indicator only attaches to the inbound message ID and is
+    // consumed on the first outbound send, so we do not re-trigger it between chunks.
+    const chunks = splitResponseIntoBursts(response, {
+      disabled: !config.messageSplit.enabled || conversationType === 'group',
+      maxChunks: config.messageSplit.maxChunks,
+    });
+
+    for (let i = 0; i < chunks.length; i++) {
+      if (i > 0) {
+        const delay = Math.min(
+          config.messageSplit.maxDelayMs,
+          config.messageSplit.baseDelayMs + chunks[i].length * config.messageSplit.perCharMs
+        );
+        await sleep(delay);
+      }
+      await graphApi.sendText(to, chunks[i]);
+      messagesSent.inc({ type: 'text' });
+    }
+    logger.info(
+      { to: whatsappJid, responseLength: response.length, chunkCount: chunks.length },
+      'Sent AI response'
+    );
 
     // --- Response delivered; failures below should NOT trigger error reaction ---
 
@@ -103,7 +124,7 @@ export async function handleTextMessage(
       const prefs = await getUserPreferences(whatsappJid);
       if (prefs?.tts_enabled) {
         logger.info({ whatsappJid }, 'TTS enabled, generating voice message');
-        const audioBuffer = await textToSpeech(response, whatsappJid);
+        const audioBuffer = await textToSpeech(stripSplitDelimiters(response), whatsappJid);
         if (audioBuffer) {
           await graphApi.sendAudio(to, audioBuffer, 'audio/ogg; codecs=opus');
           messagesSent.inc({ type: 'audio' });

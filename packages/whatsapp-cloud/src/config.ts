@@ -72,4 +72,12 @@ export const config = {
     graphApiVersion: process.env.META_GRAPH_API_VERSION || 'v21.0',
     graphApiBaseUrl: 'https://graph.facebook.com',
   },
+  // Human-like message bursts (splits a single AI response into multiple WhatsApp messages)
+  messageSplit: {
+    enabled: process.env.MESSAGE_SPLIT_ENABLED !== 'false',
+    baseDelayMs: parseInt(process.env.MESSAGE_SPLIT_BASE_DELAY_MS || '600', 10),
+    perCharMs: parseInt(process.env.MESSAGE_SPLIT_PER_CHAR_MS || '25', 10),
+    maxDelayMs: parseInt(process.env.MESSAGE_SPLIT_MAX_DELAY_MS || '3500', 10),
+    maxChunks: parseInt(process.env.MESSAGE_SPLIT_MAX_CHUNKS || '5', 10),
+  },
 } as const;

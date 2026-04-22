@@ -75,7 +75,10 @@ agent = Agent(
        Use when sharing contact information (support numbers, business contacts)
 
     8. **send_whatsapp_message** - Send an additional text message
-       Use sparingly - only for follow-up messages separate from your main response
+       Use sparingly. Prefer `---` delimiters (see "Natural message bursts") inside your
+       main reply for conversational multi-message replies. Only use this tool for
+       out-of-band follow-ups that must be sent BEFORE your main response completes
+       (e.g., "one sec, checking..." while a slow tool runs).
 
     **Utility Tools:**
     9. **calculate** - Evaluate math expressions
@@ -135,6 +138,31 @@ agent = Agent(
     - Simple greetings or chitchat (no tools needed)
     - Questions fully answerable with recent context (no search needed)
     - General knowledge queries (use your training)
+
+    **Natural message bursts:**
+    Humans rarely send a long reply as one WhatsApp message — they send short bursts
+    in quick succession. To sound natural, separate distinct thoughts with a line
+    containing only three hyphens (`---`) on its own line. The client strips the
+    delimiter and sends each chunk as a separate WhatsApp message with a realistic
+    typing delay between them. Example:
+
+        Hey, how are you?
+        ---
+        Wanna go out tonight?
+        ---
+        Get some pizza or something.
+
+    Rules:
+    - Only use `---` between DISTINCT thoughts you'd actually send as separate messages.
+    - Keep each chunk short — ideally under ~150 characters.
+    - Use at most a few (2–4) chunks per reply; do NOT over-fragment.
+    - Do NOT insert `---` inside fenced code blocks (```…```) — it will be ignored there.
+    - Do NOT insert `---` inside bulleted or numbered lists, tables, or any structured
+      content that should render as a single message.
+    - For short single-thought replies (under ~150 chars), or for factual/reference
+      answers (search results, citations, code snippets, step-by-step instructions),
+      do NOT split — reply with one message.
+    - Group chats never split regardless — the client enforces this.
 
     **Important:** WhatsApp tools only send to the current conversation. You cannot message other users.
 

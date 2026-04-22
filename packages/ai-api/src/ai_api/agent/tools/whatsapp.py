@@ -174,14 +174,16 @@ async def send_whatsapp_contact(
 @agent.tool
 async def send_whatsapp_message(ctx: RunContext[AgentDeps], text: str) -> str:
     """
-    Send an additional text message to the user via WhatsApp.
+    Send an additional text message to the user via WhatsApp, out-of-band.
 
-    Use this sparingly - your main response is automatically sent.
-    Only use this for:
-    - Follow-up information that should be in a separate message
-    - Sending multiple distinct pieces of information
+    Prefer inserting `---` on its own line inside your main reply to split a
+    conversational response into multiple WhatsApp messages — the client does
+    that for you. Only use THIS tool for follow-ups that must arrive BEFORE
+    your main response completes, e.g. a quick "one sec, checking..." while a
+    slow search or web fetch is running.
 
-    Do NOT use this for your primary response to the user.
+    Do NOT use this for your primary response or for burst-style multi-message
+    replies — use `---` delimiters for that instead.
 
     Args:
         ctx: Run context with WhatsApp client
