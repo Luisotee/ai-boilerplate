@@ -8,7 +8,7 @@ A production-ready AI agent system that brings conversational AI to WhatsApp wit
 |-------|-------------|
 | **Client** | Node.js, TypeScript, Fastify, Baileys (WhatsApp Web), Zod |
 | **API** | Python 3.11+, FastAPI, Pydantic AI, SQLAlchemy 2.0 |
-| **AI/ML** | Google Gemini (LLM, Embeddings, TTS), Groq Whisper (STT), LlamaParse (PDF parsing) |
+| **AI/ML** | Google Gemini (LLM, Embeddings, TTS), Groq Whisper or self-hosted Whisper (STT), LlamaParse (PDF parsing) |
 | **Database** | PostgreSQL 16 + pgvector (vector similarity search) |
 | **Infrastructure** | Docker Compose, Redis Streams, Background Workers |
 
@@ -140,10 +140,23 @@ The script checks prerequisites, creates `.env` from the template (auto-generati
 docker compose up -d                                    # core: postgres, redis, api, worker, whatsapp
 docker compose --profile dev up -d                      # + Adminer (DB GUI on :8080)
 docker compose --profile cloud up -d                    # + WhatsApp Cloud API (port 3002)
+docker compose --profile whisper up -d                  # + self-hosted Whisper (port 8771)
 docker compose --profile dev --profile cloud up -d      # everything
 ```
 
-Profiles are opt-in: without `--profile`, Adminer and the Cloud API client stay stopped. Infrastructure ports (`5432`, `6379`, `8080`) bind to `127.0.0.1` only — application services (`8000`, `3001`, `3002`) remain on all interfaces so they can be reached from host tooling and the WhatsApp client.
+Profiles are opt-in: without `--profile`, Adminer, the Cloud API client, and the self-hosted Whisper server stay stopped. Infrastructure ports (`5432`, `6379`, `8080`, `8771`) bind to `127.0.0.1` only — application services (`8000`, `3001`, `3002`) remain on all interfaces so they can be reached from host tooling and the WhatsApp client.
+
+### Self-hosted STT (optional)
+
+Groq Whisper is the default cloud STT. If you prefer to run Whisper locally (privacy, cost, offline), start the `whisper` profile — it launches `ghcr.io/speaches-ai/speaches:latest-cpu`, exposing an OpenAI-compatible `POST /v1/audio/transcriptions` at `http://whisper:8000` inside the Docker network (and `http://127.0.0.1:8771` from the host). Then in `.env` set:
+
+```
+STT_PROVIDER=whisper                         # or "auto" to prefer Groq with self-hosted fallback
+WHISPER_BASE_URL=http://whisper:8000
+WHISPER_MODEL=Systran/faster-distil-whisper-large-v3
+```
+
+Starting the profile also launches a one-shot `whisper-init` sidecar that pulls the configured `WHISPER_MODEL` into the speaches container before `up -d` returns — first-time startup blocks ~1–2 minutes while `distil-large-v3` downloads; subsequent starts are instant since the model is cached in the `whisper-cache` volume. `WHISPER_BASE_URL` points at any OpenAI-compatible Whisper server, so you can swap speaches for another image if you prefer (the sidecar is speaches-specific — with a different image you'd need to pre-load models yourself).
 
 ### Run locally (no Docker for app services)
 

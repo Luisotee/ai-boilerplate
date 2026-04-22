@@ -202,6 +202,89 @@ services:
           memory: 512M
           cpus: "0.5"
 
+  # Self-hosted Whisper (OpenAI-compatible STT). Opt-in:
+  #   docker compose --profile whisper up -d
+  # Point the AI API at it by setting WHISPER_BASE_URL=http://whisper:8000 in .env.
+  # Switch to `:latest-cuda` + uncomment the deploy.reservations block for GPU.
+  whisper:
+    image: ghcr.io/speaches-ai/speaches:latest-cpu
+    container_name: aiagent-whisper
+    restart: unless-stopped
+    profiles: ["whisper"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    ports:
+      - "127.0.0.1:8771:8000"
+    volumes:
+      # speaches runs as non-root `ubuntu` with $HOME=/home/ubuntu — this
+      # mount target must match or model downloads won't persist across restarts.
+      - whisper-cache:/home/ubuntu/.cache/huggingface/hub
+    environment:
+      UVICORN_HOST: 0.0.0.0
+      UVICORN_PORT: 8000
+      LOG_LEVEL: info
+    healthcheck:
+      # speaches-specific — `/health` is exposed by the speaches image. If you
+      # swap images, update this healthcheck (or remove it and rely on depends_on).
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      # speaches starts serving /health immediately, but models are NOT lazy-
+      # loaded on first transcription (it returns 404 until a model is pulled).
+      # The whisper-init sidecar below explicitly pulls WHISPER_MODEL once
+      # whisper is healthy. start_period is generous to cover slow image pulls.
+      start_period: 120s
+      retries: 5
+    networks:
+      - aiagent-network
+    deploy:
+      resources:
+        limits:
+          memory: 3G
+          cpus: "2.0"
+      # GPU (uncomment and switch image tag to `:latest-cuda`):
+      # resources:
+      #   reservations:
+      #     devices:
+      #       - driver: nvidia
+      #         count: 1
+      #         capabilities: [gpu]
+
+  # One-shot sidecar that pulls the configured WHISPER_MODEL into the speaches
+  # container. speaches does NOT lazy-download on first transcription — it
+  # returns 404 until a model is registered via POST /v1/models/{id}. This
+  # blocks `docker compose up` until the model is ready on a cold cache, and
+  # is a fast no-op on warm starts (the volume keeps models across restarts).
+  #
+  # NOTE: this sidecar is speaches-specific (it POSTs to speaches's
+  # /v1/models/{id} pull endpoint). If you swap the `whisper` image for a
+  # different OpenAI-compatible server, remove or rewrite this service and
+  # pre-load models yourself.
+  whisper-init:
+    image: curlimages/curl:8.10.1
+    container_name: aiagent-whisper-init
+    profiles: ["whisper"]
+    restart: "no"
+    depends_on:
+      whisper:
+        condition: service_healthy
+    environment:
+      WHISPER_MODEL: ${WHISPER_MODEL:-Systran/faster-distil-whisper-large-v3}
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        echo "Ensuring Whisper model '$${WHISPER_MODEL}' is downloaded (first run ~1-2 min)..."
+        curl -fsS --max-time 600 -X POST "http://whisper:8000/v1/models/$${WHISPER_MODEL}"
+        echo
+        echo "Whisper model ready."
+    networks:
+      - aiagent-network
+
   whatsapp-cloud:
     build:
       context: .
@@ -242,6 +325,7 @@ volumes:
   redis-data:
   knowledge-base-data:
   whatsapp-session:
+  whisper-cache:
 
 networks:
   aiagent-network:

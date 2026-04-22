@@ -114,9 +114,24 @@ class Settings(BaseSettings):
     core_memory_max_length: int = 2000  # Max characters for the entire core memory document
 
     # Speech-to-Text
-    stt_model: str = "whisper-large-v3"
+    # Provider selection: auto | groq | whisper
+    #   auto    - prefer Groq when GROQ_API_KEY is set; fall back to self-hosted
+    #             Whisper (WHISPER_BASE_URL) on recoverable errors. Also uses
+    #             self-hosted alone when only WHISPER_BASE_URL is set.
+    #   groq    - always use Groq (no fallback)
+    #   whisper - always use self-hosted Whisper (no fallback)
+    stt_provider: Literal["auto", "groq", "whisper"] = "auto"
+    # Groq-specific Whisper model. Paired with `whisper_model` (self-hosted) for symmetry.
+    groq_stt_model: str = "whisper-large-v3"
     stt_max_file_size_mb: int = 25
     stt_supported_formats: str = "mp3,mp4,mpeg,mpga,m4a,wav,webm,ogg,flac"
+
+    # Self-hosted Whisper (optional; opt-in via `docker compose --profile whisper up -d`)
+    # Any server exposing OpenAI-compatible POST /v1/audio/transcriptions works.
+    # Default container: ghcr.io/speaches-ai/speaches:latest-cpu
+    whisper_base_url: str | None = None
+    whisper_model: str = "Systran/faster-distil-whisper-large-v3"
+    whisper_timeout_seconds: int = 120
 
     # Text-to-Speech
     tts_model: str = "gemini-2.5-flash-preview-tts"
@@ -159,6 +174,21 @@ class Settings(BaseSettings):
             logging.getLogger("ai-api").warning(
                 "KB_DOCLING_TIMEOUT_SECONDS is deprecated; rename to "
                 "KB_PARSE_TIMEOUT_SECONDS. The legacy name still works for now."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_stt_provider_config(self) -> "Settings":
+        if self.stt_provider == "groq" and not self.groq_api_key:
+            raise ValueError(
+                "STT_PROVIDER=groq but GROQ_API_KEY is not set. Set the key or "
+                "use STT_PROVIDER=auto (falls back) or STT_PROVIDER=whisper."
+            )
+        if self.stt_provider == "whisper" and not self.whisper_base_url:
+            raise ValueError(
+                "STT_PROVIDER=whisper but WHISPER_BASE_URL is not set. Start the "
+                "self-hosted container (`docker compose --profile whisper up -d`) "
+                "and set WHISPER_BASE_URL."
             )
         return self
 

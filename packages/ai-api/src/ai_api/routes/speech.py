@@ -1,5 +1,4 @@
-from io import BytesIO
-
+import groq
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
 from sqlalchemy.orm import Session
 from starlette.requests import Request
@@ -9,7 +8,13 @@ from ..database import get_db, get_user_preferences
 from ..deps import limiter
 from ..logger import logger
 from ..schemas import TranscribeResponse, TTSRequest
-from ..transcription import create_groq_client, transcribe_audio, validate_audio_file
+from ..transcription import (
+    RECOVERABLE_STT_ERRORS,
+    SttClientError,
+    SttNotConfiguredError,
+    transcribe_audio_dispatcher,
+    validate_audio_file,
+)
 from ..tts import (
     create_genai_client,
     get_audio_mimetype,
@@ -32,7 +37,7 @@ async def transcribe_audio_endpoint(
     db: Session = Depends(get_db),
 ):
     """
-    Transcribe audio to text using Groq Whisper API
+    Transcribe audio to text using the configured STT provider (Groq or self-hosted Whisper)
 
     This endpoint ONLY does audio-to-text transcription. It does NOT:
     - Save messages to database
@@ -88,22 +93,45 @@ async def transcribe_audio_endpoint(
                 effective_language = prefs.stt_language
                 logger.info(f"Using STT language from preferences: {effective_language}")
 
-        # Step 3: Create Groq client
-        groq_client = create_groq_client(settings.groq_api_key)
-        if not groq_client:
+        # Step 3: Dispatch to the configured STT backend (Groq / self-hosted / auto).
+        try:
+            transcription_text, transcription_error = await transcribe_audio_dispatcher(
+                audio_content,
+                file.filename or f"audio.{file_format}",
+                language=effective_language,
+            )
+        except SttNotConfiguredError as e:
+            logger.warning(f"STT not configured: {e}")
             raise HTTPException(
                 status_code=503,
-                detail="Speech-to-text service not configured. Please set GROQ_API_KEY environment variable.",
-            )
-
-        # Step 4: Transcribe audio
-        audio_file_obj = BytesIO(audio_content)
-        transcription_text, transcription_error = await transcribe_audio(
-            groq_client,
-            audio_file_obj,
-            file.filename or f"audio.{file_format}",
-            language=effective_language,
-        )
+                detail="Speech-to-text is not configured on the server.",
+            ) from e
+        except SttClientError as e:
+            # 4xx from the backend — bad input, unsupported model, etc. Surface
+            # as 400 with the backend-provided detail so the caller can fix it.
+            logger.warning(f"STT client error: {e}")
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except groq.RateLimitError as e:
+            # Groq is throttling — surface as 429 with any Retry-After hint the
+            # provider sent, instead of masquerading as a 502. Only reachable in
+            # explicit `groq` mode; auto mode falls back inside the dispatcher.
+            logger.warning(f"STT rate limited by Groq: {e}", exc_info=True)
+            headers: dict[str, str] = {}
+            response = getattr(e, "response", None)
+            retry_after = response.headers.get("retry-after") if response is not None else None
+            if retry_after:
+                headers["Retry-After"] = retry_after
+            raise HTTPException(
+                status_code=429,
+                detail="Transcription provider rate limit exceeded. Please try again later.",
+                headers=headers or None,
+            ) from e
+        except RECOVERABLE_STT_ERRORS as e:
+            logger.error(f"STT upstream error: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=502,
+                detail="Transcription service is temporarily unavailable. Please try again.",
+            ) from e
 
         if transcription_error:
             raise HTTPException(status_code=500, detail=transcription_error)
