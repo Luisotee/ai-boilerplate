@@ -163,7 +163,7 @@ async function start() {
   // Excludes /health, /docs*, and /webhook (Meta needs unauthenticated access)
   app.addHook('onRequest', async (request, reply) => {
     if (
-      request.url === '/health' ||
+      request.url.startsWith('/health') ||
       request.url === '/metrics' ||
       request.url.startsWith('/docs') ||
       request.url.startsWith('/webhook')
@@ -188,7 +188,7 @@ async function start() {
     max: config.rateLimitGlobal,
     timeWindow: '1 minute',
     allowList: (req) =>
-      req.url === '/health' || req.url === '/metrics' || req.url.startsWith('/webhook'),
+      req.url.startsWith('/health') || req.url === '/metrics' || req.url.startsWith('/webhook'),
   });
 
   // Register multipart for file uploads

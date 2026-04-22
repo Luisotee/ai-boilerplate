@@ -53,6 +53,11 @@ export const HealthResponseSchema = z.object({
   whatsapp_connected: z.boolean(),
 });
 
+export const ReadyResponseSchema = z.object({
+  status: z.enum(['ready', 'not_ready']),
+  checks: z.record(z.string(), z.string()),
+});
+
 // Types
 export type SendTextRequest = z.infer<typeof SendTextSchema>;
 export type SendReactionRequest = z.infer<typeof SendReactionSchema>;

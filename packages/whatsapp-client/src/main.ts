@@ -96,7 +96,7 @@ async function start() {
   // API Key authentication hook
   app.addHook('onRequest', async (request, reply) => {
     if (
-      request.url === '/health' ||
+      request.url.startsWith('/health') ||
       request.url === '/metrics' ||
       request.url.startsWith('/docs')
     ) {
@@ -119,7 +119,7 @@ async function start() {
   await app.register(FastifyRateLimit, {
     max: config.rateLimitGlobal,
     timeWindow: '1 minute',
-    allowList: (req) => req.url === '/health' || req.url === '/metrics',
+    allowList: (req) => req.url.startsWith('/health') || req.url === '/metrics',
   });
 
   // Register multipart for file uploads
