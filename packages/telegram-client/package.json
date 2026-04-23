@@ -22,7 +22,6 @@
     "@fastify/swagger-ui": "^5.2.3",
     "@grammyjs/auto-chat-action": "^0.1.1",
     "@grammyjs/auto-retry": "^2.0.2",
-    "@grammyjs/files": "^1.2.0",
     "@sentry/node": "^10.48.0",
     "dotenv": "^17.2.3",
     "fastify": "^5.6.2",

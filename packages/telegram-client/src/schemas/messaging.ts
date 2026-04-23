@@ -28,6 +28,7 @@ export const SendTextResponseSchema = z.object({
 
 export const SuccessResponseSchema = z.object({
   success: z.boolean(),
+  message_id: z.string().optional(),
 });
 
 export const ErrorResponseSchema = z.object({

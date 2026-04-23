@@ -7,3 +7,8 @@ export function markBotReady(): void {
 export function isBotReady(): boolean {
   return ready;
 }
+
+/** Test-only helper: resets readiness. Safe to call from production too. */
+export function _resetBotReadyForTests(): void {
+  ready = false;
+}

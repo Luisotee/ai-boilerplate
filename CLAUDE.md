@@ -40,8 +40,8 @@ How a WhatsApp message traverses the system end-to-end:
 ### Telegram Message Flow (telegram-client)
 
 1. Telegram → webhook `POST /webhook` → grammY `webhookCallback(bot, "fastify", { secretToken })` verifies the `X-Telegram-Bot-Api-Secret-Token` header
-2. grammY parses the Update and dispatches on filter queries: `message:text | message:voice | message:photo | message:document`
-3. Handlers (`handlers/*.ts`) download media via `ctx.getFile()` + `https://api.telegram.org/file/bot<TOKEN>/<file_path>`
+2. grammY parses the Update and dispatches on filter queries: `message:text | message:voice | message:audio | message:photo | message:document`
+3. Handlers (`handlers/*.ts`) download media via `telegramApi.downloadFile()` — wrapping `bot.api.getFile()` + a fetch of `https://api.telegram.org/file/bot<TOKEN>/<file_path>`
 4. Group messages: `utils/mention.ts` checks for `@bot` mention, `text_mention` entity for `bot.botInfo.id`, or reply to a bot message — otherwise save-only
 5. Funnel into `handleTextMessage(ctx, text, options)` → `sendMessageToAI()` with `client_id: "telegram"`
 6. AI API processes → result polled back → delivered via `ctx.reply()` / `ctx.replyWithVoice()` inside the grammY handler
@@ -124,7 +124,7 @@ cd packages/ai-api && uv run pytest tests/unit  # AI API unit tests only
 
 ## Observability
 
-- **Prometheus metrics**: Both TypeScript clients expose `GET /metrics` (Prometheus exposition format). The route is exempt from API-key auth and rate limiting so scrapers can reach it directly. Counters: `whatsapp_messages_received_total{type,conversation_type}`, `whatsapp_messages_sent_total{type}`. Histogram: `ai_api_poll_duration_seconds{status}`. Default Node process metrics are also included. Note: `whatsapp_messages_sent_total{type="text"}` counts outbound chunks, not AI responses — a single AI reply split into N bursts produces N increments
+- **Prometheus metrics**: All three TypeScript clients expose `GET /metrics` (Prometheus exposition format). The route is exempt from API-key auth and rate limiting so scrapers can reach it directly. Counters: `chat_messages_received_total{client,type,conversation_type}`, `chat_messages_sent_total{client,type}` — `client` is `"baileys" | "cloud" | "telegram"`. Histogram: `ai_api_poll_duration_seconds{status}`. Default Node process metrics are also included. Note: `chat_messages_sent_total{type="text"}` counts outbound chunks, not AI responses — a single AI reply split into N bursts produces N increments
 - **Sentry**: Error tracking is opt-in via `SENTRY_DSN_NODE`. Each TS package has `src/instrument.ts` which must be imported first in `main.ts` (before `config.ts`) so Sentry's OpenTelemetry hooks load before other modules. When `SENTRY_DSN_NODE` is unset, `instrument.ts` is a no-op and `Sentry.setupFastifyErrorHandler` is skipped.
 
 ## Database
@@ -236,11 +236,11 @@ Multipart routes can't use Zod validation directly. Follow the pattern in `route
 - Only PDF documents are accepted for processing; other types return a user-facing error message
 
 ### Telegram (TS)
-- **Reaction emoji mismatch**: Telegram's allowed standard-emoji reactions (Bot API 7.x) do NOT include ⏳, ✅, or ❌ — the three status emojis the WhatsApp clients use. `services/telegram-api.ts` maps them to `🤔 / 👍 / 👎` on the way out. Any other disallowed emoji that reaches `setMessageReaction` returns `400 BAD_REQUEST: REACTION_INVALID` and is logged + swallowed — reactions are nice-to-have, never critical
+- **Reaction emoji mismatch**: Telegram's allowed standard-emoji reactions (Bot API 7.x) do NOT include ⏳, ✅, or ❌ — the three status emojis the WhatsApp clients use. `services/telegram-api.ts` maps them to `🤔 / 👍 / 👎` on the way out. `400 BAD_REQUEST: REACTION_INVALID` is the only error `sendReaction` swallows; 401/403/429/network errors re-throw so the `bot.catch` boundary can log them. Callers that treat reactions as best-effort (`handlers/text.ts`, voice transcription fallback) wrap the call in their own try/catch
 - **Privacy mode must be OFF** (via `@BotFather` → `/setprivacy` → Disable) for the bot to see non-addressed group messages. After toggling, **the bot must be removed and re-added** to existing groups — Telegram caches privacy state on join
 - **`bot.init()` is required on startup in webhook mode** to populate `bot.botInfo.id` / `bot.botInfo.username`. Mention detection in `utils/mention.ts` relies on this; `main.ts` awaits `bot.init()` before calling `markBotReady()`
 - **`ctx.chatAction = 'typing'`** (from `@grammyjs/auto-chat-action`) is the canonical "keep typing alive for the duration of a long handler" idiom — the middleware refreshes every ~5s until the handler returns. Unlike Meta Cloud API (one-shot per wamid), Telegram keeps refreshing across multi-burst AI replies. Do NOT roll your own `setInterval`
-- **20 MB download limit** (Bot API cloud): `getFile` succeeds but fetching the `file_path` URL returns 400 for larger files — we surface this as `null` and send a user-facing "file too large" message. For larger uploads you'd need to run a self-hosted `tdlib/telegram-bot-api` server (not done)
+- **20 MB download limit** (Bot API cloud): oversize files fail with a `GrammyError` (400 "file is too big"). `handlers/document.ts` returns a discriminated `DocExtraction` (`ok | wrong-type | too-large | download-error`) and `updates.ts` surfaces a distinct user-facing reply per kind. Voice and photo handlers still collapse failures to null and show a generic "try again" reply. For larger uploads you'd need to run a self-hosted `tdlib/telegram-bot-api` server (not done)
 - **Photos arrive as an array of sizes** (`message.photo[]` from thumb → largest); `handlers/photo.ts` always picks the last entry
 - **Chat IDs are integers**, and supergroup/channel IDs are **negative** (e.g. `-1001234567890`). `utils/telegram-id.ts` renders them verbatim as `tg:-1001234567890`
 - **Path naming is intentional**: the Telegram client serves `/whatsapp/send-text`, `/whatsapp/send-reaction`, `/whatsapp/typing` (same paths as the WhatsApp clients) so the Python `WhatsAppClient` works unchanged for all three platforms. `/whatsapp/send-location` and `/whatsapp/send-contact` return 501 — the agent's location/contact tools simply fail gracefully for Telegram conversations

@@ -5,16 +5,16 @@ export const metricsRegistry = new client.Registry();
 client.collectDefaultMetrics({ register: metricsRegistry });
 
 export const messagesReceived = new client.Counter({
-  name: 'telegram_messages_received_total',
-  help: 'Total Telegram messages received',
-  labelNames: ['type', 'conversation_type'] as const,
+  name: 'chat_messages_received_total',
+  help: 'Total chat messages received across all clients (baileys, cloud, telegram)',
+  labelNames: ['client', 'type', 'conversation_type'] as const,
   registers: [metricsRegistry],
 });
 
 export const messagesSent = new client.Counter({
-  name: 'telegram_messages_sent_total',
-  help: 'Total Telegram messages sent',
-  labelNames: ['type'] as const,
+  name: 'chat_messages_sent_total',
+  help: 'Total chat messages sent across all clients. For text, counts outbound chunks (not AI responses)',
+  labelNames: ['client', 'type'] as const,
   registers: [metricsRegistry],
 });
 

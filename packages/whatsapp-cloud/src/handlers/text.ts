@@ -111,7 +111,7 @@ export async function handleTextMessage(
         }
         await graphApi.sendText(to, chunks[i]);
         sentCount++;
-        messagesSent.inc({ type: 'text' });
+        messagesSent.inc({ client: 'cloud', type: 'text' });
       }
     } catch (burstErr) {
       if (sentCount === 0) throw burstErr;
@@ -137,7 +137,7 @@ export async function handleTextMessage(
         const audioBuffer = await textToSpeech(stripSplitDelimiters(response), whatsappJid);
         if (audioBuffer) {
           await graphApi.sendAudio(to, audioBuffer, 'audio/ogg; codecs=opus');
-          messagesSent.inc({ type: 'audio' });
+          messagesSent.inc({ client: 'cloud', type: 'audio' });
           logger.info({ whatsappJid }, 'Voice message sent');
         } else {
           logger.warn({ whatsappJid }, 'TTS failed, text-only sent');

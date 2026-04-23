@@ -7,3 +7,4 @@ process.env.TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || 'test-token:d
 process.env.TELEGRAM_API_KEY = process.env.TELEGRAM_API_KEY || 'test-telegram-key';
 process.env.AI_API_KEY = process.env.AI_API_KEY || 'test-ai-key';
 process.env.AI_API_URL = process.env.AI_API_URL || 'http://localhost:8000';
+process.env.TELEGRAM_WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET || 'test-webhook-secret';

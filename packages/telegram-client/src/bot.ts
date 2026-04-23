@@ -1,20 +1,18 @@
 import { autoChatAction, type AutoChatActionFlavor } from '@grammyjs/auto-chat-action';
 import { autoRetry } from '@grammyjs/auto-retry';
-import { hydrateFiles, type FileFlavor } from '@grammyjs/files';
 import { Bot, type Context, GrammyError, HttpError } from 'grammy';
 import { config } from './config.js';
 import { logger } from './logger.js';
 
-export type TelegramContext = FileFlavor<Context & AutoChatActionFlavor>;
+export type TelegramContext = Context & AutoChatActionFlavor;
 
 export const bot = new Bot<TelegramContext>(config.telegram.botToken);
 
 // Plugins:
 //  - auto-retry: handles 429 + 5xx with exponential backoff
 //  - auto-chat-action: keeps sendChatAction refreshing across long handlers
-//  - files: adds file.download() / file.getUrl() to ctx.getFile() results
+// Downloads go through services/telegram-api.ts (bot.api.getFile + fetch).
 bot.api.config.use(autoRetry({ maxRetryAttempts: 3, maxDelaySeconds: 30 }));
-bot.api.config.use(hydrateFiles(config.telegram.botToken));
 bot.use(autoChatAction());
 
 // Structured error boundary. Webhook-mode errors also bubble to Fastify's

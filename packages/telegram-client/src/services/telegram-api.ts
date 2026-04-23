@@ -5,7 +5,7 @@
  * ctx.react directly.
  */
 
-import { InputFile } from 'grammy';
+import { GrammyError, InputFile } from 'grammy';
 import type { ReactionTypeEmoji } from 'grammy/types';
 import { bot } from '../bot.js';
 import { config } from '../config.js';
@@ -63,9 +63,21 @@ export async function sendReaction(
     };
     await bot.api.setMessageReaction(chatId, messageId, [reaction]);
   } catch (error) {
-    // A disallowed emoji becomes 400 BAD_REQUEST: REACTION_INVALID. Log and
-    // swallow — reactions are nice-to-have, never critical.
-    logger.warn({ error, chatId, messageId, emoji, mappedEmoji }, 'Reaction rejected by Telegram');
+    // A disallowed emoji becomes 400 BAD_REQUEST: REACTION_INVALID. Swallow
+    // only that case — auth/network/kicked-from-chat errors must still surface
+    // so they can be investigated by the bot.catch boundary.
+    if (
+      error instanceof GrammyError &&
+      error.error_code === 400 &&
+      /REACTION_INVALID/.test(error.description)
+    ) {
+      logger.warn(
+        { err: error, chatId, messageId, emoji, mappedEmoji },
+        'Reaction rejected as invalid — swallowing'
+      );
+      return;
+    }
+    throw error;
   }
 }
 

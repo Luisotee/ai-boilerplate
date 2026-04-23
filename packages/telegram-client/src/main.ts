@@ -146,15 +146,14 @@ async function start() {
   // updates — otherwise early deliveries have no handlers to run.
   registerUpdateHandlers();
 
-  // bot.init() populates botInfo.id/username so mention detection works.
+  // bot.init() populates botInfo.id/username so mention detection works. If
+  // this fails we fail fast — a half-initialized bot with undefined botInfo
+  // would silently drop every group @-mention, so it's safer to crash and let
+  // Docker restart than to serve webhooks in a broken state.
   app.log.info('Initializing Telegram bot (fetching getMe)...');
-  try {
-    await bot.init();
-    markBotReady();
-    app.log.info({ botUsername: bot.botInfo.username, botId: bot.botInfo.id }, 'Bot initialized');
-  } catch (err) {
-    app.log.error({ err }, 'Failed to initialize Telegram bot — readiness will report not ready');
-  }
+  await bot.init();
+  markBotReady();
+  app.log.info({ botUsername: bot.botInfo.username, botId: bot.botInfo.id }, 'Bot initialized');
 
   await registerHealthRoutes(app);
   await registerWebhookRoutes(app);
@@ -175,7 +174,7 @@ async function start() {
     try {
       await bot.api.setWebhook(config.telegram.publicWebhookUrl, {
         secret_token: config.telegram.webhookSecret || undefined,
-        allowed_updates: ['message', 'my_chat_member'],
+        allowed_updates: ['message'],
         drop_pending_updates: config.telegram.dropPendingUpdates,
       });
       app.log.info(

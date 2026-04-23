@@ -122,7 +122,7 @@ export async function handleTextMessage(
             i === 0 ? { message_id: messageId, allow_sending_without_reply: true } : undefined,
         });
         sentCount++;
-        messagesSent.inc({ type: 'text' });
+        messagesSent.inc({ client: 'telegram', type: 'text' });
       }
     } catch (burstErr) {
       if (sentCount === 0) throw burstErr;
@@ -147,7 +147,7 @@ export async function handleTextMessage(
         const audioBuffer = await textToSpeech(stripSplitDelimiters(response), jid);
         if (audioBuffer) {
           await ctx.replyWithVoice(new InputFile(audioBuffer, 'reply.ogg'));
-          messagesSent.inc({ type: 'voice' });
+          messagesSent.inc({ client: 'telegram', type: 'voice' });
           logger.info({ jid }, 'Voice message sent');
         } else {
           logger.warn({ jid }, 'TTS failed, text-only sent');
@@ -158,6 +158,15 @@ export async function handleTextMessage(
     }
   } catch (error) {
     logger.error({ error, jid, messageId }, 'Error handling text message');
-    await telegramApi.sendReaction(chatId, messageId, '❌');
+    try {
+      await telegramApi.sendReaction(chatId, messageId, '❌');
+    } catch (reactionError) {
+      logger.warn({ error: reactionError, jid }, 'Failed to send failure reaction');
+    }
+    try {
+      await ctx.reply('Sorry, I encountered an error processing your message. Please try again.');
+    } catch (replyError) {
+      logger.warn({ error: replyError, jid }, 'Failed to send error reply');
+    }
   }
 }

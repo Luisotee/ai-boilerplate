@@ -12,6 +12,7 @@ import { extractPhotoData } from './handlers/photo.js';
 import { extractDocumentData } from './handlers/document.js';
 import { logger } from './logger.js';
 import { messagesReceived } from './routes/metrics.js';
+import * as telegramApi from './services/telegram-api.js';
 import { chatIdToJid, chatTypeToConversationType } from './utils/telegram-id.js';
 import { isAddressedToBot, stripBotMention } from './utils/mention.js';
 
@@ -21,7 +22,7 @@ export function registerUpdateHandlers(): void {
     const chatType = ctx.chat?.type ?? 'private';
     const conversationType = chatTypeToConversationType(chatType);
     if (passesWhitelist(ctx.chat?.id) === false) return;
-    messagesReceived.inc({ type: 'text', conversation_type: conversationType });
+    messagesReceived.inc({ client: 'telegram', type: 'text', conversation_type: conversationType });
 
     const text = ctx.msg.text;
     const isGroup = conversationType === 'group';
@@ -39,7 +40,11 @@ export function registerUpdateHandlers(): void {
     const chatType = ctx.chat?.type ?? 'private';
     const conversationType = chatTypeToConversationType(chatType);
     if (passesWhitelist(ctx.chat?.id) === false) return;
-    messagesReceived.inc({ type: 'voice', conversation_type: conversationType });
+    messagesReceived.inc({
+      client: 'telegram',
+      type: 'voice',
+      conversation_type: conversationType,
+    });
 
     const isGroup = conversationType === 'group';
     const addressed = !isGroup || isAddressed(ctx);
@@ -52,7 +57,17 @@ export function registerUpdateHandlers(): void {
     ctx.chatAction = 'typing';
     const transcription = await extractAndTranscribeVoice(ctx);
     if (!transcription) {
-      logger.warn({ updateId: ctx.update.update_id }, 'Voice transcription failed, skipping');
+      logger.warn({ updateId: ctx.update.update_id }, 'Voice transcription failed');
+      const chatId = ctx.chat?.id;
+      const messageId = ctx.msg?.message_id;
+      if (chatId !== undefined && messageId !== undefined) {
+        try {
+          await telegramApi.sendReaction(chatId, messageId, '❌');
+        } catch (reactionError) {
+          logger.warn({ error: reactionError }, 'Failed to send failure reaction');
+        }
+      }
+      await ctx.reply("Sorry, I couldn't transcribe that voice message. Please try again.");
       return;
     }
     await handleTextMessage(ctx, transcription, {
@@ -65,7 +80,11 @@ export function registerUpdateHandlers(): void {
     const chatType = ctx.chat?.type ?? 'private';
     const conversationType = chatTypeToConversationType(chatType);
     if (passesWhitelist(ctx.chat?.id) === false) return;
-    messagesReceived.inc({ type: 'photo', conversation_type: conversationType });
+    messagesReceived.inc({
+      client: 'telegram',
+      type: 'photo',
+      conversation_type: conversationType,
+    });
 
     const isGroup = conversationType === 'group';
     const addressed = !isGroup || isAddressed(ctx);
@@ -91,25 +110,40 @@ export function registerUpdateHandlers(): void {
     const chatType = ctx.chat?.type ?? 'private';
     const conversationType = chatTypeToConversationType(chatType);
     if (passesWhitelist(ctx.chat?.id) === false) return;
-    messagesReceived.inc({ type: 'document', conversation_type: conversationType });
+    messagesReceived.inc({
+      client: 'telegram',
+      type: 'document',
+      conversation_type: conversationType,
+    });
 
     const isGroup = conversationType === 'group';
     const addressed = !isGroup || isAddressed(ctx);
     if (isGroup && !addressed) return;
 
     ctx.chatAction = 'typing';
-    const doc = await extractDocumentData(ctx);
+    const result = await extractDocumentData(ctx);
     const caption = ctx.msg.caption ?? '';
     const filename = ctx.msg.document?.file_name ?? 'document.pdf';
     const text = caption || `Document: ${filename}`;
 
-    if (doc) {
-      await handleTextMessage(ctx, text, {
-        senderJid: ctx.from ? chatIdToJid(ctx.from.id) : undefined,
-        document: doc,
-      });
-    } else {
-      await ctx.reply('Sorry, I can only process PDF documents. Please send a PDF file.');
+    switch (result.kind) {
+      case 'ok':
+        await handleTextMessage(ctx, text, {
+          senderJid: ctx.from ? chatIdToJid(ctx.from.id) : undefined,
+          document: { data: result.data, mimetype: result.mimetype, filename: result.filename },
+        });
+        break;
+      case 'wrong-type':
+        await ctx.reply('Sorry, I can only process PDF documents. Please send a PDF file.');
+        break;
+      case 'too-large':
+        await ctx.reply(
+          "Sorry, that PDF is larger than Telegram's 20 MB bot download limit. Please send a smaller file."
+        );
+        break;
+      case 'download-error':
+        await ctx.reply("Sorry, I couldn't download that file. Please try again.");
+        break;
     }
   });
 }
