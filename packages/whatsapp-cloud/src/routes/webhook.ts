@@ -12,7 +12,7 @@ import {
 } from '../utils/message.js';
 import type { WebhookBody } from '../utils/message.js';
 import { WebhookBodySchema } from '../schemas/webhook.js';
-import { sendReaction, sendText } from '../services/graph-api.js';
+import { sendReaction, sendText, sendTypingIndicator } from '../services/graph-api.js';
 import { handleTextMessage } from '../handlers/text.js';
 import { extractAndTranscribeAudio } from '../handlers/audio.js';
 import { extractImageData } from '../handlers/image.js';
@@ -188,6 +188,19 @@ async function processWebhookMessages(body: WebhookBody): Promise<void> {
 
     const typeLabel = KNOWN_MESSAGE_TYPES.has(message.type) ? message.type : 'other';
     messagesReceived.inc({ type: typeLabel, conversation_type: 'private' });
+
+    // Fire the typing indicator as early as possible — before any Graph API
+    // download or transcription — so the user sees feedback immediately. Meta
+    // dismisses it automatically on the first outbound reply or after 25 s.
+    // Only types we will actually respond to; reactions/other are skipped.
+    if (
+      message.type === 'text' ||
+      message.type === 'image' ||
+      message.type === 'audio' ||
+      message.type === 'document'
+    ) {
+      await sendTypingIndicator(messageId);
+    }
 
     try {
       switch (message.type) {

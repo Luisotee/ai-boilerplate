@@ -314,13 +314,16 @@ export async function sendTypingIndicator(messageId: string): Promise<void> {
 
     if (!response.ok) {
       const errorBody = await response.text();
-      logger.warn(
+      logger.error(
         { status: response.status, body: errorBody, messageId },
-        'Failed to send typing indicator'
+        'Typing indicator rejected by Meta'
       );
+      return;
     }
+
+    logger.info({ messageId, status: response.status }, 'Typing indicator sent');
   } catch (error) {
-    logger.warn({ error, messageId }, 'Typing indicator request failed');
+    logger.error({ error, messageId }, 'Typing indicator request failed');
   }
 }
 
