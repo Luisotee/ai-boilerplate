@@ -75,7 +75,10 @@ agent = Agent(
        Use when sharing contact information (support numbers, business contacts)
 
     8. **send_whatsapp_message** - Send an additional text message
-       Use sparingly - only for follow-up messages separate from your main response
+       Use sparingly. Prefer `---` delimiters (see "Natural message bursts") inside your
+       main reply for conversational multi-message replies. Only use this tool for
+       out-of-band follow-ups that must be sent BEFORE your main response completes
+       (e.g., "one sec, checking..." while a slow tool runs).
 
     **Utility Tools:**
     9. **calculate** - Evaluate math expressions
@@ -135,6 +138,13 @@ agent = Agent(
     - Simple greetings or chitchat (no tools needed)
     - Questions fully answerable with recent context (no search needed)
     - General knowledge queries (use your training)
+
+    **Natural message bursts:**
+    Multi-part replies (intro + answer, answer + follow-up question, multiple
+    distinct thoughts) feel more human when split. Put `---` on its own line
+    between parts and the client sends each as a separate WhatsApp message.
+    Aim for 2–3 bursts. Keep lists, tables, fenced code blocks, and single-thought
+    answers as one message; never put `---` inside a list or fenced block.
 
     **Important:** WhatsApp tools only send to the current conversation. You cannot message other users.
 

@@ -1,9 +1,11 @@
 import type { WASocket, WAMessage } from '@whiskeysockets/baileys';
 import { logger } from '../logger.js';
 import { getUserPreferences, sendMessageToAI, textToSpeech } from '../api-client.js';
+import { config } from '../config.js';
 import { stripDeviceSuffix, isGroupChat } from '../utils/jid.js';
 import { getSenderName } from '../utils/message.js';
 import { sendFailureReaction } from '../utils/reactions.js';
+import { splitResponseIntoBursts, stripSplitDelimiters, sleep } from '../utils/message-split.js';
 import { messagesSent } from '../routes/metrics.js';
 
 interface ImageData {
@@ -99,10 +101,46 @@ export async function handleTextMessage(
 
     if (response === null) return; // Silently blocked by API whitelist
 
-    // Send text response first
-    await sock.sendMessage(whatsappJid, { text: response });
-    messagesSent.inc({ type: 'text' });
-    logger.info({ to: whatsappJid, responseLength: response.length }, 'Sent AI response');
+    const chunks = splitResponseIntoBursts(response, {
+      disabled: !config.messageSplit.enabled || conversationType === 'group',
+      maxChunks: config.messageSplit.maxChunks,
+    });
+
+    let sentCount = 0;
+    try {
+      for (let i = 0; i < chunks.length; i++) {
+        if (i > 0) {
+          try {
+            await sock.sendPresenceUpdate('composing', whatsappJid);
+          } catch (presenceErr) {
+            logger.warn(
+              { error: presenceErr, whatsappJid },
+              'Failed to refresh composing presence between chunks'
+            );
+          }
+          const delay = Math.min(
+            config.messageSplit.maxDelayMs,
+            config.messageSplit.baseDelayMs + chunks[i].length * config.messageSplit.perCharMs
+          );
+          await sleep(delay);
+        }
+        await sock.sendMessage(whatsappJid, { text: chunks[i] });
+        sentCount++;
+        messagesSent.inc({ type: 'text' });
+      }
+    } catch (burstErr) {
+      if (sentCount === 0) throw burstErr;
+      // Partial delivery preferred over an error reaction: user already has content.
+      logger.warn(
+        { error: burstErr, whatsappJid, sentCount, totalChunks: chunks.length },
+        'Burst send failed mid-stream; partial response delivered'
+      );
+    }
+    const partial = sentCount < chunks.length;
+    logger[partial ? 'warn' : 'info'](
+      { to: whatsappJid, responseLength: response.length, chunkCount: chunks.length, sentCount },
+      partial ? 'Partially sent AI response' : 'Sent AI response'
+    );
 
     // Check if TTS is enabled and send voice message
     if (response) {
@@ -110,7 +148,7 @@ export async function handleTextMessage(
       if (prefs?.tts_enabled) {
         logger.info({ whatsappJid }, 'TTS enabled, generating voice message');
         await sock.sendPresenceUpdate('recording', whatsappJid);
-        const audioBuffer = await textToSpeech(response, whatsappJid);
+        const audioBuffer = await textToSpeech(stripSplitDelimiters(response), whatsappJid);
         if (audioBuffer) {
           await sock.sendMessage(whatsappJid, {
             audio: audioBuffer,
