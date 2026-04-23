@@ -83,7 +83,7 @@ describe('handleTextMessage (Cloud) — burst sending', () => {
     expect(mockSleep).not.toHaveBeenCalled();
   });
 
-  it('sends multiple messages with a sleep between each and does not fire typing from the handler', async () => {
+  it('sends multiple messages with a sleep between each and does not re-fire typing', async () => {
     mockSendMessageToAI.mockResolvedValueOnce(
       'Hey, how are you?\n---\nWanna go out tonight?\n---\nGet some pizza.'
     );
@@ -95,9 +95,8 @@ describe('handleTextMessage (Cloud) — burst sending', () => {
       'Wanna go out tonight?',
       'Get some pizza.',
     ]);
-    // Typing indicator is fired by the webhook router (before dispatch), not by
-    // this handler — and Meta's one-shot-per-wamid rule means it can't be re-fired.
-    expect(mockTyping).not.toHaveBeenCalled();
+    // Typing indicator fires exactly once (at the start); never re-fired per chunk.
+    expect(mockTyping).toHaveBeenCalledTimes(1);
     // Sleep fires between chunks only (2 gaps for 3 chunks).
     expect(mockSleep).toHaveBeenCalledTimes(2);
   });
@@ -138,7 +137,7 @@ describe('handleTextMessage (Cloud) — burst sending', () => {
     expect(mockSendText).toHaveBeenCalledTimes(1);
     expect(mockSendText.mock.calls[0][1]).toBe('first\n\nsecond\n\nthird');
     expect(mockSleep).not.toHaveBeenCalled();
-    expect(mockTyping).not.toHaveBeenCalled();
+    expect(mockTyping).toHaveBeenCalledTimes(1);
   });
 
   it('passes the correct delay (base + per-char × next chunk length) to sleep', async () => {

@@ -80,7 +80,7 @@ export const config = {
     accessToken: process.env.META_ACCESS_TOKEN || '',
     appSecret: process.env.META_APP_SECRET || '',
     webhookVerifyToken: process.env.META_WEBHOOK_VERIFY_TOKEN || '',
-    graphApiVersion: process.env.META_GRAPH_API_VERSION || 'v23.0',
+    graphApiVersion: process.env.META_GRAPH_API_VERSION || 'v21.0',
     graphApiBaseUrl: 'https://graph.facebook.com',
   },
   messageSplit: {
