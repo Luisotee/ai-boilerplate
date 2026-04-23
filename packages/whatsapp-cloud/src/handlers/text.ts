@@ -77,9 +77,8 @@ export async function handleTextMessage(
   );
 
   try {
-    // Show typing indicator (also marks message as read)
-    await graphApi.sendTypingIndicator(messageId);
-
+    // Typing indicator is fired from the webhook router before dispatch so
+    // media messages get immediate feedback during download/transcription.
     const response = await sendMessageToAI(whatsappJid, text, {
       conversationType,
       senderJid: options?.senderJid,

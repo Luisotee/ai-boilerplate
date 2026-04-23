@@ -219,7 +219,7 @@ Multipart routes can't use Zod validation directly. Follow the pattern in `route
 
 ### Cloud API / WhatsApp (TS)
 - **24-hour messaging window**: Can only send free-form messages within 24h of customer's last message — outside this window, template messages are required (not implemented)
-- **Typing indicators**: Cloud API supports typing via the mark-as-read endpoint with `typing_indicator: { type: 'text' }` — auto-dismisses after 25s or when a response is sent. `sendTypingIndicator()` in `graph-api.ts` handles this; `paused` state is a no-op
+- **Typing indicators**: Cloud API supports typing via the mark-as-read endpoint with `typing_indicator: { type: 'text' }` — auto-dismisses after 25s or on first outbound reply (whichever is first). Fired from `routes/webhook.ts` before the type-dispatch switch so media messages (audio/image/document) show typing before Graph download or transcription starts. Meta limits it to **one-shot per inbound wamid** — cannot be refreshed mid-response (no typing between multi-burst chunks; no `audio`/"recording" type). Default Graph API version is `v23.0`; `paused` state is a no-op
 - **No message edit/delete**: Cloud API doesn't support editing messages; deletion is supported but not implemented — `operations.ts` routes return 501 for both
 - **Media URL expiry**: Downloaded media URLs from Graph API are temporary — `downloadMedia()` fetches URL and downloads immediately in one call
 - **Webhook routes exempt from API key auth**: `/webhook` GET/POST use HMAC signature verification via `META_APP_SECRET` instead
