@@ -1,7 +1,7 @@
-import { GrammyError } from 'grammy';
 import type { TelegramContext } from '../bot.js';
 import { logger } from '../logger.js';
 import * as telegramApi from '../services/telegram-api.js';
+import { isFileTooBigError } from './util.js';
 
 export type DocExtraction =
   | { kind: 'ok'; data: string; mimetype: string; filename: string }
@@ -46,12 +46,4 @@ export async function extractDocumentData(ctx: TelegramContext): Promise<DocExtr
     logger.error({ error }, 'Error extracting document');
     return { kind: 'download-error' };
   }
-}
-
-function isFileTooBigError(error: unknown): boolean {
-  return (
-    error instanceof GrammyError &&
-    error.error_code === 400 &&
-    /file is too big/i.test(error.description)
-  );
 }

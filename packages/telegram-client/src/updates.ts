@@ -55,24 +55,49 @@ export function registerUpdateHandlers(): void {
     }
 
     ctx.chatAction = 'typing';
-    const transcription = await extractAndTranscribeVoice(ctx);
-    if (!transcription) {
-      logger.warn({ updateId: ctx.update.update_id }, 'Voice transcription failed');
-      const chatId = ctx.chat?.id;
-      const messageId = ctx.msg?.message_id;
-      if (chatId !== undefined && messageId !== undefined) {
-        try {
-          await telegramApi.sendReaction(chatId, messageId, '❌');
-        } catch (reactionError) {
-          logger.warn({ error: reactionError }, 'Failed to send failure reaction');
-        }
-      }
-      await ctx.reply("Sorry, I couldn't transcribe that voice message. Please try again.");
+    const result = await extractAndTranscribeVoice(ctx);
+
+    if (result.kind === 'ok') {
+      await handleTextMessage(ctx, result.transcription, {
+        senderJid: ctx.from ? chatIdToJid(ctx.from.id) : undefined,
+      });
       return;
     }
-    await handleTextMessage(ctx, transcription, {
-      senderJid: ctx.from ? chatIdToJid(ctx.from.id) : undefined,
-    });
+
+    if (result.kind === 'no-voice') {
+      // Defensive — the filter query above shouldn't deliver these, but bail
+      // silently if it does.
+      return;
+    }
+
+    logger.warn(
+      { updateId: ctx.update.update_id, kind: result.kind },
+      'Voice handler did not produce a transcription'
+    );
+
+    const chatId = ctx.chat?.id;
+    const messageId = ctx.msg?.message_id;
+    if (chatId !== undefined && messageId !== undefined) {
+      try {
+        await telegramApi.sendReaction(chatId, messageId, '❌');
+      } catch (reactionError) {
+        logger.warn({ error: reactionError }, 'Failed to send failure reaction');
+      }
+    }
+
+    switch (result.kind) {
+      case 'too-large':
+        await ctx.reply(
+          "Sorry, that voice message is larger than Telegram's 20 MB bot download limit. Please send a shorter clip."
+        );
+        break;
+      case 'download-error':
+        await ctx.reply("Sorry, I couldn't download that voice message. Please try again.");
+        break;
+      case 'transcription-failed':
+        await ctx.reply("Sorry, I couldn't transcribe that voice message. Please try again.");
+        break;
+    }
   });
 
   // ---------------- Photo ----------------
@@ -157,6 +182,9 @@ function passesWhitelist(chatId: number | undefined): boolean {
   if (chatId === undefined) return false;
   return config.whitelistPhones.has(chatIdToJid(chatId));
 }
+
+// Exported for unit tests only.
+export const _internals = { passesWhitelist };
 
 function isAddressed(ctx: TelegramContext): boolean {
   const message = ctx.msg as Message | undefined;

@@ -136,7 +136,7 @@ describe('Telegram messaging routes — /whatsapp/*', () => {
       expect(mockSendText).toHaveBeenCalledWith(12345, 'Direct numeric', undefined);
     });
 
-    it('returns 500 when the chat identifier is invalid (non-numeric, non-tg)', async () => {
+    it('returns 400 when the chat identifier is invalid (non-numeric, non-tg)', async () => {
       markBotReady();
 
       const res = await app.inject({
@@ -145,8 +145,22 @@ describe('Telegram messaging routes — /whatsapp/*', () => {
         payload: { phoneNumber: 'not-a-valid-id', text: 'Hello' },
       });
 
-      expect(res.statusCode).toBe(500);
+      expect(res.statusCode).toBe(400);
       expect(res.json().error).toMatch(/invalid chat identifier/i);
+      expect(mockSendText).not.toHaveBeenCalled();
+    });
+
+    it('returns 400 when quoted_message_id is not numeric', async () => {
+      markBotReady();
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/whatsapp/send-text',
+        payload: { phoneNumber: 'tg:12345', text: 'Reply', quoted_message_id: 'abc' },
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toEqual({ error: 'Invalid quoted_message_id' });
       expect(mockSendText).not.toHaveBeenCalled();
     });
 
@@ -216,6 +230,18 @@ describe('Telegram messaging routes — /whatsapp/*', () => {
 
       expect(res.statusCode).toBe(500);
       expect(res.json()).toEqual({ error: 'reaction API broken' });
+    });
+
+    it('returns 400 when the chat identifier is invalid', async () => {
+      markBotReady();
+      const res = await app.inject({
+        method: 'POST',
+        url: '/whatsapp/send-reaction',
+        payload: { phoneNumber: 'not-a-valid-id', message_id: '1', emoji: '👍' },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toMatch(/invalid chat identifier/i);
+      expect(mockSendReaction).not.toHaveBeenCalled();
     });
   });
 
