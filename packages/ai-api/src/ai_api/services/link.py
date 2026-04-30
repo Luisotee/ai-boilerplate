@@ -46,6 +46,7 @@ ERROR_SAME_PLATFORM = "SAME_PLATFORM"
 ERROR_ALREADY_LINKED = "ALREADY_LINKED"
 ERROR_SAME_USER = "SAME_USER"
 ERROR_SOURCE_GONE = "SOURCE_GONE"
+ERROR_MERGE_FAILED = "MERGE_FAILED"
 
 
 def platform_for_jid(jid: str) -> Platform:
@@ -169,9 +170,22 @@ async def consume_link_code(
     telegram_jid_value = telegram_user.whatsapp_jid
 
     # Merge: keep the WhatsApp row, attach Telegram identity, drop the orphan.
-    whatsapp_user.telegram_jid = telegram_jid_value
-    db.delete(telegram_user)  # cascade clears messages/prefs/core_memory
-    db.commit()
+    # Rollback on commit failure (e.g. unique-constraint race on telegram_jid)
+    # keeps the route-scoped session clean for any downstream work.
+    try:
+        whatsapp_user.telegram_jid = telegram_jid_value
+        db.delete(telegram_user)  # cascade clears messages/prefs/core_memory
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.exception(
+            f"Failed to merge link for source={source_user_id} target={current_user_id}: {exc}"
+        )
+        return LinkResult(
+            success=False,
+            error=ERROR_MERGE_FAILED,
+            message="Sorry, linking failed due to a database error. Please try again.",
+        )
 
     # Clean up Redis state.
     await redis.delete(_CODE_KEY.format(code=code))
@@ -188,11 +202,21 @@ async def consume_link_code(
 
 
 def unlink(db: Session, user_id: str) -> bool:
-    """Clear `telegram_jid` on `user_id`'s row. Returns True if a link was cleared."""
+    """Clear `telegram_jid` on `user_id`'s row. Returns True if a link was cleared.
+
+    Returns False on commit failure (after rolling back) — callers already treat
+    False as "no link to remove", which is the safe outcome on a failed write.
+    """
     user = db.query(User).filter(User.id == user_id).first()
     if user is None or not user.telegram_jid:
         return False
-    logger.info(f"Unlinking user {user.id}: dropped telegram_jid={user.telegram_jid}")
+    prior_jid = user.telegram_jid
     user.telegram_jid = None
-    db.commit()
+    try:
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.exception(f"Failed to unlink user {user_id}: {exc}")
+        return False
+    logger.info(f"Unlinked user {user.id}: dropped telegram_jid={prior_jid}")
     return True

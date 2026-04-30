@@ -42,7 +42,7 @@ export function registerUpdateHandlers(): void {
     if (passesWhitelist(ctx.chat?.id) === false) return;
     messagesReceived.inc({
       client: 'telegram',
-      type: 'voice',
+      type: 'audio',
       conversation_type: conversationType,
     });
 

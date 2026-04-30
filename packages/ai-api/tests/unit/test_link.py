@@ -14,6 +14,7 @@ import pytest
 from ai_api.services.link import (
     ERROR_ALREADY_LINKED,
     ERROR_INVALID_CODE,
+    ERROR_MERGE_FAILED,
     ERROR_SAME_PLATFORM,
     ERROR_SAME_USER,
     ERROR_SOURCE_GONE,
@@ -261,6 +262,42 @@ class TestConsumeLinkCodeHappyPath:
         assert whatsapp_user.telegram_jid == "tg:42"
         db.delete.assert_called_once_with(telegram_user)
 
+    async def test_consume_link_code_rolls_back_on_commit_failure(self, redis):
+        """If db.commit() raises (e.g. unique-constraint race on telegram_jid),
+        the session must be rolled back and a MERGE_FAILED LinkResult returned
+        — otherwise the dirty session would poison downstream work in the same
+        request."""
+        whatsapp_id = str(uuid.uuid4())
+        telegram_id = str(uuid.uuid4())
+        code = await generate_link_code(redis, whatsapp_id, "whatsapp")
+
+        whatsapp_user = MagicMock()
+        whatsapp_user.id = uuid.UUID(whatsapp_id)
+        whatsapp_user.whatsapp_jid = "555@s.whatsapp.net"
+        whatsapp_user.telegram_jid = None
+
+        telegram_user = MagicMock()
+        telegram_user.id = uuid.UUID(telegram_id)
+        telegram_user.whatsapp_jid = "tg:42"
+        telegram_user.telegram_jid = None
+
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.side_effect = [
+            whatsapp_user,
+            telegram_user,
+        ]
+        db.commit.side_effect = Exception("simulated unique-constraint violation")
+
+        result = await consume_link_code(db, redis, code, telegram_id, "telegram")
+
+        assert result.success is False
+        assert result.error == ERROR_MERGE_FAILED
+        assert result.message and "database error" in result.message.lower()
+        db.rollback.assert_called_once()
+        # Redis state is intentionally NOT cleared on merge failure so the user
+        # can retry with the same code (still within TTL).
+        assert await redis.get(f"link:code:{code}") is not None
+
 
 # ---------------------------------------------------------------------------
 # unlink
@@ -300,3 +337,19 @@ class TestUnlink:
         result = unlink(db, str(uuid.uuid4()))
         assert result is False
         db.commit.assert_not_called()
+
+    def test_rolls_back_and_returns_false_on_commit_failure(self):
+        """Commit failure during unlink must rollback the session and surface
+        as False (no link cleared) rather than letting a dirty session leak."""
+        user = MagicMock()
+        user.id = uuid.uuid4()
+        user.telegram_jid = "tg:42"
+
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = user
+        db.commit.side_effect = Exception("simulated DB outage")
+
+        result = unlink(db, str(user.id))
+
+        assert result is False
+        db.rollback.assert_called_once()

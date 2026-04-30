@@ -147,7 +147,7 @@ export async function handleTextMessage(
         const audioBuffer = await textToSpeech(stripSplitDelimiters(response), jid);
         if (audioBuffer) {
           await ctx.replyWithVoice(new InputFile(audioBuffer, 'reply.ogg'));
-          messagesSent.inc({ client: 'telegram', type: 'voice' });
+          messagesSent.inc({ client: 'telegram', type: 'audio' });
           logger.info({ jid }, 'Voice message sent');
         } else {
           logger.warn({ jid }, 'TTS failed, text-only sent');
