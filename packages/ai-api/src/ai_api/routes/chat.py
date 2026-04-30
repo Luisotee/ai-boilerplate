@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from starlette.requests import Request
 
 from ..agent import AgentDeps, format_message_history, get_ai_response
-from ..commands import is_command, parse_and_execute
+from ..commands import is_command, parse_and_execute, strip_leading_mentions
 from ..config import get_whatsapp_api_key, get_whatsapp_client_url, settings, whitelist_set
 from ..database import (
     get_conversation_history,
@@ -28,6 +28,12 @@ from ..schemas import (
     ChatResponse,
     CommandResponse,
     SaveMessageRequest,
+)
+from ..services.link import (
+    consume_link_code,
+    generate_link_code,
+    platform_for_jid,
+    unlink,
 )
 from ..streams.manager import add_message_to_stream
 from ..whatsapp import create_whatsapp_client
@@ -192,6 +198,50 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
             phone=chat_request.phone,
             whatsapp_lid=chat_request.whatsapp_lid,
         )
+
+        # /link and /unlink need an async Redis client, so they're handled
+        # here rather than inside the sync `parse_and_execute`.
+        cleaned_message = strip_leading_mentions(chat_request.message)
+        link_parts = cleaned_message.split()
+        link_command = link_parts[0].lower() if link_parts else ""
+
+        if link_command in ("/link", "/unlink"):
+            if chat_request.conversation_type == "group":
+                return CommandResponse(
+                    is_command=True,
+                    response="Linking is only available in private chats.",
+                )
+
+            if link_command == "/unlink":
+                cleared = unlink(db, str(user.id))
+                response_text = (
+                    "Unlinked. Future messages on the other platform will start a fresh conversation."
+                    if cleared
+                    else "No active link to remove."
+                )
+                logger.info(f"Command executed for {chat_request.whatsapp_jid}: /unlink")
+                return CommandResponse(is_command=True, response=response_text)
+
+            # /link [code]
+            platform = platform_for_jid(chat_request.whatsapp_jid)
+            async with get_redis_client() as redis:
+                if len(link_parts) >= 2:
+                    code = link_parts[1].strip()
+                    result_link = await consume_link_code(db, redis, code, str(user.id), platform)
+                    response_text = result_link.message or (
+                        "Linked successfully." if result_link.success else "Link failed."
+                    )
+                else:
+                    code = await generate_link_code(redis, str(user.id), platform)
+                    other = "Telegram" if platform == "whatsapp" else "WhatsApp"
+                    response_text = (
+                        f"Your link code is `{code}`.\n\n"
+                        f"On {other}, send `/link {code}` within 10 minutes.\n\n"
+                        "Note: any prior conversation history on the other platform will be discarded."
+                    )
+            logger.info(f"Command executed for {chat_request.whatsapp_jid}: {link_command}")
+            return CommandResponse(is_command=True, response=response_text)
+
         result = parse_and_execute(
             db,
             str(user.id),
