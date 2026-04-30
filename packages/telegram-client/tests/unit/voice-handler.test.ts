@@ -61,7 +61,7 @@ describe('extractAndTranscribeVoice', () => {
     expect(mockTranscribeAudio).toHaveBeenCalledWith(
       Buffer.from('OPUS'),
       'audio/ogg',
-      expect.stringMatching(/^voice_\d+\.oga$/)
+      expect.stringMatching(/^voice_\d+\.ogg$/)
     );
   });
 

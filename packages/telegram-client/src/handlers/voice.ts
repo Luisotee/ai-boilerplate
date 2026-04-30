@@ -38,7 +38,10 @@ export async function extractAndTranscribeVoice(ctx: TelegramContext): Promise<V
   }
 
   const mimetype = voice.mime_type ?? 'audio/ogg';
-  const extension = filePath.split('.').pop() ?? 'ogg';
+  // Telegram voice notes use `.oga` for OGG/Opus; the transcription endpoint's
+  // extension validator only knows `.ogg`. Same container, different convention.
+  const rawExt = filePath.split('.').pop() ?? 'ogg';
+  const extension = rawExt === 'oga' ? 'ogg' : rawExt;
   const filename = `voice_${Date.now()}.${extension}`;
 
   logger.info({ fileId: voice.file_id, size: buffer.length, mimetype }, 'Voice downloaded');
