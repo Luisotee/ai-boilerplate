@@ -143,6 +143,7 @@ def make_user(
     name: str | None = "Test User",
     phone: str | None = None,
     whatsapp_lid: str | None = None,
+    telegram_jid: str | None = None,
     user_id: str | None = None,
 ) -> MagicMock:
     """
@@ -172,6 +173,7 @@ def make_user(
     mock.id = uuid.UUID(user_id) if user_id else uuid.uuid4()
     mock.whatsapp_jid = whatsapp_jid or "5511999999999@s.whatsapp.net"
     mock.whatsapp_lid = whatsapp_lid
+    mock.telegram_jid = telegram_jid
     mock.phone = phone
     mock.name = name
     mock.conversation_type = conversation_type

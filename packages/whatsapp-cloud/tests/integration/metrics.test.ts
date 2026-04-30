@@ -21,16 +21,16 @@ describe('GET /metrics (cloud)', () => {
     expect(res.statusCode).toBe(200);
     expect(res.headers['content-type']).toMatch(/text\/plain/);
     expect(res.headers['content-type']).toContain('version=0.0.4');
-    expect(res.body).toContain('# HELP whatsapp_messages_received_total');
+    expect(res.body).toContain('# HELP chat_messages_received_total');
   });
 
   it('reflects counter increments in the exposition output', async () => {
-    messagesReceived.inc({ type: 'image', conversation_type: 'private' }, 2);
+    messagesReceived.inc({ client: 'cloud', type: 'image', conversation_type: 'private' }, 2);
 
     const res = await app.inject({ method: 'GET', url: '/metrics' });
 
     expect(res.body).toContain(
-      'whatsapp_messages_received_total{type="image",conversation_type="private"} 2'
+      'chat_messages_received_total{client="cloud",type="image",conversation_type="private"} 2'
     );
   });
 });

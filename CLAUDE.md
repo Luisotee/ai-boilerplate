@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-AI WhatsApp agent system: Node.js/TypeScript clients (Baileys + Meta Cloud API) + Python/FastAPI API (Pydantic AI + Gemini).
+AI chat-agent system: Node.js/TypeScript clients (Baileys + Meta Cloud API + Telegram/grammY) + Python/FastAPI API (Pydantic AI + Gemini).
 
 See @README.md for setup guide and environment variables.
 
@@ -12,11 +12,13 @@ packages/
 │   └── src/           # handlers/, routes/, services/, schemas/, utils/
 ├── whatsapp-cloud/    # TypeScript — Fastify server (port 3002) + Meta WhatsApp Cloud API
 │   └── src/           # handlers/, routes/, services/, schemas/, utils/
+├── telegram-client/   # TypeScript — Fastify server (port 3003) + grammY Telegram Bot API
+│   └── src/           # handlers/, routes/, services/, schemas/, utils/, bot.ts, updates.ts
 └── ai-api/            # Python — FastAPI server (port 8000) + Pydantic AI agent
     └── src/ai_api/    # agent/, routes/, rag/, streams/, queue/, whatsapp/, scripts/
 ```
 
-**Key entry points**: `whatsapp.ts` (Baileys message router), `routes/webhook.ts` (Cloud API webhook handler), `agent/core.py` (AI agent definition + system prompt), `streams/processor.py` (processing pipeline), `api-client.ts` (inter-service HTTP client).
+**Key entry points**: `whatsapp.ts` (Baileys message router), `routes/webhook.ts` (Cloud API + Telegram webhook handlers), `telegram-client/src/updates.ts` (grammY dispatch table), `agent/core.py` (AI agent definition + system prompt), `streams/processor.py` (processing pipeline), `api-client.ts` (inter-service HTTP client).
 
 ## Message Flow
 
@@ -34,6 +36,17 @@ How a WhatsApp message traverses the system end-to-end:
 10. WhatsApp client sends text reply; optionally generates TTS audio if user preference enabled
 
 **Group messages**: non-@mentioned messages are saved as history only (`saveOnly=true`), never processed by AI. Bot checks both JID and LID formats for mentions.
+
+### Telegram Message Flow (telegram-client)
+
+1. Telegram → webhook `POST /webhook` → grammY `webhookCallback(bot, "fastify", { secretToken })` verifies the `X-Telegram-Bot-Api-Secret-Token` header
+2. grammY parses the Update and dispatches on filter queries: `message:text | message:voice | message:audio | message:photo | message:document`
+3. Handlers (`handlers/*.ts`) download media via `telegramApi.downloadFile()` — wrapping `bot.api.getFile()` + a fetch of `https://api.telegram.org/file/bot<TOKEN>/<file_path>`
+4. Group messages: `utils/mention.ts` checks for `@bot` mention, `text_mention` entity for `bot.botInfo.id`, or reply to a bot message — otherwise save-only
+5. Funnel into `handleTextMessage(ctx, text, options)` → `sendMessageToAI()` with `client_id: "telegram"`
+6. AI API processes → result polled back → delivered via `ctx.reply()` / `ctx.replyWithVoice()` inside the grammY handler
+7. Typing indicator is maintained via `@grammyjs/auto-chat-action` (set `ctx.chatAction = 'typing'`, middleware refreshes every ~5s until the handler returns)
+8. The synthetic JID `tg:<chat_id>` is stored in `users.whatsapp_jid`; chat IDs are integers (supergroup IDs are negative, e.g. `tg:-1001234567890`)
 
 ### Cloud API Message Flow (whatsapp-cloud)
 
@@ -64,12 +77,14 @@ How a WhatsApp message traverses the system end-to-end:
 docker compose up -d                                    # Core: postgres, redis, api, worker, whatsapp
 docker compose --profile dev up -d                      # + Adminer (DB GUI, opt-in)
 docker compose --profile cloud up -d                    # + WhatsApp Cloud API client (opt-in)
+docker compose --profile telegram up -d                 # + Telegram client (opt-in)
 docker compose --profile dev --profile cloud up -d      # Everything
 
 # Development (from root)
 pnpm dev:server                         # Start AI API (port 8000)
 pnpm dev:whatsapp                       # Start Baileys WhatsApp client (port 3001)
 pnpm dev:cloud                          # Start Cloud API WhatsApp client (port 3002)
+pnpm dev:telegram                       # Start Telegram client (port 3003)
 pnpm dev:queue                          # Start background stream worker
 pnpm install:all                        # Install Node + Python dependencies
 
@@ -97,8 +112,11 @@ cd packages/ai-api && uv run pytest tests/unit  # AI API unit tests only
   - `AI_API_KEY` — Python AI API (required, app fails to start without it)
   - `WHATSAPP_API_KEY` — Baileys WhatsApp client (required)
   - `WHATSAPP_CLOUD_API_KEY` — Cloud API WhatsApp client (falls back to `WHATSAPP_API_KEY`)
+  - `TELEGRAM_API_KEY` — Telegram client (falls back to `WHATSAPP_API_KEY`)
   - Inter-service calls include the key automatically
-- **Webhook HMAC**: Cloud API `/webhook` routes skip API key auth — verified via `x-hub-signature-256` HMAC-SHA256 using `META_APP_SECRET`
+- **Webhook verification**: `/webhook` routes on the Cloud and Telegram clients skip API-key auth and use platform-native verification instead:
+  - Cloud API: `x-hub-signature-256` HMAC-SHA256 using `META_APP_SECRET`
+  - Telegram: `X-Telegram-Bot-Api-Secret-Token` compared to `TELEGRAM_WEBHOOK_SECRET` (grammY's `webhookCallback` validates it automatically when `secretToken` is provided)
 - **CORS**: `CORS_ORIGINS` env var (comma-separated). Empty = block all cross-origin
 - **Rate Limiting**: `RATE_LIMIT_GLOBAL` (default 30/min), `RATE_LIMIT_EXPENSIVE` (default 5/min)
 - **User Whitelist**: `WHITELIST_PHONES` env var — comma-separated phone numbers and/or group JIDs. Empty = all users allowed (disabled). When set, non-whitelisted messages are silently ignored. Checked at both WhatsApp client level (primary) and AI API level (defense in depth)
@@ -106,7 +124,7 @@ cd packages/ai-api && uv run pytest tests/unit  # AI API unit tests only
 
 ## Observability
 
-- **Prometheus metrics**: Both TypeScript clients expose `GET /metrics` (Prometheus exposition format). The route is exempt from API-key auth and rate limiting so scrapers can reach it directly. Counters: `whatsapp_messages_received_total{type,conversation_type}`, `whatsapp_messages_sent_total{type}`. Histogram: `ai_api_poll_duration_seconds{status}`. Default Node process metrics are also included. Note: `whatsapp_messages_sent_total{type="text"}` counts outbound chunks, not AI responses — a single AI reply split into N bursts produces N increments
+- **Prometheus metrics**: All three TypeScript clients expose `GET /metrics` (Prometheus exposition format). The route is exempt from API-key auth and rate limiting so scrapers can reach it directly. Counters: `chat_messages_received_total{client,type,conversation_type}`, `chat_messages_sent_total{client,type}` — `client` is `"baileys" | "cloud" | "telegram"`. Histogram: `ai_api_poll_duration_seconds{status}`. Default Node process metrics are also included. Note: `chat_messages_sent_total{type="text"}` counts outbound chunks, not AI responses — a single AI reply split into N bursts produces N increments
 - **Sentry**: Error tracking is opt-in via `SENTRY_DSN_NODE`. Each TS package has `src/instrument.ts` which must be imported first in `main.ts` (before `config.ts`) so Sentry's OpenTelemetry hooks load before other modules. When `SENTRY_DSN_NODE` is unset, `instrument.ts` is a no-op and `Sentry.setupFastifyErrorHandler` is skipped.
 
 ## Database
@@ -216,6 +234,19 @@ Multipart routes can't use Zod validation directly. Follow the pattern in `route
 - Bot identity uses two formats: JID (`@s.whatsapp.net`) and LID (`@lid`) — both must be checked for mentions/replies (see `utils/message.ts`)
 - Group admin check is lazy: only fetches `groupMetadata` when message text starts with `/`
 - Only PDF documents are accepted for processing; other types return a user-facing error message
+
+### Telegram (TS)
+- **Reaction emoji mismatch**: Telegram's allowed standard-emoji reactions (Bot API 7.x) do NOT include ⏳, ✅, or ❌ — the three status emojis the WhatsApp clients use. `services/telegram-api.ts` maps them to `🤔 / 👍 / 👎` on the way out. `400 BAD_REQUEST: REACTION_INVALID` is the only error `sendReaction` swallows; 401/403/429/network errors re-throw so the `bot.catch` boundary can log them. Callers that treat reactions as best-effort (`handlers/text.ts`, voice transcription fallback) wrap the call in their own try/catch
+- **Privacy mode must be OFF** (via `@BotFather` → `/setprivacy` → Disable) for the bot to see non-addressed group messages. After toggling, **the bot must be removed and re-added** to existing groups — Telegram caches privacy state on join
+- **`bot.init()` is required on startup in webhook mode** to populate `bot.botInfo.id` / `bot.botInfo.username`. Mention detection in `utils/mention.ts` relies on this; `main.ts` awaits `bot.init()` before calling `markBotReady()`
+- **`ctx.chatAction = 'typing'`** (from `@grammyjs/auto-chat-action`) is the canonical "keep typing alive for the duration of a long handler" idiom — the middleware refreshes every ~5s until the handler returns. Unlike Meta Cloud API (one-shot per wamid), Telegram keeps refreshing across multi-burst AI replies. Do NOT roll your own `setInterval`
+- **20 MB download limit** (Bot API cloud): oversize files fail with a `GrammyError` (400 "file is too big"). `handlers/document.ts` returns a discriminated `DocExtraction` (`ok | wrong-type | too-large | download-error`) and `updates.ts` surfaces a distinct user-facing reply per kind. Voice and photo handlers still collapse failures to null and show a generic "try again" reply. For larger uploads you'd need to run a self-hosted `tdlib/telegram-bot-api` server (not done)
+- **Photos arrive as an array of sizes** (`message.photo[]` from thumb → largest); `handlers/photo.ts` always picks the last entry
+- **Chat IDs are integers**, and supergroup/channel IDs are **negative** (e.g. `-1001234567890`). `utils/telegram-id.ts` renders them verbatim as `tg:-1001234567890`
+- **Path naming is intentional**: the Telegram client serves `/whatsapp/send-text`, `/whatsapp/send-reaction`, `/whatsapp/typing` (same paths as the WhatsApp clients) so the Python `WhatsAppClient` works unchanged for all three platforms. `/whatsapp/send-location` and `/whatsapp/send-contact` return 501 — the agent's location/contact tools simply fail gracefully for Telegram conversations
+- **Route exempt from API-key auth**: `/webhook` verifies via Telegram's `X-Telegram-Bot-Api-Secret-Token` header
+- **Voice notes must be OGG/Opus** for `sendVoice` to render them as voice (not audio). The AI API's `/tts` endpoint defaults to `format=ogg` so no re-encoding is needed — pipe the returned bytes into `ctx.replyWithVoice(new InputFile(buffer, 'reply.ogg'))`
+- **Whitelist format**: `WHITELIST_PHONES` entries for Telegram must be the full synthetic JID `tg:<chat_id>` (users) or `tg:-<group_id>` (groups). The `split("@")[0]` fallback in the AI API's whitelist check is a no-op for `tg:` JIDs — see `tests/unit/test_whitelist.py`
 
 ### Cloud API / WhatsApp (TS)
 - **24-hour messaging window**: Can only send free-form messages within 24h of customer's last message — outside this window, template messages are required (not implemented)

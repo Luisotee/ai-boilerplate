@@ -92,6 +92,9 @@ def _get_help_text() -> str:
 /clean all - Full reset (messages, documents, memories, preferences)
 /memories - Show saved core memories
 /memories clear - Delete all core memories
+/link - Get a code to link this account to your other platform (WhatsApp ↔ Telegram)
+/link [code] - Enter a code from the other platform to complete linking
+/unlink - Unlink your accounts
 /help - Show this message
 
 Language codes: {lang_codes}"""

@@ -1,8 +1,8 @@
 """
-Unit tests for ai_api.database — pure function phone_from_jid.
+Unit tests for ai_api.database — pure functions phone_from_jid, is_telegram_jid.
 """
 
-from ai_api.database import phone_from_jid
+from ai_api.database import is_telegram_jid, phone_from_jid
 
 
 class TestPhoneFromJid:
@@ -38,3 +38,23 @@ class TestPhoneFromJid:
     def test_long_phone_number(self):
         jid = "00491761234567890@s.whatsapp.net"
         assert phone_from_jid(jid) == "+00491761234567890"
+
+
+class TestIsTelegramJid:
+    def test_telegram_private(self):
+        assert is_telegram_jid("tg:42") is True
+
+    def test_telegram_supergroup(self):
+        assert is_telegram_jid("tg:-1001234567890") is True
+
+    def test_whatsapp_phone(self):
+        assert is_telegram_jid("15551234567@s.whatsapp.net") is False
+
+    def test_whatsapp_lid(self):
+        assert is_telegram_jid("12345@lid") is False
+
+    def test_whatsapp_group(self):
+        assert is_telegram_jid("120363012345678@g.us") is False
+
+    def test_empty_string(self):
+        assert is_telegram_jid("") is False

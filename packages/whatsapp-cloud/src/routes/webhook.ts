@@ -187,7 +187,7 @@ async function processWebhookMessages(body: WebhookBody): Promise<void> {
     );
 
     const typeLabel = KNOWN_MESSAGE_TYPES.has(message.type) ? message.type : 'other';
-    messagesReceived.inc({ type: typeLabel, conversation_type: 'private' });
+    messagesReceived.inc({ client: 'cloud', type: typeLabel, conversation_type: 'private' });
 
     // Fire the typing indicator as early as possible — before any Graph API
     // download or transcription — so the user sees feedback immediately. Meta
