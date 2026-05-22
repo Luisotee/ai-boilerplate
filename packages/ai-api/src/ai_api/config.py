@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     ai_api_key: str  # Required — app fails to start if not set
     whatsapp_api_key: str  # Required — used to authenticate calls to WhatsApp client
     whatsapp_cloud_api_key: str | None = None  # Falls back to whatsapp_api_key
+    telegram_api_key: str | None = None  # Falls back to whatsapp_api_key
 
     # Optional with defaults
     groq_api_key: str | None = None
@@ -138,9 +139,10 @@ class Settings(BaseSettings):
     tts_default_voice: str = "Kore"
     tts_max_text_length: int = 5000
 
-    # WhatsApp Clients
+    # Chat Clients
     whatsapp_client_url: str = "http://localhost:3001"
     whatsapp_cloud_client_url: str = "http://localhost:3002"
+    telegram_client_url: str = "http://localhost:3003"
     whatsapp_client_timeout: int = 30
 
     # External APIs
@@ -197,16 +199,20 @@ settings = Settings()
 
 
 def get_whatsapp_client_url(client_id: str | None) -> str:
-    """Resolve client_id to a pre-configured WhatsApp client URL."""
+    """Resolve client_id to a pre-configured chat client URL."""
     if client_id == "cloud":
         return settings.whatsapp_cloud_client_url
+    if client_id == "telegram":
+        return settings.telegram_client_url
     return settings.whatsapp_client_url
 
 
 def get_whatsapp_api_key(client_id: str | None) -> str:
-    """Resolve client_id to the appropriate WhatsApp client API key."""
+    """Resolve client_id to the appropriate chat client API key."""
     if client_id == "cloud" and settings.whatsapp_cloud_api_key:
         return settings.whatsapp_cloud_api_key
+    if client_id == "telegram" and settings.telegram_api_key:
+        return settings.telegram_api_key
     return settings.whatsapp_api_key
 
 

@@ -12,22 +12,22 @@ describe('metrics registry (cloud)', () => {
   });
 
   it('exposes Prometheus exposition format with labeled counters', async () => {
-    messagesReceived.inc({ type: 'text', conversation_type: 'private' });
-    messagesReceived.inc({ type: 'image', conversation_type: 'private' }, 2);
-    messagesSent.inc({ type: 'text' });
-    messagesSent.inc({ type: 'audio' }, 3);
+    messagesReceived.inc({ client: 'cloud', type: 'text', conversation_type: 'private' });
+    messagesReceived.inc({ client: 'cloud', type: 'image', conversation_type: 'private' }, 2);
+    messagesSent.inc({ client: 'cloud', type: 'text' });
+    messagesSent.inc({ client: 'cloud', type: 'audio' }, 3);
 
     const output = await metricsRegistry.metrics();
 
-    expect(output).toContain('# HELP whatsapp_messages_received_total');
+    expect(output).toContain('# HELP chat_messages_received_total');
     expect(output).toContain(
-      'whatsapp_messages_received_total{type="text",conversation_type="private"} 1'
+      'chat_messages_received_total{client="cloud",type="text",conversation_type="private"} 1'
     );
     expect(output).toContain(
-      'whatsapp_messages_received_total{type="image",conversation_type="private"} 2'
+      'chat_messages_received_total{client="cloud",type="image",conversation_type="private"} 2'
     );
-    expect(output).toContain('whatsapp_messages_sent_total{type="text"} 1');
-    expect(output).toContain('whatsapp_messages_sent_total{type="audio"} 3');
+    expect(output).toContain('chat_messages_sent_total{client="cloud",type="text"} 1');
+    expect(output).toContain('chat_messages_sent_total{client="cloud",type="audio"} 3');
   });
 
   it('exposes ai_api_poll_duration_seconds histogram', async () => {

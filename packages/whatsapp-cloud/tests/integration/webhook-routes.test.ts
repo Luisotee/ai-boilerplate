@@ -269,7 +269,7 @@ describe('Webhook routes — /webhook', () => {
       expect(mockHandleTextMessage).not.toHaveBeenCalled();
     });
 
-    it('increments whatsapp_messages_received_total with the right labels', async () => {
+    it('increments chat_messages_received_total with the right labels', async () => {
       const payload = makeWebhookBody('16505551234', 'Count me');
 
       await app.inject({
@@ -283,7 +283,7 @@ describe('Webhook routes — /webhook', () => {
 
       const exposition = await metricsRegistry.metrics();
       expect(exposition).toContain(
-        'whatsapp_messages_received_total{type="text",conversation_type="private"} 1'
+        'chat_messages_received_total{client="cloud",type="text",conversation_type="private"} 1'
       );
     });
 
@@ -322,7 +322,7 @@ describe('Webhook routes — /webhook', () => {
 
       const exposition = await metricsRegistry.metrics();
       expect(exposition).toContain(
-        'whatsapp_messages_received_total{type="other",conversation_type="private"} 1'
+        'chat_messages_received_total{client="cloud",type="other",conversation_type="private"} 1'
       );
       expect(exposition).not.toContain('type="interactive"');
     });

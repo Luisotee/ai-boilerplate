@@ -205,6 +205,7 @@ export async function initializeWhatsApp(): Promise<void> {
                         ? 'text'
                         : 'other';
         messagesReceived.inc({
+          client: 'baileys',
           type: msgType,
           conversation_type: isGroup ? 'group' : 'private',
         });

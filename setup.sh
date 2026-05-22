@@ -156,6 +156,7 @@ if [ "$SKIP_ENV" = false ]; then
     WHATSAPP_API_KEY DATABASE_URL GROQ_API_KEY LLAMA_CLOUD_API_KEY
     META_PHONE_NUMBER_ID META_ACCESS_TOKEN META_APP_SECRET META_WEBHOOK_VERIFY_TOKEN
     STT_PROVIDER WHISPER_MODEL WHISPER_TIMEOUT_SECONDS INSTALL_DOCLING
+    TELEGRAM_BOT_TOKEN TELEGRAM_WEBHOOK_SECRET
   )
   MISSING_KEYS=()
   for key in "${REQUIRED_KEYS[@]}"; do
@@ -265,6 +266,37 @@ if [ "$SKIP_ENV" = false ]; then
     fi
   else
     print_warning "Skipped Cloud API — you can set META_* vars in .env later"
+  fi
+
+  # ── Optional: Telegram ────────────────────────────────
+  echo ""
+  read -rp "  Set up Telegram Bot? (y/N): " SETUP_TG
+  if [[ "$SETUP_TG" =~ ^[Yy]$ ]]; then
+    echo ""
+    echo -e "  ${YELLOW}Create a bot with @BotFather on Telegram; it will give you a token like 123:ABC.${NC}"
+    read -rsp "  TELEGRAM_BOT_TOKEN: " TG_TOKEN
+    echo
+    TG_TOKEN=$(sanitize "$TG_TOKEN")
+    DEFAULT_TG_SECRET=$(generate_hex_key)
+    read -rp "  TELEGRAM_WEBHOOK_SECRET (Enter to auto-generate): " TG_SECRET
+    TG_SECRET=$(sanitize "${TG_SECRET:-$DEFAULT_TG_SECRET}")
+    read -rp "  TELEGRAM_PUBLIC_WEBHOOK_URL (public https URL ending in /webhook, leave empty to skip setWebhook): " TG_URL
+    TG_URL=$(sanitize "$TG_URL")
+
+    if [ -n "$TG_TOKEN" ]; then
+      sed -i "s|^TELEGRAM_BOT_TOKEN=.*|TELEGRAM_BOT_TOKEN=$(escape_sed "$TG_TOKEN")|" "$ENV_FILE"
+      sed -i "s|^TELEGRAM_WEBHOOK_SECRET=.*|TELEGRAM_WEBHOOK_SECRET=$(escape_sed "$TG_SECRET")|" "$ENV_FILE"
+      if [ -n "$TG_URL" ]; then
+        sed -i "s|^TELEGRAM_PUBLIC_WEBHOOK_URL=.*|TELEGRAM_PUBLIC_WEBHOOK_URL=$(escape_sed "$TG_URL")|" "$ENV_FILE"
+      fi
+      print_success "Telegram configured"
+      print_warning "Start the container with: docker compose --profile telegram up -d"
+      print_warning "In @BotFather: /setprivacy → Disable, so the bot can see group messages"
+    else
+      print_warning "TELEGRAM_BOT_TOKEN left empty — Telegram client will not start"
+    fi
+  else
+    print_warning "Skipped Telegram — set TELEGRAM_* vars in .env when ready"
   fi
 
   # ── Optional: LlamaParse ──────────────────────────────
@@ -414,6 +446,7 @@ echo -e "  ${BOLD}Option A: Docker (recommended for production)${NC}"
 echo "    docker compose up -d                               # core stack"
 echo "    docker compose --profile dev up -d                 # + Adminer (DB GUI)"
 echo "    docker compose --profile cloud up -d               # + WhatsApp Cloud API"
+echo "    docker compose --profile telegram up -d            # + Telegram client"
 echo "    docker compose --profile whisper up -d             # + self-hosted Whisper (STT)"
 echo "    docker compose --profile dev --profile cloud up -d # everything"
 
@@ -438,5 +471,6 @@ echo -e "  ${BOLD}Documentation${NC}"
 echo "    AI API:     http://localhost:8000/docs"
 echo "    WhatsApp:   http://localhost:3001/docs"
 echo "    Cloud API:  http://localhost:3002/docs"
+echo "    Telegram:   http://localhost:3003/docs (requires --profile telegram)"
 echo "    DB Admin:   http://localhost:8080 (requires --profile dev)"
 echo ""

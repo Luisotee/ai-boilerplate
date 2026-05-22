@@ -45,6 +45,7 @@ class User(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     whatsapp_jid = Column(String, unique=True, index=True, nullable=False)
     whatsapp_lid = Column(String, unique=True, index=True, nullable=True)
+    telegram_jid = Column(String, unique=True, index=True, nullable=True)
     phone = Column(String, index=True, nullable=True)
     name = Column(String, nullable=True)
     conversation_type = Column(String, nullable=False, index=True)  # 'private' or 'group'
@@ -164,6 +165,11 @@ def phone_from_jid(jid: str) -> str | None:
     return None
 
 
+def is_telegram_jid(jid: str) -> bool:
+    """Telegram synthetic JIDs use the `tg:<chat_id>` prefix."""
+    return jid.startswith("tg:")
+
+
 def get_or_create_user(
     db,
     whatsapp_jid: str,
@@ -172,20 +178,38 @@ def get_or_create_user(
     phone: str = None,
     whatsapp_lid: str = None,
 ):
-    """Get existing user or create new one, resolving JID/LID/phone identity."""
+    """Get existing user or create new one, resolving JID/LID/phone identity.
+
+    For Telegram JIDs (`tg:<chat_id>`) we first check the dedicated
+    `telegram_jid` column (populated after a `/link` merge). If absent we fall
+    back to `whatsapp_jid` so unlinked Telegram users still resolve to their
+    own row. The phone-based merge (Step 3) is intentionally skipped for
+    Telegram — that path is for collapsing WhatsApp JID/LID variants of the
+    same person, not for cross-platform identity bridging (which goes through
+    the explicit `/link` flow).
+    """
+    is_telegram = is_telegram_jid(whatsapp_jid)
+
     # Auto-extract phone from phone-based JID if not provided
     if not phone:
         phone = phone_from_jid(whatsapp_jid)
 
-    # Step 1: Direct lookup by primary JID (fast path)
-    user = db.query(User).filter(User.whatsapp_jid == whatsapp_jid).first()
+    # Step 1: Direct lookup by primary identity column
+    if is_telegram:
+        user = db.query(User).filter(User.telegram_jid == whatsapp_jid).first()
+        if not user:
+            # Pre-link Telegram orphans store their tg: JID in whatsapp_jid.
+            user = db.query(User).filter(User.whatsapp_jid == whatsapp_jid).first()
+    else:
+        user = db.query(User).filter(User.whatsapp_jid == whatsapp_jid).first()
 
-    # Step 2: Check if this JID matches a known LID
-    if not user:
+    # Step 2: Check if this JID matches a known LID (WhatsApp only)
+    if not user and not is_telegram:
         user = db.query(User).filter(User.whatsapp_lid == whatsapp_jid).first()
 
     # Step 3: Check if we know this phone number under a different JID
-    if not user and phone:
+    # (WhatsApp variants only; Telegram uses /link to bridge identities).
+    if not user and not is_telegram and phone:
         user = db.query(User).filter(User.phone == phone).first()
         if user and user.whatsapp_jid != whatsapp_jid:
             old_jid = user.whatsapp_jid
@@ -304,8 +328,13 @@ def get_or_create_preferences(db, user_id: str) -> ConversationPreferences:
 
 
 def get_user_preferences(db, whatsapp_jid: str) -> ConversationPreferences | None:
-    """Get preferences by WhatsApp JID (convenience function)."""
-    user = db.query(User).filter(User.whatsapp_jid == whatsapp_jid).first()
+    """Get preferences by JID (handles WhatsApp and Telegram identifiers)."""
+    if is_telegram_jid(whatsapp_jid):
+        user = db.query(User).filter(User.telegram_jid == whatsapp_jid).first()
+        if not user:
+            user = db.query(User).filter(User.whatsapp_jid == whatsapp_jid).first()
+    else:
+        user = db.query(User).filter(User.whatsapp_jid == whatsapp_jid).first()
     if not user:
         return None
     return get_or_create_preferences(db, str(user.id))

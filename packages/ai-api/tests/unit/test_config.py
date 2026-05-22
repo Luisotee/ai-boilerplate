@@ -46,6 +46,16 @@ class TestGetWhatsappClientUrl:
         assert cloud_url == settings.whatsapp_cloud_client_url
         assert default_url == settings.whatsapp_client_url
 
+    def test_telegram_client_id(self):
+        result = get_whatsapp_client_url("telegram")
+        assert result == settings.telegram_client_url
+
+    def test_telegram_url_is_isolated_from_baileys(self):
+        telegram_url = get_whatsapp_client_url("telegram")
+        baileys_url = get_whatsapp_client_url("baileys")
+        assert telegram_url == settings.telegram_client_url
+        assert baileys_url == settings.whatsapp_client_url
+
 
 # ---------------------------------------------------------------------------
 # get_whatsapp_api_key
@@ -88,3 +98,13 @@ class TestGetWhatsappApiKey:
     def test_api_key_is_string(self):
         result = get_whatsapp_api_key("baileys")
         assert isinstance(result, str)
+
+    def test_telegram_without_telegram_key_returns_default(self):
+        if settings.telegram_api_key is None:
+            result = get_whatsapp_api_key("telegram")
+            assert result == settings.whatsapp_api_key
+
+    def test_telegram_with_telegram_key_returns_telegram_key(self):
+        if settings.telegram_api_key:
+            result = get_whatsapp_api_key("telegram")
+            assert result == settings.telegram_api_key

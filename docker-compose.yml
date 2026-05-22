@@ -46,7 +46,7 @@ services:
     volumes:
       - redis-data:/data
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDISCLI_AUTH\" --no-auth-warning ping | grep -q PONG"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -107,6 +107,7 @@ services:
       KB_UPLOAD_DIR: /app/knowledge_base
       WHATSAPP_CLIENT_URL: http://whatsapp:3001
       WHATSAPP_CLOUD_CLIENT_URL: http://whatsapp-cloud:3002
+      TELEGRAM_CLIENT_URL: http://telegram:3003
     ports:
       - "8000:8000"
     volumes:
@@ -149,6 +150,7 @@ services:
       KB_UPLOAD_DIR: /app/knowledge_base
       WHATSAPP_CLIENT_URL: http://whatsapp:3001
       WHATSAPP_CLOUD_CLIENT_URL: http://whatsapp-cloud:3002
+      TELEGRAM_CLIENT_URL: http://telegram:3003
     volumes:
       - knowledge-base-data:/app/knowledge_base
     depends_on:
@@ -308,6 +310,41 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3002/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 10s
+      retries: 3
+    networks:
+      - aiagent-network
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
+
+  telegram:
+    build:
+      context: .
+      dockerfile: packages/telegram-client/Dockerfile
+    container_name: aiagent-telegram
+    restart: unless-stopped
+    profiles: ["telegram"]
+    env_file: .env
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    environment:
+      AI_API_URL: http://api:8000
+      TELEGRAM_HOST: 0.0.0.0
+    ports:
+      - "3003:3003"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3003/health"]
       interval: 30s
       timeout: 10s
       start_period: 10s
