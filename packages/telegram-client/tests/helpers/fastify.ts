@@ -19,7 +19,6 @@ import {
 import { registerHealthRoutes } from '../../src/routes/health.js';
 import { registerMessagingRoutes } from '../../src/routes/messaging.js';
 import { registerMediaRoutes } from '../../src/routes/media.js';
-import { registerMetricsRoutes } from '../../src/routes/metrics.js';
 import { registerWebhookRoutes } from '../../src/routes/webhook.js';
 
 export interface BuildTestAppOptions {
@@ -36,7 +35,6 @@ export async function buildTestApp(options: BuildTestAppOptions = {}) {
   await registerHealthRoutes(app);
   await registerMessagingRoutes(app);
   await registerMediaRoutes(app);
-  await registerMetricsRoutes(app);
   if (includeWebhook) {
     await registerWebhookRoutes(app);
   }

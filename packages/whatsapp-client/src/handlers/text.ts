@@ -6,7 +6,6 @@ import { stripDeviceSuffix, isGroupChat } from '../utils/jid.js';
 import { getSenderName } from '../utils/message.js';
 import { sendFailureReaction } from '../utils/reactions.js';
 import { splitResponseIntoBursts, stripSplitDelimiters, sleep } from '../utils/message-split.js';
-import { messagesSent } from '../routes/metrics.js';
 
 interface ImageData {
   buffer: Buffer;
@@ -126,7 +125,6 @@ export async function handleTextMessage(
         }
         await sock.sendMessage(whatsappJid, { text: chunks[i] });
         sentCount++;
-        messagesSent.inc({ client: 'baileys', type: 'text' });
       }
     } catch (burstErr) {
       if (sentCount === 0) throw burstErr;
@@ -155,7 +153,6 @@ export async function handleTextMessage(
             mimetype: 'audio/ogg; codecs=opus',
             ptt: true, // Voice note
           });
-          messagesSent.inc({ client: 'baileys', type: 'audio' });
           logger.info({ whatsappJid }, 'Voice message sent');
         } else {
           logger.warn({ whatsappJid }, 'TTS failed, text-only sent');

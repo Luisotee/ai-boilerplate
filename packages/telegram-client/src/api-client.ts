@@ -1,6 +1,5 @@
 import { config } from './config.js';
 import { logger } from './logger.js';
-import { apiPollDuration } from './routes/metrics.js';
 import { fetchWithTimeout } from './utils/fetch.js';
 
 function aiApiHeaders(contentType?: string): Record<string, string> {
@@ -156,46 +155,37 @@ export async function sendMessageToAI(
 
   const startTime = Date.now();
   let iterations = 0;
-  const endTimer = apiPollDuration.startTimer();
-  let pollStatus: 'success' | 'error' = 'error';
 
-  try {
-    while (iterations < config.polling.maxIterations) {
-      const elapsedMs = Date.now() - startTime;
-      if (elapsedMs >= config.polling.maxDurationMs) {
-        throw new Error(
-          `Polling timeout: job ${job_id} exceeded ${config.polling.maxDurationMs}ms`
-        );
-      }
-
-      const statusResponse = await fetchWithTimeout(
-        `${config.aiApiUrl}/chat/job/${job_id}`,
-        { headers: aiApiHeaders() },
-        config.timeouts.polling
-      );
-
-      if (!statusResponse.ok) {
-        throw new Error(`Job status failed: ${statusResponse.status} ${statusResponse.statusText}`);
-      }
-
-      const status: JobStatus = await statusResponse.json();
-
-      if (status.complete) {
-        logger.info({ job_id, iterations, elapsedMs }, 'Job completed');
-        pollStatus = 'success';
-        return status.full_response || '';
-      }
-
-      iterations++;
-      await new Promise((resolve) => setTimeout(resolve, config.polling.intervalMs));
+  while (iterations < config.polling.maxIterations) {
+    const elapsedMs = Date.now() - startTime;
+    if (elapsedMs >= config.polling.maxDurationMs) {
+      throw new Error(`Polling timeout: job ${job_id} exceeded ${config.polling.maxDurationMs}ms`);
     }
 
-    throw new Error(
-      `Polling timeout: job ${job_id} exceeded ${config.polling.maxIterations} iterations`
+    const statusResponse = await fetchWithTimeout(
+      `${config.aiApiUrl}/chat/job/${job_id}`,
+      { headers: aiApiHeaders() },
+      config.timeouts.polling
     );
-  } finally {
-    endTimer({ status: pollStatus });
+
+    if (!statusResponse.ok) {
+      throw new Error(`Job status failed: ${statusResponse.status} ${statusResponse.statusText}`);
+    }
+
+    const status: JobStatus = await statusResponse.json();
+
+    if (status.complete) {
+      logger.info({ job_id, iterations, elapsedMs }, 'Job completed');
+      return status.full_response || '';
+    }
+
+    iterations++;
+    await new Promise((resolve) => setTimeout(resolve, config.polling.intervalMs));
   }
+
+  throw new Error(
+    `Polling timeout: job ${job_id} exceeded ${config.polling.maxIterations} iterations`
+  );
 }
 
 export async function getUserPreferences(jid: string): Promise<UserPreferences | null> {

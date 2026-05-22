@@ -22,7 +22,6 @@ import { registerWebhookRoutes } from './routes/webhook.js';
 import { registerMessagingRoutes } from './routes/messaging.js';
 import { registerMediaRoutes } from './routes/media.js';
 import { registerOperationsRoutes } from './routes/operations.js';
-import { registerMetricsRoutes } from './routes/metrics.js';
 
 /**
  * Transform function that handles both Zod and plain JSON Schema.
@@ -164,7 +163,6 @@ async function start() {
   app.addHook('onRequest', async (request, reply) => {
     if (
       request.url.startsWith('/health') ||
-      request.url === '/metrics' ||
       request.url.startsWith('/docs') ||
       request.url.startsWith('/webhook')
     ) {
@@ -187,8 +185,7 @@ async function start() {
   await app.register(FastifyRateLimit, {
     max: config.rateLimitGlobal,
     timeWindow: '1 minute',
-    allowList: (req) =>
-      req.url.startsWith('/health') || req.url === '/metrics' || req.url.startsWith('/webhook'),
+    allowList: (req) => req.url.startsWith('/health') || req.url.startsWith('/webhook'),
   });
 
   // Register multipart for file uploads
@@ -259,7 +256,6 @@ async function start() {
   await registerMessagingRoutes(app);
   await registerMediaRoutes(app);
   await registerOperationsRoutes(app);
-  await registerMetricsRoutes(app);
 
   // Sentry Fastify error handler — must be registered after all routes
   if (process.env.SENTRY_DSN_NODE) {

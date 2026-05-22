@@ -22,7 +22,6 @@ import { registerHealthRoutes } from './routes/health.js';
 import { registerWebhookRoutes } from './routes/webhook.js';
 import { registerMessagingRoutes } from './routes/messaging.js';
 import { registerMediaRoutes } from './routes/media.js';
-import { registerMetricsRoutes } from './routes/metrics.js';
 
 function createMixedSchemaTransform() {
   const plainSchemaRoutes = ['/webhook'];
@@ -67,12 +66,11 @@ async function start() {
     origin: corsOrigins.length > 0 ? corsOrigins : false,
   });
 
-  // API Key auth — exempts health, metrics, docs, and /webhook (Telegram uses
+  // API Key auth — exempts health, docs, and /webhook (Telegram uses
   // its own secret_token header for webhook verification).
   app.addHook('onRequest', async (request, reply) => {
     if (
       request.url.startsWith('/health') ||
-      request.url === '/metrics' ||
       request.url.startsWith('/docs') ||
       request.url.startsWith('/webhook')
     ) {
@@ -94,8 +92,7 @@ async function start() {
   await app.register(FastifyRateLimit, {
     max: config.rateLimitGlobal,
     timeWindow: '1 minute',
-    allowList: (req) =>
-      req.url.startsWith('/health') || req.url === '/metrics' || req.url.startsWith('/webhook'),
+    allowList: (req) => req.url.startsWith('/health') || req.url.startsWith('/webhook'),
   });
 
   await app.register(FastifySwagger, {
@@ -150,7 +147,6 @@ async function start() {
   await registerWebhookRoutes(app);
   await registerMessagingRoutes(app);
   await registerMediaRoutes(app);
-  await registerMetricsRoutes(app);
 
   if (process.env.SENTRY_DSN_NODE) {
     Sentry.setupFastifyErrorHandler(app);

@@ -23,7 +23,6 @@ import { registerHealthRoutes } from '../../src/routes/health.js';
 import { registerMessagingRoutes } from '../../src/routes/messaging.js';
 import { registerMediaRoutes } from '../../src/routes/media.js';
 import { registerOperationsRoutes } from '../../src/routes/operations.js';
-import { registerMetricsRoutes } from '../../src/routes/metrics.js';
 
 /**
  * Build a Fastify instance suitable for route integration tests.
@@ -61,7 +60,6 @@ export async function buildTestApp() {
   await registerMessagingRoutes(app);
   await registerMediaRoutes(app);
   await registerOperationsRoutes(app);
-  await registerMetricsRoutes(app);
 
   // Ensure plugins are loaded
   await app.ready();
