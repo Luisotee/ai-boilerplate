@@ -11,7 +11,6 @@ import { extractAndTranscribeVoice } from './handlers/voice.js';
 import { extractPhotoData } from './handlers/photo.js';
 import { extractDocumentData } from './handlers/document.js';
 import { logger } from './logger.js';
-import { messagesReceived } from './routes/metrics.js';
 import * as telegramApi from './services/telegram-api.js';
 import { chatIdToJid, chatTypeToConversationType } from './utils/telegram-id.js';
 import { isAddressedToBot, stripBotMention } from './utils/mention.js';
@@ -23,7 +22,6 @@ export function registerUpdateHandlers(): void {
     const chatType = ctx.chat?.type ?? 'private';
     const conversationType = chatTypeToConversationType(chatType);
     if (passesWhitelist(ctx.chat?.id) === false) return;
-    messagesReceived.inc({ client: 'telegram', type: 'text', conversation_type: conversationType });
 
     const text = ctx.msg.text;
     const isGroup = conversationType === 'group';
@@ -41,11 +39,6 @@ export function registerUpdateHandlers(): void {
     const chatType = ctx.chat?.type ?? 'private';
     const conversationType = chatTypeToConversationType(chatType);
     if (passesWhitelist(ctx.chat?.id) === false) return;
-    messagesReceived.inc({
-      client: 'telegram',
-      type: 'audio',
-      conversation_type: conversationType,
-    });
 
     const isGroup = conversationType === 'group';
     const addressed = !isGroup || isAddressed(ctx);
@@ -106,11 +99,6 @@ export function registerUpdateHandlers(): void {
     const chatType = ctx.chat?.type ?? 'private';
     const conversationType = chatTypeToConversationType(chatType);
     if (passesWhitelist(ctx.chat?.id) === false) return;
-    messagesReceived.inc({
-      client: 'telegram',
-      type: 'image',
-      conversation_type: conversationType,
-    });
 
     const isGroup = conversationType === 'group';
     const addressed = !isGroup || isAddressed(ctx);
@@ -154,11 +142,6 @@ export function registerUpdateHandlers(): void {
     const chatType = ctx.chat?.type ?? 'private';
     const conversationType = chatTypeToConversationType(chatType);
     if (passesWhitelist(ctx.chat?.id) === false) return;
-    messagesReceived.inc({
-      client: 'telegram',
-      type: 'document',
-      conversation_type: conversationType,
-    });
 
     const isGroup = conversationType === 'group';
     const addressed = !isGroup || isAddressed(ctx);

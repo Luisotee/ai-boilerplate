@@ -4,7 +4,7 @@
  * Covers the orchestrator's main branches:
  *   - missing chat/message context → early return
  *   - saveOnly → persist and return without replying
- *   - happy path → ctx.reply + messagesSent increment
+ *   - happy path → ctx.reply
  *   - AI error → sendReaction('❌') AND ctx.reply (the H2 parity fix)
  *   - reaction failure does not prevent the error reply
  *   - TTS enabled → replyWithVoice

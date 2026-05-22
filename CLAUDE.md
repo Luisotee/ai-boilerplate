@@ -124,7 +124,6 @@ cd packages/ai-api && uv run pytest tests/unit  # AI API unit tests only
 
 ## Observability
 
-- **Prometheus metrics**: All three TypeScript clients expose `GET /metrics` (Prometheus exposition format). The route is exempt from API-key auth and rate limiting so scrapers can reach it directly. Counters: `chat_messages_received_total{client,type,conversation_type}`, `chat_messages_sent_total{client,type}` — `client` is `"baileys" | "cloud" | "telegram"`. Histogram: `ai_api_poll_duration_seconds{status}`. Default Node process metrics are also included. Note: `chat_messages_sent_total{type="text"}` counts outbound chunks, not AI responses — a single AI reply split into N bursts produces N increments
 - **Sentry**: Error tracking is opt-in via `SENTRY_DSN_NODE`. Each TS package has `src/instrument.ts` which must be imported first in `main.ts` (before `config.ts`) so Sentry's OpenTelemetry hooks load before other modules. When `SENTRY_DSN_NODE` is unset, `instrument.ts` is a no-op and `Sentry.setupFastifyErrorHandler` is skipped.
 
 ## Database
@@ -180,7 +179,6 @@ Each package has `tests/` with: `unit/` (pure functions, no I/O), `integration/`
 ### Gotchas
 - TS singleton state (`getBaileysSocket`, `isCloudApiConnected`) needs `vi.resetModules()` in `beforeEach` to reset between tests
 - New routes must also be registered in `tests/helpers/fastify.ts` (`buildTestApp()`) — integration tests won't see them otherwise
-- Module-scoped prom-client counters leak across tests — call `metricsRegistry.resetMetrics()` in `beforeEach` when asserting counter values
 - TS `fetch` tests use `vi.stubGlobal('fetch', mockFetch)` + `vi.useFakeTimers()` for timeout testing
 - Python `conftest.py` sets env vars BEFORE any production code import — order matters, don't rearrange
 - No coverage tooling configured — no `pytest-cov` or `@vitest/coverage-*`
