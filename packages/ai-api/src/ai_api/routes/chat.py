@@ -32,6 +32,7 @@ from ..schemas import (
 from ..services.link import (
     consume_link_code,
     generate_link_code,
+    is_already_linked,
     platform_for_jid,
     unlink,
 )
@@ -213,12 +214,18 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
                 )
 
             if link_command == "/unlink":
-                cleared = unlink(db, str(user.id))
-                response_text = (
-                    "Unlinked. Future messages on the other platform will start a fresh conversation."
-                    if cleared
-                    else "No active link to remove."
-                )
+                unlink_result = unlink(db, str(user.id))
+                if unlink_result.db_error:
+                    response_text = (
+                        "Sorry, unlinking failed due to a database error. Please try again."
+                    )
+                elif unlink_result.cleared:
+                    response_text = (
+                        "Unlinked. Future messages on the other platform "
+                        "will start a fresh conversation."
+                    )
+                else:
+                    response_text = "No active link to remove."
                 logger.info(f"Command executed for {chat_request.whatsapp_jid}: /unlink")
                 return CommandResponse(is_command=True, response=response_text)
 
@@ -230,6 +237,15 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
                     result_link = await consume_link_code(db, redis, code, str(user.id), platform)
                     response_text = result_link.message or (
                         "Linked successfully." if result_link.success else "Link failed."
+                    )
+                elif is_already_linked(user):
+                    # Short-circuit: a fully-linked user generating a fresh code
+                    # produces a code that can't be redeemed (both JIDs resolve
+                    # to the same row, so consume_link_code hits ERROR_SAME_USER
+                    # with a misleading message). Tell them directly instead.
+                    response_text = (
+                        "Your accounts are already linked. "
+                        "Run `/unlink` first if you want to re-link."
                     )
                 else:
                     code = await generate_link_code(redis, str(user.id), platform)

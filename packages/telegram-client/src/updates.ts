@@ -15,6 +15,7 @@ import { messagesReceived } from './routes/metrics.js';
 import * as telegramApi from './services/telegram-api.js';
 import { chatIdToJid, chatTypeToConversationType } from './utils/telegram-id.js';
 import { isAddressedToBot, stripBotMention } from './utils/mention.js';
+import { documentMarker, imageMarker } from './utils/group-media-marker.js';
 
 export function registerUpdateHandlers(): void {
   // ---------------- Text ----------------
@@ -107,26 +108,44 @@ export function registerUpdateHandlers(): void {
     if (passesWhitelist(ctx.chat?.id) === false) return;
     messagesReceived.inc({
       client: 'telegram',
-      type: 'photo',
+      type: 'image',
       conversation_type: conversationType,
     });
 
     const isGroup = conversationType === 'group';
     const addressed = !isGroup || isAddressed(ctx);
-    if (isGroup && !addressed) return;
+    const caption = ctx.msg.caption ?? '';
+
+    // Group non-mention: save an [Image] / [Image: caption] marker to history
+    // without downloading the binary. Matches Baileys (whatsapp.ts:226-234) so
+    // the AI keeps image context across both clients.
+    if (isGroup && !addressed) {
+      await handleTextMessage(ctx, imageMarker(caption), {
+        senderJid: ctx.from ? chatIdToJid(ctx.from.id) : undefined,
+        saveOnly: true,
+      });
+      return;
+    }
 
     ctx.chatAction = 'typing';
-    const photo = await extractPhotoData(ctx);
-    const caption = ctx.msg.caption ?? '';
+    const result = await extractPhotoData(ctx);
     const text = caption || 'Image received';
 
-    if (photo) {
-      await handleTextMessage(ctx, text, {
-        senderJid: ctx.from ? chatIdToJid(ctx.from.id) : undefined,
-        image: photo,
-      });
-    } else {
-      await ctx.reply('Sorry, I could not process that image. Please try again.');
+    switch (result.kind) {
+      case 'ok':
+        await handleTextMessage(ctx, text, {
+          senderJid: ctx.from ? chatIdToJid(ctx.from.id) : undefined,
+          image: { data: result.data, mimetype: result.mimetype },
+        });
+        break;
+      case 'too-large':
+        await ctx.reply(
+          "Sorry, that image is larger than Telegram's 20 MB bot download limit. Please send a smaller file."
+        );
+        break;
+      case 'download-error':
+        await ctx.reply("Sorry, I couldn't download that image. Please try again.");
+        break;
     }
   });
 
@@ -143,12 +162,21 @@ export function registerUpdateHandlers(): void {
 
     const isGroup = conversationType === 'group';
     const addressed = !isGroup || isAddressed(ctx);
-    if (isGroup && !addressed) return;
+    const caption = ctx.msg.caption ?? '';
+    const filename = ctx.msg.document?.file_name ?? 'document.pdf';
+
+    // Group non-mention: save a [Document: filename] marker without
+    // downloading the file. Matches Baileys (whatsapp.ts:262-273).
+    if (isGroup && !addressed) {
+      await handleTextMessage(ctx, documentMarker(filename, caption), {
+        senderJid: ctx.from ? chatIdToJid(ctx.from.id) : undefined,
+        saveOnly: true,
+      });
+      return;
+    }
 
     ctx.chatAction = 'typing';
     const result = await extractDocumentData(ctx);
-    const caption = ctx.msg.caption ?? '';
-    const filename = ctx.msg.document?.file_name ?? 'document.pdf';
     const text = caption || `Document: ${filename}`;
 
     switch (result.kind) {

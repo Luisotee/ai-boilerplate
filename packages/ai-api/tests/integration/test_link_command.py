@@ -117,6 +117,47 @@ class TestLinkGenerate:
     @patch("ai_api.main.init_db")
     @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
     @patch("ai_api.main.cleanup_expired_documents")
+    async def test_link_when_already_linked_short_circuits_without_redis_write(
+        self, mock_cleanup, mock_redis_main, mock_init_db, fake_redis
+    ):
+        """A user whose row already has both whatsapp_jid AND telegram_jid
+        must NOT generate a new code — the code would be unredeemable
+        (consume_link_code hits ERROR_SAME_USER) and would burn a Redis
+        slot for 10 minutes. Surface "already linked" directly instead."""
+        mock_db = _make_mock_db()
+        linked_user = make_user(whatsapp_jid=WHATSAPP_JID, telegram_jid=TELEGRAM_JID)
+
+        with (
+            _patch_whitelist(),
+            _patch_redis_client(fake_redis),
+            patch("ai_api.routes.chat.get_or_create_user", return_value=linked_user),
+        ):
+            app = _get_app_with_db_override(mock_db)
+            try:
+                transport = ASGITransport(app=app)
+                async with AsyncClient(transport=transport, base_url="http://test") as client:
+                    response = await client.post(
+                        "/chat/enqueue",
+                        json={
+                            "whatsapp_jid": WHATSAPP_JID,
+                            "message": "/link",
+                            "conversation_type": "private",
+                        },
+                        headers=AUTH_HEADERS,
+                    )
+                assert response.status_code == 200
+                body = response.json()["response"]
+                assert "already linked" in body.lower()
+                assert not re.search(r"`\d{6}`", body)
+                # No Redis state was created (would be `link:user:<id>` if it had).
+                keys = await fake_redis.keys("link:*")
+                assert keys == []
+            finally:
+                _cleanup_overrides()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
     async def test_telegram_user_gets_whatsapp_instruction(
         self, mock_cleanup, mock_redis_main, mock_init_db, fake_redis
     ):
@@ -299,6 +340,45 @@ class TestUnlinkRoute:
                     )
                 assert response.status_code == 200
                 assert "No active link" in response.json()["response"]
+            finally:
+                _cleanup_overrides()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_unlink_db_error_returns_helpful_message(
+        self, mock_cleanup, mock_redis_main, mock_init_db, fake_redis
+    ):
+        """A commit failure during /unlink must surface as a real error
+        message, not the misleading "No active link to remove." that the
+        previous bool-returning unlink() collapsed it into."""
+        mock_db = _make_mock_db()
+        linked_user = make_user(whatsapp_jid=WHATSAPP_JID, telegram_jid=TELEGRAM_JID)
+        mock_db.query.return_value.filter.return_value.first.return_value = linked_user
+        mock_db.commit.side_effect = Exception("simulated DB outage")
+
+        with (
+            _patch_whitelist(),
+            _patch_redis_client(fake_redis),
+            patch("ai_api.routes.chat.get_or_create_user", return_value=linked_user),
+        ):
+            app = _get_app_with_db_override(mock_db)
+            try:
+                transport = ASGITransport(app=app)
+                async with AsyncClient(transport=transport, base_url="http://test") as client:
+                    response = await client.post(
+                        "/chat/enqueue",
+                        json={
+                            "whatsapp_jid": WHATSAPP_JID,
+                            "message": "/unlink",
+                            "conversation_type": "private",
+                        },
+                        headers=AUTH_HEADERS,
+                    )
+                assert response.status_code == 200
+                body = response.json()["response"]
+                assert "database error" in body.lower()
+                assert "No active link" not in body
             finally:
                 _cleanup_overrides()
 

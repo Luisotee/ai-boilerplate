@@ -100,7 +100,7 @@ export async function handleTextMessage(
       document: options.document,
     });
 
-    if (!response) return;
+    if (response === null) return; // Silently blocked by API whitelist
 
     const chunks = splitResponseIntoBursts(response, {
       disabled: !config.messageSplit.enabled || conversationType === 'group',

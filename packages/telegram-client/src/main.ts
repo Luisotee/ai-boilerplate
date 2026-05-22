@@ -2,6 +2,7 @@ import './instrument.js';
 import { Sentry } from './instrument.js';
 import crypto from 'node:crypto';
 import { config } from './config.js';
+import { validateRequiredEnv } from './config-validation.js';
 import Fastify from 'fastify';
 import FastifySwagger from '@fastify/swagger';
 import FastifySwaggerUI from '@fastify/swagger-ui';
@@ -34,17 +35,7 @@ function createMixedSchemaTransform() {
 }
 
 async function start() {
-  if (!config.telegramApiKey) {
-    throw new Error(
-      'TELEGRAM_API_KEY (or fallback WHATSAPP_API_KEY) environment variable is required'
-    );
-  }
-  if (!config.aiApiKey) {
-    throw new Error('AI_API_KEY environment variable is required');
-  }
-  if (!config.telegram.botToken) {
-    throw new Error('TELEGRAM_BOT_TOKEN environment variable is required');
-  }
+  validateRequiredEnv(config);
 
   const isDev = process.env.NODE_ENV !== 'production';
   const app = Fastify({
@@ -183,6 +174,10 @@ async function start() {
       );
     } catch (err) {
       app.log.error({ err }, 'Failed to register Telegram webhook');
+      // Fail fast — same rationale as bot.init() above. A bot that can't
+      // receive deliveries should not pass health checks; let Docker restart
+      // with backoff rather than serve traffic in a half-initialized state.
+      throw err;
     }
   } else {
     app.log.warn(

@@ -165,6 +165,35 @@ describe('handleTextMessage', () => {
     expect(mockTextToSpeech).toHaveBeenCalledWith('Spoken text', 'tg:123');
   });
 
+  it('returns silently when AI response is null (whitelist drop)', async () => {
+    mockSendMessageToAI.mockResolvedValueOnce(null);
+    const ctx = makeCtx();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await handleTextMessage(ctx as any, 'hi');
+
+    expect(ctx.reply).not.toHaveBeenCalled();
+    expect(mockSendReaction).not.toHaveBeenCalled();
+  });
+
+  it('does NOT silently drop when AI response is empty string (regression for #4)', async () => {
+    // Pre-fix, `if (!response) return;` collapsed null and "" together — an
+    // empty AI response (a real bug we want to surface) was indistinguishable
+    // from a whitelist drop (intentional silence). With `=== null`, the empty
+    // string falls through to the chunker and downstream pipeline, and the
+    // null-only short-circuit no longer hides genuine failures.
+    mockSendMessageToAI.mockResolvedValueOnce('');
+    const ctx = makeCtx();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await handleTextMessage(ctx as any, 'hi');
+
+    // The function did NOT short-circuit at the null-check, so it proceeded
+    // to consult preferences (the path executed when an AI response is
+    // received, however degenerate).
+    expect(mockGetUserPreferences).toHaveBeenCalled();
+  });
+
   it('does not throw when TTS buffer is null (logs and continues)', async () => {
     mockSendMessageToAI.mockResolvedValueOnce('Text only');
     mockGetUserPreferences.mockResolvedValue({ tts_enabled: true });

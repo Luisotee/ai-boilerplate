@@ -40,6 +40,16 @@ class LinkResult:
     message: str | None = None  # User-facing message
 
 
+@dataclass
+class UnlinkResult:
+    """Outcome of `unlink`. `cleared` is True only after a successful commit;
+    `db_error` distinguishes a commit failure from "no link to remove" so the
+    caller can render distinct user-facing messages."""
+
+    cleared: bool
+    db_error: bool = False
+
+
 # Error codes
 ERROR_INVALID_CODE = "INVALID_CODE"
 ERROR_SAME_PLATFORM = "SAME_PLATFORM"
@@ -77,7 +87,7 @@ async def generate_link_code(redis: Redis, user_id: str, platform: Platform) -> 
     return code
 
 
-def _is_already_linked(user: User) -> bool:
+def is_already_linked(user: User) -> bool:
     """A user is already linked when both platform identities are populated."""
     return (
         bool(user.whatsapp_jid)
@@ -152,7 +162,7 @@ async def consume_link_code(
             "Generate a new code and try again.",
         )
 
-    if _is_already_linked(source) or _is_already_linked(target):
+    if is_already_linked(source) or is_already_linked(target):
         return LinkResult(
             success=False,
             error=ERROR_ALREADY_LINKED,
@@ -201,15 +211,18 @@ async def consume_link_code(
     )
 
 
-def unlink(db: Session, user_id: str) -> bool:
-    """Clear `telegram_jid` on `user_id`'s row. Returns True if a link was cleared.
+def unlink(db: Session, user_id: str) -> UnlinkResult:
+    """Clear `telegram_jid` on `user_id`'s row.
 
-    Returns False on commit failure (after rolling back) — callers already treat
-    False as "no link to remove", which is the safe outcome on a failed write.
+    Returns `UnlinkResult(cleared=True)` after a successful commit,
+    `UnlinkResult(cleared=False)` when there's no link to remove,
+    and `UnlinkResult(cleared=False, db_error=True)` when the commit failed.
+    Distinguishing the last case lets the caller surface a real error instead
+    of a misleading "no link to remove".
     """
     user = db.query(User).filter(User.id == user_id).first()
     if user is None or not user.telegram_jid:
-        return False
+        return UnlinkResult(cleared=False)
     prior_jid = user.telegram_jid
     user.telegram_jid = None
     try:
@@ -217,6 +230,6 @@ def unlink(db: Session, user_id: str) -> bool:
     except Exception as exc:
         db.rollback()
         logger.exception(f"Failed to unlink user {user_id}: {exc}")
-        return False
+        return UnlinkResult(cleared=False, db_error=True)
     logger.info(f"Unlinked user {user.id}: dropped telegram_jid={prior_jid}")
-    return True
+    return UnlinkResult(cleared=True)

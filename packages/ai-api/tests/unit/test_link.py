@@ -19,8 +19,10 @@ from ai_api.services.link import (
     ERROR_SAME_USER,
     ERROR_SOURCE_GONE,
     LINK_CODE_TTL_SECONDS,
+    UnlinkResult,
     consume_link_code,
     generate_link_code,
+    is_already_linked,
     platform_for_jid,
     unlink,
 )
@@ -314,11 +316,11 @@ class TestUnlink:
         db.query.return_value.filter.return_value.first.return_value = user
 
         result = unlink(db, str(user.id))
-        assert result is True
+        assert result == UnlinkResult(cleared=True)
         assert user.telegram_jid is None
         db.commit.assert_called_once()
 
-    def test_returns_false_when_no_link(self):
+    def test_returns_no_link_when_telegram_jid_unset(self):
         user = MagicMock()
         user.id = uuid.uuid4()
         user.telegram_jid = None
@@ -327,20 +329,23 @@ class TestUnlink:
         db.query.return_value.filter.return_value.first.return_value = user
 
         result = unlink(db, str(user.id))
-        assert result is False
+        assert result == UnlinkResult(cleared=False)
+        assert result.db_error is False
         db.commit.assert_not_called()
 
-    def test_returns_false_when_user_not_found(self):
+    def test_returns_no_link_when_user_not_found(self):
         db = MagicMock()
         db.query.return_value.filter.return_value.first.return_value = None
 
         result = unlink(db, str(uuid.uuid4()))
-        assert result is False
+        assert result == UnlinkResult(cleared=False)
+        assert result.db_error is False
         db.commit.assert_not_called()
 
-    def test_rolls_back_and_returns_false_on_commit_failure(self):
+    def test_rolls_back_and_flags_db_error_on_commit_failure(self):
         """Commit failure during unlink must rollback the session and surface
-        as False (no link cleared) rather than letting a dirty session leak."""
+        as a distinct UnlinkResult(db_error=True) so the caller can render a
+        real error message instead of a misleading "no link to remove"."""
         user = MagicMock()
         user.id = uuid.uuid4()
         user.telegram_jid = "tg:42"
@@ -351,5 +356,33 @@ class TestUnlink:
 
         result = unlink(db, str(user.id))
 
-        assert result is False
+        assert result.cleared is False
+        assert result.db_error is True
         db.rollback.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# is_already_linked
+# ---------------------------------------------------------------------------
+
+
+class TestIsAlreadyLinked:
+    def test_true_when_both_jids_populated_with_whatsapp_primary(self):
+        user = MagicMock()
+        user.whatsapp_jid = "5511999999999@s.whatsapp.net"
+        user.telegram_jid = "tg:42"
+        assert is_already_linked(user) is True
+
+    def test_false_when_only_whatsapp_jid_set(self):
+        user = MagicMock()
+        user.whatsapp_jid = "5511999999999@s.whatsapp.net"
+        user.telegram_jid = None
+        assert is_already_linked(user) is False
+
+    def test_false_for_telegram_orphan(self):
+        """Telegram-only orphan rows store their tg: JID in whatsapp_jid;
+        they're not "already linked" — they're pre-link state."""
+        user = MagicMock()
+        user.whatsapp_jid = "tg:42"
+        user.telegram_jid = None
+        assert is_already_linked(user) is False
