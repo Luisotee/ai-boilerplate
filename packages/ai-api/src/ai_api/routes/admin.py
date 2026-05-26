@@ -111,6 +111,7 @@ def _settings_payload(db: Session) -> SettingsResponse:
             try:
                 value = json.loads(overrides[spec.key])
             except (ValueError, TypeError):
+                logger.warning("Malformed stored override for '%s'; showing default", spec.key)
                 value = default
                 has_override = False
         else:
@@ -135,9 +136,21 @@ def _settings_payload(db: Session) -> SettingsResponse:
     return SettingsResponse(settings=items)
 
 
-def _validate_cross_constraints(key: str, value: object) -> None:
-    """Reject overrides that would violate invariants Settings checks at boot."""
-    if key == "llamaparse_timeout_seconds" and value >= settings.kb_processing_timeout_seconds:
+def _validate_cross_constraints(coerced: dict[str, object]) -> None:
+    """Reject overrides that would violate invariants Settings checks at boot.
+
+    Validated against the *resulting* config: a value being set in this same
+    request wins over the currently-effective one, so e.g. enabling self-hosted
+    Whisper and pointing at its URL in a single PATCH is accepted.
+    """
+
+    def effective(key: str) -> object:
+        return coerced[key] if key in coerced else runtime_config.get(key)
+
+    if (
+        "llamaparse_timeout_seconds" in coerced
+        and coerced["llamaparse_timeout_seconds"] >= settings.kb_processing_timeout_seconds
+    ):
         raise HTTPException(
             status_code=400,
             detail=(
@@ -145,13 +158,14 @@ def _validate_cross_constraints(key: str, value: object) -> None:
                 f"({settings.kb_processing_timeout_seconds})"
             ),
         )
-    if key == "stt_provider":
-        if value == "groq" and not settings.groq_api_key:
+    if "stt_provider" in coerced:
+        provider = coerced["stt_provider"]
+        if provider == "groq" and not settings.groq_api_key:
             raise HTTPException(
                 status_code=400,
                 detail="Cannot set stt_provider=groq: GROQ_API_KEY is not configured",
             )
-        if value == "whisper" and not runtime_config.get("whisper_base_url"):
+        if provider == "whisper" and not effective("whisper_base_url"):
             raise HTTPException(
                 status_code=400,
                 detail="Cannot set stt_provider=whisper: whisper_base_url is not set",
@@ -185,8 +199,10 @@ async def patch_settings(request: UpdateSettingsRequest, db: Session = Depends(g
             value = coerce_value(spec, raw)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
-        _validate_cross_constraints(key, value)
         coerced[key] = value
+
+    # Validate cross-key invariants against the merged result, then write.
+    _validate_cross_constraints(coerced)
 
     try:
         for key, value in coerced.items():

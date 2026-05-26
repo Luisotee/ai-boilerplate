@@ -341,6 +341,149 @@ class TestSettings:
             _cleanup()
 
 
+class TestSettingsCrossConstraints:
+    """Coverage for _validate_cross_constraints — the PATCH-time safety guards."""
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_llamaparse_timeout_too_high_rejected(self, *_):
+        app = _app_with_db(_make_mock_db())
+        try:
+            async with _client(app) as client:
+                # default kb_processing_timeout_seconds is 360
+                resp = await client.patch(
+                    "/admin/settings",
+                    json={"overrides": {"llamaparse_timeout_seconds": 9999}},
+                    headers=AUTH_HEADERS,
+                )
+            assert resp.status_code == 400
+            assert "kb_processing_timeout_seconds" in resp.json()["detail"]
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_llamaparse_timeout_below_cap_accepted(self, *_):
+        app = _app_with_db(_make_mock_db())
+        try:
+            with (
+                patch("ai_api.routes.admin.set_setting_override"),
+                patch(
+                    "ai_api.routes.admin.get_setting_overrides",
+                    return_value={"llamaparse_timeout_seconds": "5"},
+                ),
+            ):
+                async with _client(app) as client:
+                    resp = await client.patch(
+                        "/admin/settings",
+                        json={"overrides": {"llamaparse_timeout_seconds": 5}},
+                        headers=AUTH_HEADERS,
+                    )
+            assert resp.status_code == 200
+            assert _find(resp.json()["settings"], "llamaparse_timeout_seconds")["value"] == 5
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_stt_groq_without_key_rejected(self, *_):
+        app = _app_with_db(_make_mock_db())
+        try:
+            with patch("ai_api.routes.admin.settings.groq_api_key", None):
+                async with _client(app) as client:
+                    resp = await client.patch(
+                        "/admin/settings",
+                        json={"overrides": {"stt_provider": "groq"}},
+                        headers=AUTH_HEADERS,
+                    )
+            assert resp.status_code == 400
+            assert "GROQ_API_KEY" in resp.json()["detail"]
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_stt_whisper_without_url_rejected(self, *_):
+        app = _app_with_db(_make_mock_db())
+        try:
+            # No URL in this request and none effective → reject.
+            with (
+                patch("ai_api.routes.admin.settings.whisper_base_url", None),
+                patch("ai_api.routes.admin.runtime_config.get", return_value=None),
+            ):
+                async with _client(app) as client:
+                    resp = await client.patch(
+                        "/admin/settings",
+                        json={"overrides": {"stt_provider": "whisper"}},
+                        headers=AUTH_HEADERS,
+                    )
+            assert resp.status_code == 400
+            assert "whisper_base_url" in resp.json()["detail"]
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_stt_whisper_with_url_same_request_accepted(self, *_):
+        """Batch-aware: setting the URL and provider in one PATCH must pass."""
+        app = _app_with_db(_make_mock_db())
+        try:
+            with (
+                patch("ai_api.routes.admin.set_setting_override"),
+                patch(
+                    "ai_api.routes.admin.get_setting_overrides",
+                    return_value={
+                        "whisper_base_url": '"http://whisper:8000"',
+                        "stt_provider": '"whisper"',
+                    },
+                ),
+            ):
+                async with _client(app) as client:
+                    resp = await client.patch(
+                        "/admin/settings",
+                        json={
+                            "overrides": {
+                                "whisper_base_url": "http://whisper:8000",
+                                "stt_provider": "whisper",
+                            }
+                        },
+                        headers=AUTH_HEADERS,
+                    )
+            assert resp.status_code == 200
+            assert _find(resp.json()["settings"], "stt_provider")["value"] == "whisper"
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_patch_is_atomic_on_partial_failure(self, *_):
+        """A bad second key rejects the whole batch — nothing is written."""
+        app = _app_with_db(_make_mock_db())
+        try:
+            with patch("ai_api.routes.admin.set_setting_override") as mock_set:
+                async with _client(app) as client:
+                    resp = await client.patch(
+                        "/admin/settings",
+                        json={
+                            "overrides": {
+                                "tts_default_voice": "Puck",
+                                "history_limit_private": "abc",  # wrong type
+                            }
+                        },
+                        headers=AUTH_HEADERS,
+                    )
+            assert resp.status_code == 400
+            mock_set.assert_not_called()
+        finally:
+            _cleanup()
+
+
 # ---------------------------------------------------------------------------
 # Conversation viewer
 # ---------------------------------------------------------------------------

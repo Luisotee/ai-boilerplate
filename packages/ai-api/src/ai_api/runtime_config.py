@@ -299,9 +299,10 @@ class _RuntimeConfig:
         if spec is None or not spec.hot:
             return getattr(settings, key)
         self._ensure_fresh()
-        if key in self._overrides:
-            return self._overrides[key]
-        return getattr(settings, key)
+        # Snapshot the dict once: _refresh_locked rebinds self._overrides
+        # atomically, so a concurrent refresh must not be observed mid-read.
+        overrides = self._overrides
+        return overrides[key] if key in overrides else getattr(settings, key)
 
     def current_overrides(self) -> dict[str, Any]:
         """Return a copy of the currently cached (hot) overrides."""

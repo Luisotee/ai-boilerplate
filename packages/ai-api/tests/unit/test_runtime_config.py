@@ -70,6 +70,19 @@ def test_get_unknown_key_falls_back_to_settings():
     assert runtime_config.get("gemini_api_key") == settings.gemini_api_key
 
 
+def test_get_survives_refresh_failure(monkeypatch):
+    """A DB failure during refresh must not break the read — fall back to env."""
+
+    def boom():
+        raise RuntimeError("database is down")
+
+    monkeypatch.setattr(runtime_config, "_refresh_locked", boom)
+    runtime_config._loaded_at = 0.0  # force a refresh on next get()
+
+    # Should not raise, and returns the env default.
+    assert runtime_config.get("tts_default_voice") == settings.tts_default_voice
+
+
 def test_invalidate_forces_reload_on_next_get(monkeypatch):
     calls = {"n": 0}
 
