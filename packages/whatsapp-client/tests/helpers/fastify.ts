@@ -20,6 +20,7 @@ import {
   type ZodTypeProvider,
 } from 'fastify-type-provider-zod';
 import { registerHealthRoutes } from '../../src/routes/health.js';
+import { registerConnectionRoutes } from '../../src/routes/connection.js';
 import { registerMessagingRoutes } from '../../src/routes/messaging.js';
 import { registerMediaRoutes } from '../../src/routes/media.js';
 import { registerOperationsRoutes } from '../../src/routes/operations.js';
@@ -57,6 +58,7 @@ export async function buildTestApp() {
 
   // Register all route plugins
   await registerHealthRoutes(app);
+  await registerConnectionRoutes(app);
   await registerMessagingRoutes(app);
   await registerMediaRoutes(app);
   await registerOperationsRoutes(app);

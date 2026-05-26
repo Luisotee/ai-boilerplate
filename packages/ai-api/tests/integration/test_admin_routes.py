@@ -7,7 +7,7 @@ the read-only conversation viewer, and auth enforcement.
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport, AsyncClient, ConnectError
 
 from tests.helpers.factories import make_conversation_message, make_user
 
@@ -577,6 +577,73 @@ class TestConversationViewer:
 
 
 # ---------------------------------------------------------------------------
+# WhatsApp pairing QR
+# ---------------------------------------------------------------------------
+
+
+def _patch_wa_client(status_payload=None, raises=None):
+    """Patch create_whatsapp_client to return a client whose get_whatsapp_status
+    returns status_payload (or raises)."""
+    client = MagicMock()
+    client.get_whatsapp_status = AsyncMock(return_value=status_payload, side_effect=raises)
+    return patch("ai_api.routes.admin.create_whatsapp_client", return_value=client)
+
+
+class TestWhatsAppQr:
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_returns_qr_while_unpaired(self, *_):
+        app = _app_with_db(_make_mock_db())
+        try:
+            with _patch_wa_client(
+                {"status": "qr", "qr": "2@abc", "qrGeneratedAt": "2026-05-26T14:00:00Z"}
+            ):
+                async with _client(app) as client:
+                    resp = await client.get("/admin/whatsapp/qr", headers=AUTH_HEADERS)
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["status"] == "qr"
+            assert data["connected"] is False
+            assert data["qr"] == "2@abc"
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_connected_has_no_qr(self, *_):
+        app = _app_with_db(_make_mock_db())
+        try:
+            with _patch_wa_client({"status": "connected", "qr": None, "qrGeneratedAt": None}):
+                async with _client(app) as client:
+                    resp = await client.get("/admin/whatsapp/qr", headers=AUTH_HEADERS)
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["status"] == "connected"
+            assert data["connected"] is True
+            assert data["qr"] is None
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_unreachable_client_reports_unavailable(self, *_):
+        app = _app_with_db(_make_mock_db())
+        try:
+            with _patch_wa_client(raises=ConnectError("connection refused")):
+                async with _client(app) as client:
+                    resp = await client.get("/admin/whatsapp/qr", headers=AUTH_HEADERS)
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["status"] == "unavailable"
+            assert data["connected"] is False
+        finally:
+            _cleanup()
+
+
+# ---------------------------------------------------------------------------
 # Auth
 # ---------------------------------------------------------------------------
 
@@ -589,4 +656,15 @@ async def test_admin_requires_auth(*_):
 
     async with _client(app) as client:
         resp = await client.get("/admin/prompt")
+    assert resp.status_code == 401
+
+
+@patch("ai_api.main.init_db")
+@patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+@patch("ai_api.main.cleanup_expired_documents")
+async def test_whatsapp_qr_requires_auth(*_):
+    from ai_api.main import app
+
+    async with _client(app) as client:
+        resp = await client.get("/admin/whatsapp/qr")
     assert resp.status_code == 401

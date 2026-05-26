@@ -7,7 +7,7 @@ import { Boom } from '@hapi/boom';
 import qrcode from 'qrcode-terminal';
 import { logger } from './logger.js';
 import { config } from './config.js';
-import { setBaileysSocket } from './services/baileys.js';
+import { setBaileysSocket, setConnectionStatus, setLatestQr } from './services/baileys.js';
 import { handleTextMessage } from './handlers/text.js';
 import { transcribeAudioMessage } from './handlers/audio.js';
 import { extractImageData } from './handlers/image.js';
@@ -68,11 +68,16 @@ export async function initializeWhatsApp(): Promise<void> {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
+      // Retain the latest QR so it can be served over HTTP (the dashboard polls
+      // for it); Baileys rotates it every ~20s while unpaired.
+      setLatestQr(qr);
+      setConnectionStatus('qr');
       qrcode.generate(qr, { small: true });
       logger.info('QR Code displayed above. Scan with WhatsApp mobile app.');
     }
 
     if (connection === 'close') {
+      setConnectionStatus('disconnected');
       const shouldReconnect =
         (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
 
@@ -132,6 +137,8 @@ export async function initializeWhatsApp(): Promise<void> {
     } else if (connection === 'open') {
       logger.info('✅ WhatsApp connection opened successfully');
       setBaileysSocket(sock);
+      setConnectionStatus('connected');
+      setLatestQr(null); // clear the pairing QR once linked
 
       // Reset reconnection state on successful connection
       resetReconnectionState();

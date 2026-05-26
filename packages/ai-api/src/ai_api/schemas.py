@@ -213,3 +213,14 @@ class OverviewResponse(BaseModel):
     users: int
     messages: int
     knowledge_base_documents: int
+
+
+class WhatsAppStatusResponse(BaseModel):
+    """Baileys WhatsApp link status + pairing QR (proxied from the client)."""
+
+    status: Literal["connecting", "qr", "connected", "disconnected", "unavailable"] = Field(
+        ..., description="Link lifecycle; 'unavailable' = no Baileys client reachable"
+    )
+    connected: bool = Field(..., description="True when the session is linked")
+    qr: str | None = Field(None, description="Raw pairing QR payload; present only while 'qr'")
+    qr_generated_at: str | None = Field(None, description="ISO timestamp the QR was issued")

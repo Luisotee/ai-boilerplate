@@ -107,6 +107,19 @@ class WhatsAppClient:
             message_id=data.get("message_id"),
         )
 
+    async def get_whatsapp_status(self) -> dict:
+        """Fetch the Baileys connection status and latest pairing QR.
+
+        Returns the raw payload from ``GET /whatsapp/qr``:
+        ``{status, qr, qrGeneratedAt}``. The endpoint returns 200 even when
+        unpaired (status ``"qr"`` / ``"connecting"`` / ``"disconnected"``).
+        """
+        response = await self._client.get(
+            f"{self._base_url}/whatsapp/qr",
+            headers=self._get_headers(),
+        )
+        return await self._handle_response(response)
+
     async def send_reaction(
         self,
         phone_number: str,

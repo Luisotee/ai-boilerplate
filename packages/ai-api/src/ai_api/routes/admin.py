@@ -11,12 +11,13 @@ session; writes additionally call ``runtime_config.invalidate()`` so the agent
 
 import json
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, nullslast, or_
 from sqlalchemy.orm import Session
 
 from ..agent.core import DEFAULT_SYSTEM_PROMPT
-from ..config import settings
+from ..config import get_whatsapp_api_key, get_whatsapp_client_url, settings
 from ..database import (
     ConversationMessage,
     User,
@@ -43,7 +44,9 @@ from ..schemas import (
     UpdateSettingsRequest,
     UsersResponse,
     UserSummary,
+    WhatsAppStatusResponse,
 )
+from ..whatsapp import WhatsAppClientError, create_whatsapp_client
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
@@ -320,4 +323,40 @@ async def overview(db: Session = Depends(get_db)):
         users=db.query(User).count(),
         messages=db.query(ConversationMessage).count(),
         knowledge_base_documents=db.query(KnowledgeBaseDocument).count(),
+    )
+
+
+# --- WhatsApp (Baileys) pairing QR ---
+
+
+@router.get("/whatsapp/qr", response_model=WhatsAppStatusResponse)
+async def whatsapp_qr():
+    """Proxy the Baileys client's link status + pairing QR for the dashboard.
+
+    Returns ``status="unavailable"`` (not an error) when no Baileys client is
+    reachable — e.g. Cloud-only/Telegram deployments, or the client being down —
+    so the dashboard can show a sensible state for every bot. The QR is never
+    logged; it is only present while ``status == "qr"``.
+    """
+    base_url = get_whatsapp_client_url(None)  # Baileys client (client_id=None)
+    try:
+        async with httpx.AsyncClient(timeout=settings.whatsapp_client_timeout) as http_client:
+            client = create_whatsapp_client(
+                http_client=http_client,
+                base_url=base_url,
+                api_key=get_whatsapp_api_key(None),
+            )
+            data = await client.get_whatsapp_status()
+    except (httpx.HTTPError, WhatsAppClientError) as e:
+        logger.warning("WhatsApp client unreachable for QR status: %s", e)
+        return WhatsAppStatusResponse(
+            status="unavailable", connected=False, qr=None, qr_generated_at=None
+        )
+
+    status = data.get("status", "unavailable")
+    return WhatsAppStatusResponse(
+        status=status,
+        connected=status == "connected",
+        qr=data.get("qr"),
+        qr_generated_at=data.get("qrGeneratedAt"),
     )
