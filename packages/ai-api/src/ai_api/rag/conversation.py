@@ -7,9 +7,9 @@ Provides semantic search over user's conversation history using vector similarit
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from ..config import settings
 from ..database import ConversationMessage
 from ..logger import logger
+from ..runtime_config import runtime_config
 
 
 def get_context_messages(
@@ -184,13 +184,13 @@ async def search_conversation_history(
         - 'messages_after': List of messages after the match
         - 'similarity_score': Cosine similarity score
     """
-    # Apply defaults from settings if not provided
+    # Apply defaults from runtime config (env default, overridable via /admin)
     if similarity_threshold is None:
-        similarity_threshold = settings.semantic_similarity_threshold
+        similarity_threshold = runtime_config.get("semantic_similarity_threshold")
     if limit is None:
-        limit = settings.semantic_search_limit
+        limit = runtime_config.get("semantic_search_limit")
     if context_window is None:
-        context_window = settings.semantic_context_window
+        context_window = runtime_config.get("semantic_context_window")
 
     if not user_id:
         logger.error("user_id is required for conversation search")

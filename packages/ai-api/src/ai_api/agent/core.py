@@ -7,7 +7,7 @@ from pydantic_ai.providers.google import GoogleProvider
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..database import get_or_create_core_memory
+from ..database import get_active_prompt, get_or_create_core_memory
 from ..embeddings import EmbeddingService
 from ..whatsapp import WhatsAppClient
 
@@ -40,7 +40,12 @@ agent = Agent(
     model=google_model,
     deps_type=AgentDeps,
     retries=3,  # Increase from default 1 to handle occasional malformed Gemini responses
-    system_prompt="""You are a helpful AI assistant communicating via WhatsApp.
+)
+
+# Default system prompt — used when no /admin override is stored in the DB.
+# The active prompt is loaded per-run via the `base_system_prompt` instructions
+# function below; editing it through the /admin API does not require a restart.
+DEFAULT_SYSTEM_PROMPT = """You are a helpful AI assistant communicating via WhatsApp.
     Be concise, friendly, and helpful. Keep responses brief and to the point.
     If you don't know something, say so clearly.
 
@@ -148,11 +153,21 @@ agent = Agent(
 
     **Important:** WhatsApp tools only send to the current conversation. You cannot message other users.
 
-    When citing knowledge base sources, ALWAYS include document name, page number, and section heading.""",
-)
+    When citing knowledge base sources, ALWAYS include document name, page number, and section heading."""
 
 
-@agent.system_prompt
+@agent.instructions
+async def base_system_prompt(ctx: RunContext[AgentDeps]) -> str:
+    """Load the active system prompt from the DB, falling back to the default.
+
+    Read uncached on every run, so an /admin prompt edit takes effect on the
+    next message without a restart. Uses `instructions` (not `system_prompt`)
+    so a changed prompt is never shadowed by one retained in message history.
+    """
+    return get_active_prompt(ctx.deps.db) or DEFAULT_SYSTEM_PROMPT
+
+
+@agent.instructions
 async def inject_core_memory(ctx: RunContext[AgentDeps]) -> str:
     """Inject the user's core memory document into the system prompt."""
     mem = get_or_create_core_memory(ctx.deps.db, ctx.deps.user_id)

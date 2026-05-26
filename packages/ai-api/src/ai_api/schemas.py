@@ -1,4 +1,5 @@
-from typing import Literal
+from datetime import datetime
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -121,3 +122,94 @@ class UpdatePreferencesRequest(BaseModel):
     tts_enabled: bool | None = Field(None, description="Enable/disable TTS")
     tts_language: str | None = Field(None, description="TTS language code")
     stt_language: str | None = Field(None, description="STT language code, 'auto' converts to null")
+
+
+# --- Admin (management dashboard) ---
+
+
+class PromptResponse(BaseModel):
+    """Active system prompt for this bot."""
+
+    content: str = Field(..., description="Effective prompt (override if set, else the default)")
+    is_overridden: bool = Field(..., description="True if a DB override is active")
+    default_length: int = Field(..., description="Character length of the hardcoded default prompt")
+    updated_at: datetime | None = Field(None, description="When the override was last saved")
+
+
+class UpdatePromptRequest(BaseModel):
+    """Request to set the active system-prompt override."""
+
+    content: str = Field(..., min_length=1, description="New system prompt (non-empty)")
+
+
+class SettingItem(BaseModel):
+    """A single configurable setting with its effective value and metadata."""
+
+    key: str
+    value: Any = Field(..., description="Effective value (override if set, else env default)")
+    default: Any = Field(..., description="Env/code default value")
+    source: Literal["default", "override"] = Field(..., description="Where the value comes from")
+    hot: bool = Field(..., description="True if overridable at runtime; False = needs restart")
+    category: str
+    type: Literal["str", "int", "float", "bool"]
+    description: str
+    choices: list[str] | None = Field(None, description="Allowed values, if constrained")
+    secret: bool = Field(False, description="True if the value is masked")
+
+
+class SettingsResponse(BaseModel):
+    """All registered settings."""
+
+    settings: list[SettingItem]
+
+
+class UpdateSettingsRequest(BaseModel):
+    """Request to set one or more runtime-setting overrides."""
+
+    overrides: dict[str, Any] = Field(..., description="Map of setting key → new value")
+
+
+class UserSummary(BaseModel):
+    """A conversation/user row for the dashboard's user list."""
+
+    whatsapp_jid: str
+    name: str | None = None
+    conversation_type: str
+    message_count: int
+    last_message_at: datetime | None = None
+
+
+class UsersResponse(BaseModel):
+    """Paginated list of users."""
+
+    users: list[UserSummary]
+    total: int
+    limit: int
+    offset: int
+
+
+class MessageItem(BaseModel):
+    """A single conversation message (read-only view)."""
+
+    role: str
+    content: str
+    sender_name: str | None = None
+    timestamp: datetime
+
+
+class MessagesResponse(BaseModel):
+    """Paginated conversation history for one user (newest first)."""
+
+    whatsapp_jid: str
+    messages: list[MessageItem]
+    total: int
+    limit: int
+    offset: int
+
+
+class OverviewResponse(BaseModel):
+    """High-level counts for the dashboard landing page."""
+
+    users: int
+    messages: int
+    knowledge_base_documents: int

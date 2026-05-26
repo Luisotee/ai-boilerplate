@@ -21,6 +21,7 @@ from .database import SessionLocal
 from .embeddings import create_embedding_service
 from .kb_models import KnowledgeBaseChunk, KnowledgeBaseDocument
 from .logger import logger
+from .runtime_config import runtime_config
 
 # (page_number, markdown_text) — the intermediate representation both parsers emit.
 PageContent = tuple[int, str]
@@ -93,7 +94,7 @@ async def _parse_pdf_with_llamaparse(file_path: str) -> list[PageContent]:
         try:
             result = await client.parsing.parse(
                 file_id=file_obj.id,
-                tier=settings.llamaparse_tier,
+                tier=runtime_config.get("llamaparse_tier"),
                 version="latest",
                 expand=["markdown"],
             )
@@ -183,13 +184,13 @@ async def _parse_pdf(file_path: str) -> tuple[list[PageContent], dict]:
         Tuple of (pages, metadata). Metadata includes `parser` (the one that
         actually succeeded) and `processing_date`.
     """
-    choice = settings.pdf_parser
+    choice = runtime_config.get("pdf_parser")
     has_key = bool(settings.llama_cloud_api_key)
 
     async def _run_llamaparse() -> tuple[list[PageContent], dict]:
         pages = await asyncio.wait_for(
             _parse_pdf_with_llamaparse(file_path),
-            timeout=settings.llamaparse_timeout_seconds,
+            timeout=runtime_config.get("llamaparse_timeout_seconds"),
         )
         return pages, {"parser": "llamaparse"}
 

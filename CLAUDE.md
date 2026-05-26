@@ -129,10 +129,11 @@ cd packages/ai-api && uv run pytest tests/unit  # AI API unit tests only
 ## Database
 
 - **PostgreSQL + pgvector** (3072-dim vectors via `gemini-embedding-001`)
-- **6 tables**: users, conversation_messages, conversation_preferences, core_memories, knowledge_base_documents, knowledge_base_chunks
+- **8 tables**: users, conversation_messages, conversation_preferences, core_memories, knowledge_base_documents, knowledge_base_chunks, bot_prompt, runtime_settings
 - **No Alembic migrations** — uses SQLAlchemy `create_all()`. Schema changes require manual `ALTER TABLE` or table recreation; `create_all()` only adds new tables
-- Models: `database.py` (users, messages, preferences, core_memories) + `kb_models.py` (documents, chunks)
-- **Core memories**: one markdown document per user (`core_memories` table), injected into system prompt via `@agent.system_prompt` in `agent/core.py`
+- Models: `database.py` (users, messages, preferences, core_memories, bot_prompt, runtime_settings) + `kb_models.py` (documents, chunks)
+- **Core memories**: one markdown document per user (`core_memories` table), injected into the prompt via `@agent.instructions inject_core_memory` in `agent/core.py`
+- **System prompt is DB-backed**: the active prompt lives in the single-row `bot_prompt` table, loaded per-run via `@agent.instructions base_system_prompt` in `agent/core.py`, falling back to the hardcoded `DEFAULT_SYSTEM_PROMPT` when no row exists. Edit it through `PUT /admin/prompt` — takes effect on the next message, no restart. Uses `instructions` (not `system_prompt`) so a changed prompt is never shadowed by one retained in `message_history`
 - **Conversation-scoped PDFs** expire after 24h (`CONVERSATION_PDF_TTL_HOURS`). Cleanup task runs in `main.py` lifespan
 - **PDF parsing**: LlamaParse (cloud, primary) via `llama-cloud` SDK, with **optional** Docling fallback behind the `[docling]` extra. Behavior controlled by `PDF_PARSER` (`auto` | `llamaparse` | `docling`). In `auto` mode, LlamaParse runs when `LLAMA_CLOUD_API_KEY` is set and falls back to Docling on any parser error *if* the extra is installed
 - **Speech-to-Text**: Groq Whisper (cloud, primary) plus an **optional** self-hosted Whisper server (speaches by default, any OpenAI-compatible endpoint works). Controlled by `STT_PROVIDER` (`auto` | `groq` | `whisper`). In `auto` mode: with `GROQ_API_KEY` set, Groq runs and falls back to self-hosted on recoverable errors when `WHISPER_BASE_URL` is also set; with only `WHISPER_BASE_URL` set, self-hosted runs alone; if neither is configured, `/transcribe` returns 503. Start the self-hosted container with `docker compose --profile whisper up -d`
@@ -257,6 +258,8 @@ Multipart routes can't use Zod validation directly. Follow the pattern in `route
 - **Whitelist group JID limitation**: `WHITELIST_PHONES` supports group JIDs (e.g. `120363...@g.us`) only on the Baileys client. The Cloud API webhook payload does not include group context — only the individual sender's phone number — so group JID entries in the whitelist have no effect for Cloud API messages
 
 ### AI API (Python)
+- **Admin API (`routes/admin.py`, `/admin/*`)**: management-dashboard contract — `GET/PUT/DELETE /admin/prompt`, `GET/PATCH /admin/settings` + `DELETE /admin/settings/{key}`, read-only `GET /admin/users` and `GET /admin/users/{jid}/messages`, `GET /admin/overview`. Protected by the standard `X-API-Key` (NOT in `_AUTH_EXEMPT_PREFIXES`)
+- **Runtime settings overlay (`runtime_config.py`)**: a curated subset of settings (TTS/STT, semantic/KB search, history limits, PDF parser, whitelist, PDF TTL, core-memory length) can be overridden at runtime via the `runtime_settings` table. Behavioural code reads them through `runtime_config.get("key")` (env default ← DB override), cached in-process ~10s and busted on write. The `REGISTRY` in `runtime_config.py` is the source of truth: `hot=True` = overridable, `hot=False` = display-only/"needs restart" (bootstrap settings: DB/Redis/pool, CORS, rate limits, log level). **Only mark a setting `hot` if its consumption site actually reads via `runtime_config.get()`** — otherwise the override silently never applies. `PATCH /admin/settings` rejects unknown/non-hot keys with 400
 - Slash commands (`/settings`, `/tts`, `/stt`, `/clean`, `/memories`, `/help`) are intercepted in `routes/chat.py` — they never reach the AI agent
 - Core memory is a single markdown document per user (not individual rows) — the AI reads the whole doc and rewrites it via `update_core_memory` tool
 - CORS middleware must be added AFTER `APIKeyMiddleware` in `main.py` (Starlette processes middleware LIFO — reversing this breaks CORS preflight)

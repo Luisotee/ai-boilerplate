@@ -7,6 +7,7 @@ from ..config import settings
 from ..database import get_db, get_user_preferences
 from ..deps import limiter
 from ..logger import logger
+from ..runtime_config import runtime_config
 from ..schemas import TranscribeResponse, TTSRequest
 from ..transcription import (
     RECOVERABLE_STT_ERRORS,
@@ -195,7 +196,7 @@ async def text_to_speech_endpoint(
         logger.info(f"Text validated: {len(tts_request.text)} characters")
 
         # Step 2: Determine voice based on user preferences
-        voice = settings.tts_default_voice
+        voice = runtime_config.get("tts_default_voice")
         if tts_request.whatsapp_jid:
             prefs = get_user_preferences(db, tts_request.whatsapp_jid)
             if prefs:
