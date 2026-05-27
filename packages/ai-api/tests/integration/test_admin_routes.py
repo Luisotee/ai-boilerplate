@@ -642,6 +642,26 @@ class TestWhatsAppQr:
         finally:
             _cleanup()
 
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_client_error_reports_unavailable(self, *_):
+        # The client returned a non-2xx (WhatsAppClientError) — the other arm of
+        # the proxy's except tuple. Should still degrade to "unavailable", not 500.
+        from ai_api.whatsapp import WhatsAppClientError
+
+        app = _app_with_db(_make_mock_db())
+        try:
+            with _patch_wa_client(raises=WhatsAppClientError("boom", status_code=500)):
+                async with _client(app) as client:
+                    resp = await client.get("/admin/whatsapp/qr", headers=AUTH_HEADERS)
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["status"] == "unavailable"
+            assert data["connected"] is False
+        finally:
+            _cleanup()
+
 
 # ---------------------------------------------------------------------------
 # Auth

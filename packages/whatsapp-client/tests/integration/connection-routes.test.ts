@@ -67,5 +67,14 @@ describe('Connection routes', () => {
       expect(res.statusCode).toBe(200);
       expect(res.json()).toEqual({ status: 'connected', qr: null, qrGeneratedAt: null });
     });
+
+    it.each(['disconnected', 'connecting'] as const)('reports %s with no QR', async (status) => {
+      mockGetConnectionInfo.mockReturnValue({ status, qr: null, qrGeneratedAt: null });
+
+      const res = await app.inject({ method: 'GET', url: '/whatsapp/qr' });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ status, qr: null, qrGeneratedAt: null });
+    });
   });
 });

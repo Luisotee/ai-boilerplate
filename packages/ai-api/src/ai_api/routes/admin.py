@@ -340,7 +340,9 @@ async def whatsapp_qr():
     """
     base_url = get_whatsapp_client_url(None)  # Baileys client (client_id=None)
     try:
-        async with httpx.AsyncClient(timeout=settings.whatsapp_client_timeout) as http_client:
+        # Short timeout: this is an interactive dashboard poll, not a message send.
+        timeout = min(settings.whatsapp_client_timeout, 5.0)
+        async with httpx.AsyncClient(timeout=timeout) as http_client:
             client = create_whatsapp_client(
                 http_client=http_client,
                 base_url=base_url,

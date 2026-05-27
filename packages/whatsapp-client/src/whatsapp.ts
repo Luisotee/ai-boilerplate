@@ -78,6 +78,7 @@ export async function initializeWhatsApp(): Promise<void> {
 
     if (connection === 'close') {
       setConnectionStatus('disconnected');
+      setLatestQr(null); // the socket that issued the QR is gone — don't serve a stale code
       const shouldReconnect =
         (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
 
