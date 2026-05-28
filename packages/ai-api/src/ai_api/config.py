@@ -214,10 +214,3 @@ def get_whatsapp_api_key(client_id: str | None) -> str:
     if client_id == "telegram" and settings.telegram_api_key:
         return settings.telegram_api_key
     return settings.whatsapp_api_key
-
-
-whitelist_set: set[str] = (
-    {p.strip() for p in settings.whitelist_phones.split(",") if p.strip()}
-    if settings.whitelist_phones
-    else set()
-)

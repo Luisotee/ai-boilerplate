@@ -209,7 +209,7 @@ class TestSettings:
         app = _app_with_db(_make_mock_db())
         try:
             with (
-                patch("ai_api.routes.admin.set_setting_override") as mock_set,
+                patch("ai_api.routes.admin.set_setting_overrides_batch") as mock_batch,
                 patch(
                     "ai_api.routes.admin.get_setting_overrides",
                     return_value={"tts_default_voice": '"Puck"'},
@@ -222,9 +222,9 @@ class TestSettings:
                         headers=AUTH_HEADERS,
                     )
             assert resp.status_code == 200
-            mock_set.assert_called_once()
-            # set_setting_override(db, key, json_value)
-            assert mock_set.call_args.args[1:] == ("tts_default_voice", '"Puck"')
+            # set_setting_overrides_batch(db, {key: json_value, ...}) — called once
+            mock_batch.assert_called_once()
+            assert mock_batch.call_args.args[1] == {"tts_default_voice": '"Puck"'}
             assert _find(resp.json()["settings"], "tts_default_voice")["value"] == "Puck"
         finally:
             _cleanup()
@@ -369,7 +369,7 @@ class TestSettingsCrossConstraints:
         app = _app_with_db(_make_mock_db())
         try:
             with (
-                patch("ai_api.routes.admin.set_setting_override"),
+                patch("ai_api.routes.admin.set_setting_overrides_batch"),
                 patch(
                     "ai_api.routes.admin.get_setting_overrides",
                     return_value={"llamaparse_timeout_seconds": "5"},
@@ -434,7 +434,7 @@ class TestSettingsCrossConstraints:
         app = _app_with_db(_make_mock_db())
         try:
             with (
-                patch("ai_api.routes.admin.set_setting_override"),
+                patch("ai_api.routes.admin.set_setting_overrides_batch"),
                 patch(
                     "ai_api.routes.admin.get_setting_overrides",
                     return_value={
@@ -466,7 +466,7 @@ class TestSettingsCrossConstraints:
         """A bad second key rejects the whole batch — nothing is written."""
         app = _app_with_db(_make_mock_db())
         try:
-            with patch("ai_api.routes.admin.set_setting_override") as mock_set:
+            with patch("ai_api.routes.admin.set_setting_overrides_batch") as mock_batch:
                 async with _client(app) as client:
                     resp = await client.patch(
                         "/admin/settings",
@@ -479,7 +479,62 @@ class TestSettingsCrossConstraints:
                         headers=AUTH_HEADERS,
                     )
             assert resp.status_code == 400
-            mock_set.assert_not_called()
+            mock_batch.assert_not_called()
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_patch_db_write_failure_rolls_back(self, *_):
+        """If the batch upsert fails, the route rolls back and never commits.
+
+        Guards against per-row commits that would leave the batch half-persisted.
+        """
+        mock_db = _make_mock_db()
+        app = _app_with_db(mock_db)
+        try:
+            with patch(
+                "ai_api.routes.admin.set_setting_overrides_batch",
+                side_effect=RuntimeError("simulated DB write failure"),
+            ):
+                async with _client(app) as client:
+                    resp = await client.patch(
+                        "/admin/settings",
+                        json={
+                            "overrides": {
+                                "tts_default_voice": "Puck",
+                                "history_limit_private": 10,
+                            }
+                        },
+                        headers=AUTH_HEADERS,
+                    )
+            assert resp.status_code == 500
+            mock_db.commit.assert_not_called()
+            mock_db.rollback.assert_called()
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_get_settings_handles_malformed_override(self, *_):
+        """A corrupt JSON value in runtime_settings falls back to the env default
+        with source='default' (the silent-fallback path in _settings_payload)."""
+        from ai_api.config import settings
+
+        app = _app_with_db(_make_mock_db())
+        try:
+            with patch(
+                "ai_api.routes.admin.get_setting_overrides",
+                return_value={"tts_default_voice": "not-valid-json"},
+            ):
+                async with _client(app) as client:
+                    resp = await client.get("/admin/settings", headers=AUTH_HEADERS)
+            assert resp.status_code == 200
+            voice = _find(resp.json()["settings"], "tts_default_voice")
+            assert voice["source"] == "default"
+            assert voice["value"] == settings.tts_default_voice
         finally:
             _cleanup()
 

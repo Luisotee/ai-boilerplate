@@ -435,6 +435,22 @@ def set_setting_override(db, key: str, value: str) -> None:
     db.commit()
 
 
+def set_setting_overrides_batch(db, mapping: dict[str, str]) -> None:
+    """Upsert several runtime-setting overrides without committing.
+
+    The caller commits once after the loop, so a mid-batch failure rolls back
+    the whole transaction (not just the failing row). Use this for /admin
+    multi-key PATCH writes.
+    """
+    for key, value in mapping.items():
+        row = db.query(RuntimeSetting).filter(RuntimeSetting.key == key).first()
+        if row is None:
+            row = RuntimeSetting(key=key, value=value)
+            db.add(row)
+        else:
+            row.value = value
+
+
 def delete_setting_override(db, key: str) -> bool:
     """Delete an override. Returns True if a row was removed."""
     deleted = db.query(RuntimeSetting).filter(RuntimeSetting.key == key).delete()

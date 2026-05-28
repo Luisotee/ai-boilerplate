@@ -28,8 +28,9 @@ from ..database import (
     get_setting_overrides,
     is_telegram_jid,
     set_active_prompt,
-    set_setting_override,
+    set_setting_overrides_batch,
 )
+from ..deps import limiter
 from ..kb_models import KnowledgeBaseDocument
 from ..logger import logger
 from ..runtime_config import REGISTRY, REGISTRY_BY_KEY, coerce_value, runtime_config
@@ -207,9 +208,11 @@ async def patch_settings(request: UpdateSettingsRequest, db: Session = Depends(g
     # Validate cross-key invariants against the merged result, then write.
     _validate_cross_constraints(coerced)
 
+    # Single transaction across all overrides so a mid-batch failure rolls back
+    # the whole PATCH (per-row commits would leave the batch half-persisted).
     try:
-        for key, value in coerced.items():
-            set_setting_override(db, key, json.dumps(value))
+        set_setting_overrides_batch(db, {k: json.dumps(v) for k, v in coerced.items()})
+        db.commit()
     except Exception as e:
         logger.error(f"Error saving settings: {e}", exc_info=True)
         db.rollback()
@@ -330,6 +333,7 @@ async def overview(db: Session = Depends(get_db)):
 
 
 @router.get("/whatsapp/qr", response_model=WhatsAppStatusResponse)
+@limiter.exempt
 async def whatsapp_qr():
     """Proxy the Baileys client's link status + pairing QR for the dashboard.
 

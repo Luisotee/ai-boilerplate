@@ -10,7 +10,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from .config import settings, whitelist_set
+from .config import settings
 from .database import init_db
 from .deps import limiter
 from .logger import logger
@@ -56,10 +56,16 @@ async def lifespan(app: FastAPI):
     # Start periodic expired-document cleanup
     cleanup_task = asyncio.create_task(_cleanup_loop())
 
-    if whitelist_set:
-        logger.info("User whitelist ENABLED (%d entries)", len(whitelist_set))
+    # Startup-only banner: shows the env value at boot. /admin can override it
+    # at runtime — chat.py reads the effective value via runtime_config.
+    wl_env = [p.strip() for p in settings.whitelist_phones.split(",") if p.strip()]
+    if wl_env:
+        logger.info(
+            "User whitelist (startup env): %d entries — overridable via /admin",
+            len(wl_env),
+        )
     else:
-        logger.info("User whitelist DISABLED (all users allowed)")
+        logger.info("User whitelist DISABLED (env) — overridable via /admin")
 
     logger.info("=" * 60)
     logger.info("AI API is ready!")
