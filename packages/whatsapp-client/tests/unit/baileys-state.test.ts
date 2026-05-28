@@ -6,6 +6,13 @@ import type { WASocket } from '@whiskeysockets/baileys';
 let getBaileysSocket: () => WASocket;
 let setBaileysSocket: (sock: WASocket) => void;
 let isBaileysReady: () => boolean;
+let setConnectionStatus: (s: 'connecting' | 'qr' | 'connected' | 'disconnected') => void;
+let setLatestQr: (qr: string | null) => void;
+let getConnectionInfo: () => {
+  status: 'connecting' | 'qr' | 'connected' | 'disconnected';
+  qr: string | null;
+  qrGeneratedAt: string | null;
+};
 
 describe('baileys state singleton', () => {
   beforeEach(async () => {
@@ -16,6 +23,9 @@ describe('baileys state singleton', () => {
     getBaileysSocket = mod.getBaileysSocket;
     setBaileysSocket = mod.setBaileysSocket;
     isBaileysReady = mod.isBaileysReady;
+    setConnectionStatus = mod.setConnectionStatus;
+    setLatestQr = mod.setLatestQr;
+    getConnectionInfo = mod.getConnectionInfo;
   });
 
   describe('getBaileysSocket', () => {
@@ -62,6 +72,46 @@ describe('baileys state singleton', () => {
       setBaileysSocket(fakeSock);
 
       expect(isBaileysReady()).toBe(true);
+    });
+  });
+
+  describe('connection info / pairing QR', () => {
+    it('should default to connecting with no QR', () => {
+      expect(getConnectionInfo()).toEqual({
+        status: 'connecting',
+        qr: null,
+        qrGeneratedAt: null,
+      });
+    });
+
+    it('should expose the QR and set status when a QR arrives', () => {
+      setLatestQr('2@abc123def');
+      setConnectionStatus('qr');
+
+      const info = getConnectionInfo();
+      expect(info.status).toBe('qr');
+      expect(info.qr).toBe('2@abc123def');
+      expect(info.qrGeneratedAt).not.toBeNull();
+      // qrGeneratedAt is an ISO timestamp
+      expect(() => new Date(info.qrGeneratedAt as string).toISOString()).not.toThrow();
+    });
+
+    it('should clear the QR and report connected once paired', () => {
+      setLatestQr('2@abc123def');
+      setConnectionStatus('qr');
+      // simulate connection.update -> open
+      setConnectionStatus('connected');
+      setLatestQr(null);
+
+      const info = getConnectionInfo();
+      expect(info.status).toBe('connected');
+      expect(info.qr).toBeNull();
+      expect(info.qrGeneratedAt).toBeNull();
+    });
+
+    it('should report disconnected after a close', () => {
+      setConnectionStatus('disconnected');
+      expect(getConnectionInfo().status).toBe('disconnected');
     });
   });
 

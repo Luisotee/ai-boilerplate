@@ -58,6 +58,14 @@ export const ReadyResponseSchema = z.object({
   checks: z.record(z.string(), z.string()),
 });
 
+export const ConnectionInfoSchema = z.object({
+  status: z.enum(['connecting', 'qr', 'connected', 'disconnected']),
+  // Raw Baileys pairing QR payload; present only while status is 'qr'. The
+  // consumer renders it as a scannable QR code.
+  qr: z.string().nullable(),
+  qrGeneratedAt: z.string().nullable(),
+});
+
 // Types
 export type SendTextRequest = z.infer<typeof SendTextSchema>;
 export type SendReactionRequest = z.infer<typeof SendReactionSchema>;

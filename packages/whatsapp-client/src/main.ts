@@ -17,6 +17,7 @@ import {
 } from 'fastify-type-provider-zod';
 import { initializeWhatsApp } from './whatsapp.js';
 import { registerHealthRoutes } from './routes/health.js';
+import { registerConnectionRoutes } from './routes/connection.js';
 import { registerMessagingRoutes } from './routes/messaging.js';
 import { registerMediaRoutes } from './routes/media.js';
 import { registerOperationsRoutes } from './routes/operations.js';
@@ -171,6 +172,7 @@ async function start() {
 
   // Register API routes
   await registerHealthRoutes(app);
+  await registerConnectionRoutes(app);
   await registerMessagingRoutes(app);
   await registerMediaRoutes(app);
   await registerOperationsRoutes(app);
