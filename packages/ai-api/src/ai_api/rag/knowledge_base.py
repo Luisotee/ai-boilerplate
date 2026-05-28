@@ -8,8 +8,8 @@ with source attribution and citation.
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from ..config import settings
 from ..logger import logger
+from ..runtime_config import runtime_config
 
 
 async def search_knowledge_base(
@@ -39,11 +39,11 @@ async def search_knowledge_base(
         - 'document': Dict with document metadata (filename, upload_date, etc.)
         - 'similarity_score': Cosine similarity score
     """
-    # Apply defaults from settings if not provided
+    # Apply defaults from runtime config (env default, overridable via /admin)
     if similarity_threshold is None:
-        similarity_threshold = settings.kb_similarity_threshold
+        similarity_threshold = runtime_config.get("kb_similarity_threshold")
     if limit is None:
-        limit = settings.kb_search_limit
+        limit = runtime_config.get("kb_search_limit")
 
     if not query_embedding:
         logger.error("query_embedding is required for knowledge base search")

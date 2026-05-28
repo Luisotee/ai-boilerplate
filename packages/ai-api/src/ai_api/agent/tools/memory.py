@@ -1,8 +1,8 @@
 from pydantic_ai import RunContext
 
-from ...config import settings
 from ...database import get_or_create_core_memory
 from ...logger import logger
+from ...runtime_config import runtime_config
 from ..core import AgentDeps, agent
 
 
@@ -34,7 +34,7 @@ async def update_core_memory(ctx: RunContext[AgentDeps], content: str) -> str:
     logger.info("=" * 80)
 
     try:
-        max_length = settings.core_memory_max_length
+        max_length = runtime_config.get("core_memory_max_length")
         if len(content) > max_length:
             return (
                 f"Content too long ({len(content)} characters). "

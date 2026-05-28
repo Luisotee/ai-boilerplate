@@ -19,6 +19,7 @@ from groq import AsyncGroq
 
 from .config import settings
 from .logger import logger
+from .runtime_config import runtime_config
 
 # Derived constants from settings
 MAX_FILE_SIZE_BYTES = settings.stt_max_file_size_mb * 1024 * 1024
@@ -208,9 +209,10 @@ async def transcribe_audio(
         audio_content = audio_file.read()
 
         # Build parameters
+        groq_model = runtime_config.get("groq_stt_model")
         params = {
             "file": (filename, audio_content),
-            "model": settings.groq_stt_model,
+            "model": groq_model,
             "response_format": "json",  # Simple JSON with just text
             "temperature": 0.0,  # Deterministic output
         }
@@ -221,9 +223,7 @@ async def transcribe_audio(
             logger.debug(f"Transcribing with language hint: {language}")
 
         # Call Groq Whisper API
-        logger.info(
-            f"Transcribing audio with {settings.groq_stt_model} (size: {len(audio_content)} bytes)"
-        )
+        logger.info(f"Transcribing audio with {groq_model} (size: {len(audio_content)} bytes)")
         transcription = await client.audio.transcriptions.create(**params)
 
         # Extract text from response
@@ -288,9 +288,10 @@ async def transcribe_audio_via_whisper(
     extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else "mp3"
     mime = (AUDIO_MIME_TYPES.get(extension) or ["application/octet-stream"])[0]
 
+    whisper_model = runtime_config.get("whisper_model")
     files = {"file": (filename, audio_bytes, mime)}
     data: dict[str, str] = {
-        "model": settings.whisper_model,
+        "model": whisper_model,
         "response_format": "json",
         "temperature": "0.0",
     }
@@ -300,7 +301,7 @@ async def transcribe_audio_via_whisper(
 
     logger.info(
         f"Transcribing audio via self-hosted Whisper at {base_url} "
-        f"(model: {settings.whisper_model}, size: {len(audio_bytes)} bytes)"
+        f"(model: {whisper_model}, size: {len(audio_bytes)} bytes)"
     )
 
     try:
@@ -362,9 +363,10 @@ async def transcribe_audio_dispatcher(
     Raises:
         SttNotConfiguredError: no usable provider is configured for the mode.
     """
-    choice = settings.stt_provider
+    choice = runtime_config.get("stt_provider")
+    whisper_url = runtime_config.get("whisper_base_url")
     has_groq = bool(settings.groq_api_key)
-    has_whisper = bool(settings.whisper_base_url)
+    has_whisper = bool(whisper_url)
 
     async def _via_groq() -> tuple[str | None, str | None]:
         client = get_async_groq_client()
@@ -378,13 +380,13 @@ async def transcribe_audio_dispatcher(
         return await transcribe_audio(client, BytesIO(audio_bytes), filename, language=language)
 
     async def _via_whisper() -> tuple[str | None, str | None]:
-        if settings.whisper_base_url is None:
+        if not whisper_url:
             # Should be unreachable — callers must check has_whisper first.
             raise SttNotConfiguredError(
                 "WHISPER_BASE_URL is not set; cannot call self-hosted Whisper."
             )
         return await transcribe_audio_via_whisper(
-            settings.whisper_base_url, audio_bytes, filename, language=language
+            whisper_url, audio_bytes, filename, language=language
         )
 
     if choice == "groq":

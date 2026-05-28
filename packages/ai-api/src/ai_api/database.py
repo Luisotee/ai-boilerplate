@@ -134,6 +134,35 @@ class CoreMemory(Base):
     user = relationship("User", back_populates="core_memory")
 
 
+class BotPrompt(Base):
+    """Single active system-prompt override for this bot.
+
+    At most one row exists. When absent (or empty), the agent falls back to the
+    hardcoded ``DEFAULT_SYSTEM_PROMPT`` in ``agent/core.py``.
+    """
+
+    __tablename__ = "bot_prompt"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    content = Column(Text, nullable=False, default="")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class RuntimeSetting(Base):
+    """Key/value overlay for runtime-overridable settings.
+
+    One row per overridden setting. ``value`` is JSON-encoded to preserve type.
+    Read through ``runtime_config.get()``, never directly by behavioural code.
+    """
+
+    __tablename__ = "runtime_settings"
+
+    key = Column(String, primary_key=True)
+    value = Column(Text, nullable=False)  # JSON-encoded scalar
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
 def init_db():
     """Initialize database tables"""
     logger.info("Initializing database...")
@@ -257,12 +286,14 @@ def get_conversation_history(db, whatsapp_jid: str, conversation_type: str, limi
     """Retrieve recent conversation history for a user by WhatsApp JID"""
     user = get_or_create_user(db, whatsapp_jid, conversation_type)
 
-    # Load limit from settings if not explicitly provided
+    # Load limit from runtime config (env default, overridable via /admin)
     if limit is None:
+        from .runtime_config import runtime_config
+
         if user.conversation_type == ConversationType.GROUP:
-            limit = settings.history_limit_group
+            limit = runtime_config.get("history_limit_group")
         else:  # private
-            limit = settings.history_limit_private
+            limit = runtime_config.get("history_limit_private")
 
         logger.info(f"Using history limit {limit} for {user.conversation_type} conversation")
 
@@ -350,3 +381,62 @@ def get_or_create_core_memory(db, user_id: str) -> CoreMemory:
         db.refresh(mem)
         logger.info(f"Created empty core memory for user {user_id}")
     return mem
+
+
+# --- Bot prompt (single active row) ---
+
+
+def get_bot_prompt_row(db) -> BotPrompt | None:
+    """Return the single bot-prompt row, or None if no override is set."""
+    return db.query(BotPrompt).first()
+
+
+def get_active_prompt(db) -> str | None:
+    """Return the active prompt override content, or None to use the default."""
+    row = db.query(BotPrompt).first()
+    return row.content if row and row.content else None
+
+
+def set_active_prompt(db, content: str) -> BotPrompt:
+    """Upsert the single bot-prompt row."""
+    row = db.query(BotPrompt).first()
+    if row is None:
+        row = BotPrompt(content=content)
+        db.add(row)
+    else:
+        row.content = content
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def clear_active_prompt(db) -> None:
+    """Delete the prompt override, reverting the agent to its default."""
+    db.query(BotPrompt).delete()
+    db.commit()
+
+
+# --- Runtime settings overlay ---
+
+
+def get_setting_overrides(db) -> dict[str, str]:
+    """Return all runtime-setting overrides as {key: json_value_string}."""
+    return {row.key: row.value for row in db.query(RuntimeSetting).all()}
+
+
+def set_setting_override(db, key: str, value: str) -> None:
+    """Upsert a single runtime-setting override (value is a JSON-encoded string)."""
+    row = db.query(RuntimeSetting).filter(RuntimeSetting.key == key).first()
+    if row is None:
+        row = RuntimeSetting(key=key, value=value)
+        db.add(row)
+    else:
+        row.value = value
+    db.commit()
+
+
+def delete_setting_override(db, key: str) -> bool:
+    """Delete an override. Returns True if a row was removed."""
+    deleted = db.query(RuntimeSetting).filter(RuntimeSetting.key == key).delete()
+    db.commit()
+    return bool(deleted)

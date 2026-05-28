@@ -18,6 +18,7 @@ from pydub import AudioSegment
 
 from .config import settings
 from .logger import logger
+from .runtime_config import runtime_config
 
 # Voice mappings by language code
 TTS_VOICES = {
@@ -39,7 +40,7 @@ def get_voice_for_language(language: str) -> str:
     Returns:
         Voice name for Gemini TTS
     """
-    return TTS_VOICES.get(language, settings.tts_default_voice)
+    return TTS_VOICES.get(language, runtime_config.get("tts_default_voice"))
 
 
 def validate_text_input(text: str) -> tuple[bool, str | None]:
@@ -62,10 +63,11 @@ def validate_text_input(text: str) -> tuple[bool, str | None]:
     if not text.strip():
         return False, "Text contains only whitespace"
 
-    if len(text) > settings.tts_max_text_length:
+    max_text_length = runtime_config.get("tts_max_text_length")
+    if len(text) > max_text_length:
         return (
             False,
-            f"Text too long ({len(text)} chars). Maximum: {settings.tts_max_text_length} chars",
+            f"Text too long ({len(text)} chars). Maximum: {max_text_length} chars",
         )
 
     logger.debug(f"Text validated for TTS: {len(text)} characters")
@@ -117,16 +119,17 @@ async def synthesize_speech(
         - error_message: Human-readable error if failed, None otherwise
     """
     try:
-        voice_name = voice or settings.tts_default_voice
+        voice_name = voice or runtime_config.get("tts_default_voice")
+        tts_model = runtime_config.get("tts_model")
         logger.info(
-            f"Synthesizing speech with {settings.tts_model} ({len(text)} chars, voice: {voice_name})"
+            f"Synthesizing speech with {tts_model} ({len(text)} chars, voice: {voice_name})"
         )
 
         # Prepend TTS instruction to make intent clear to the model
         tts_prompt = f"Say the following text: {text}"
 
         response = client.models.generate_content(
-            model=settings.tts_model,
+            model=tts_model,
             contents=tts_prompt,
             config=types.GenerateContentConfig(
                 response_modalities=["AUDIO"],

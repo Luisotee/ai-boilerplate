@@ -9,7 +9,7 @@ from starlette.requests import Request
 
 from ..agent import AgentDeps, format_message_history, get_ai_response
 from ..commands import is_command, parse_and_execute, strip_leading_mentions
-from ..config import get_whatsapp_api_key, get_whatsapp_client_url, settings, whitelist_set
+from ..config import get_whatsapp_api_key, get_whatsapp_client_url, settings
 from ..database import (
     get_conversation_history,
     get_db,
@@ -23,6 +23,7 @@ from ..logger import logger
 from ..queue.connection import get_redis_client
 from ..queue.schemas import ChunkData, EnqueueResponse, JobStatusResponse
 from ..queue.utils import get_job_chunks, get_job_metadata, save_job_image
+from ..runtime_config import runtime_config
 from ..schemas import (
     ChatRequest,
     ChatResponse,
@@ -43,11 +44,17 @@ router = APIRouter()
 
 
 def _is_whitelisted(whatsapp_jid: str) -> bool:
-    """Check if a JID is whitelisted. Returns True if whitelist is empty (disabled)."""
-    if not whitelist_set:
+    """Check if a JID is whitelisted. Returns True if whitelist is empty (disabled).
+
+    Reads the (overridable) whitelist via runtime_config so /admin changes take
+    effect without a restart.
+    """
+    raw = runtime_config.get("whitelist_phones")
+    whitelist = {p.strip() for p in raw.split(",") if p.strip()} if raw else set()
+    if not whitelist:
         return True
     phone = whatsapp_jid.split("@")[0]
-    return phone in whitelist_set or whatsapp_jid in whitelist_set
+    return phone in whitelist or whatsapp_jid in whitelist
 
 
 async def get_stream_job_status(redis, job_id: str) -> str:
@@ -402,7 +409,7 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
 
                 # Create database record with conversation scope
                 expires_at = datetime.now(UTC) + timedelta(
-                    hours=settings.conversation_pdf_ttl_hours
+                    hours=runtime_config.get("conversation_pdf_ttl_hours")
                 )
                 document = KnowledgeBaseDocument(
                     id=doc_id,

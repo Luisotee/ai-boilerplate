@@ -16,6 +16,7 @@ from .deps import limiter
 from .logger import logger
 from .queue.connection import close_arq_redis, get_arq_redis
 from .routes import (
+    admin_router,
     chat_router,
     health_router,
     knowledge_base_router,
@@ -134,6 +135,10 @@ def custom_openapi():
             {"name": "Speech-to-Text", "description": "Audio transcription via Whisper"},
             {"name": "Text-to-Speech", "description": "Speech synthesis via Gemini TTS"},
             {"name": "Preferences", "description": "Per-user conversation preferences"},
+            {
+                "name": "Admin",
+                "description": "Management dashboard: prompt, settings, conversation viewer",
+            },
         ],
     )
     schema.setdefault("components", {})["securitySchemes"] = {
@@ -203,3 +208,4 @@ app.include_router(knowledge_base_router)
 app.include_router(chat_router)
 app.include_router(speech_router)
 app.include_router(preferences_router)
+app.include_router(admin_router)
