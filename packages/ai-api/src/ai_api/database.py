@@ -288,6 +288,9 @@ def get_conversation_history(db, whatsapp_jid: str, conversation_type: str, limi
 
     # Load limit from runtime config (env default, overridable via /admin)
     if limit is None:
+        # Lazy import: runtime_config imports SessionLocal from this module
+        # at refresh time, so a top-level import here would create a cycle.
+        # Don't hoist this back to the top.
         from .runtime_config import runtime_config
 
         if user.conversation_type == ConversationType.GROUP:

@@ -1,4 +1,5 @@
 import base64
+import functools
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -43,6 +44,14 @@ from ..whatsapp import create_whatsapp_client
 router = APIRouter()
 
 
+@functools.lru_cache(maxsize=1)
+def _parse_whitelist(raw: str) -> frozenset[str]:
+    """Parse the comma-separated whitelist into a set. Cached by the raw string,
+    so hot paths don't re-parse on every message — the cache misses only when
+    runtime_config.get("whitelist_phones") returns a new value."""
+    return frozenset(p.strip() for p in raw.split(",") if p.strip())
+
+
 def _is_whitelisted(whatsapp_jid: str) -> bool:
     """Check if a JID is whitelisted. Returns True if whitelist is empty (disabled).
 
@@ -50,7 +59,7 @@ def _is_whitelisted(whatsapp_jid: str) -> bool:
     effect without a restart.
     """
     raw = runtime_config.get("whitelist_phones")
-    whitelist = {p.strip() for p in raw.split(",") if p.strip()} if raw else set()
+    whitelist = _parse_whitelist(raw) if raw else frozenset()
     if not whitelist:
         return True
     phone = whatsapp_jid.split("@")[0]

@@ -7,7 +7,7 @@ the read-only conversation viewer, and auth enforcement.
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from httpx import ASGITransport, AsyncClient, ConnectError
+from httpx import ASGITransport, AsyncClient, ConnectError, ReadTimeout
 
 from tests.helpers.factories import make_conversation_message, make_user
 
@@ -708,6 +708,24 @@ class TestWhatsAppQr:
         app = _app_with_db(_make_mock_db())
         try:
             with _patch_wa_client(raises=WhatsAppClientError("boom", status_code=500)):
+                async with _client(app) as client:
+                    resp = await client.get("/admin/whatsapp/qr", headers=AUTH_HEADERS)
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["status"] == "unavailable"
+            assert data["connected"] is False
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_read_timeout_reports_unavailable(self, *_):
+        # ReadTimeout is in httpx.HTTPError's hierarchy, so the except tuple
+        # already catches it — this test makes the 5s timeout ceiling intentional.
+        app = _app_with_db(_make_mock_db())
+        try:
+            with _patch_wa_client(raises=ReadTimeout("read timeout")):
                 async with _client(app) as client:
                     resp = await client.get("/admin/whatsapp/qr", headers=AUTH_HEADERS)
             assert resp.status_code == 200

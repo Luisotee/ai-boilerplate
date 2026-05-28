@@ -63,3 +63,35 @@ class TestIsWhitelisted:
             assert _is_whitelisted("120363000000000000@g.us") is True
             assert _is_whitelisted("tg:42") is True
             assert _is_whitelisted("tg:43") is False
+
+
+class TestWhitelistOverridePropagation:
+    """End-to-end check that an /admin override on whitelist_phones flows through
+    runtime_config to the _is_whitelisted consumer (closes the consumer-side loop
+    without needing a real PATCH+DB roundtrip)."""
+
+    def test_runtime_config_override_reaches_consumer(self):
+        import time
+
+        from ai_api.routes.chat import _parse_whitelist
+        from ai_api.runtime_config import runtime_config
+
+        # Reset any cached state from earlier tests.
+        _parse_whitelist.cache_clear()
+        prior_overrides = runtime_config._overrides
+        prior_loaded_at = runtime_config._loaded_at
+        try:
+            # Simulate the overlay having a DB-backed override (as if PATCH
+            # /admin/settings had written it and the cache had refreshed).
+            runtime_config._overrides = {"whitelist_phones": "5491126726818"}
+            runtime_config._loaded_at = time.monotonic()  # keep cache fresh
+
+            # Without the override path being wired, this would fall through to
+            # the env default (empty) and accept any JID. With it, only the
+            # listed phone gets through.
+            assert _is_whitelisted("5491126726818@s.whatsapp.net") is True
+            assert _is_whitelisted("9999999999@s.whatsapp.net") is False
+        finally:
+            runtime_config._overrides = prior_overrides
+            runtime_config._loaded_at = prior_loaded_at
+            _parse_whitelist.cache_clear()
