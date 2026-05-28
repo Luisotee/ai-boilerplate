@@ -174,6 +174,20 @@ def _validate_cross_constraints(coerced: dict[str, object]) -> None:
                 status_code=400,
                 detail="Cannot set stt_provider=whisper: whisper_base_url is not set",
             )
+    if "gemini_model" in coerced:
+        # Free-form string by design (no choices/allowlist), but reject obvious
+        # garbage and cap length to keep payloads sane.
+        value = coerced["gemini_model"]
+        if not isinstance(value, str) or not value.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="gemini_model must be a non-empty string",
+            )
+        if len(value) > 200:
+            raise HTTPException(
+                status_code=400,
+                detail="gemini_model is too long (max 200 characters)",
+            )
 
 
 @router.get("/settings", response_model=SettingsResponse)

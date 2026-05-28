@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     # Required
     database_url: str
     gemini_api_key: str
+    gemini_model: str = "gemini-2.5-flash"  # primary LLM; overridable at runtime via /admin
 
     # API Authentication
     ai_api_key: str  # Required — app fails to start if not set

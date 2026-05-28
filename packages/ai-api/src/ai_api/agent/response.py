@@ -3,7 +3,7 @@ import base64
 from pydantic_ai import BinaryContent
 
 from ..logger import logger
-from .core import AgentDeps, agent
+from .core import AgentDeps, agent, build_runtime_model
 
 
 async def get_ai_response(
@@ -54,7 +54,12 @@ async def get_ai_response(
     full_response = ""
 
     # Use async context manager to enter streaming context
-    async with agent.run_stream(prompt, message_history=message_history, deps=agent_deps) as result:
+    async with agent.run_stream(
+        prompt,
+        message_history=message_history,
+        deps=agent_deps,
+        model=build_runtime_model(),  # honor /admin model overrides per-run
+    ) as result:
         # Call .stream_text(delta=True) to get incremental deltas (NOT cumulative text)
         async for text_chunk in result.stream_text(delta=True):
             full_response += text_chunk

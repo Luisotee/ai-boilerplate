@@ -146,6 +146,15 @@ REGISTRY: tuple[SettingSpec, ...] = (
         "knowledge_base",
         "Hours a conversation-scoped PDF is retained before cleanup.",
     ),
+    # --- Hot: model ---
+    SettingSpec(
+        "gemini_model",
+        "str",
+        True,
+        "model",
+        "Primary Gemini model name (e.g. gemini-2.5-flash). Free-form string; "
+        "takes effect on the next message (≤ ~10s in the stream worker).",
+    ),
     # --- Hot: speech ---
     SettingSpec(
         "stt_provider",

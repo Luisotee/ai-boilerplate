@@ -298,6 +298,65 @@ class TestSettings:
     @patch("ai_api.main.init_db")
     @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
     @patch("ai_api.main.cleanup_expired_documents")
+    async def test_patch_gemini_model_accepted(self, *_):
+        app = _app_with_db(_make_mock_db())
+        try:
+            with (
+                patch("ai_api.routes.admin.set_setting_overrides_batch") as mock_batch,
+                patch(
+                    "ai_api.routes.admin.get_setting_overrides",
+                    return_value={"gemini_model": '"gemini-3.1-pro"'},
+                ),
+            ):
+                async with _client(app) as client:
+                    resp = await client.patch(
+                        "/admin/settings",
+                        json={"overrides": {"gemini_model": "gemini-3.1-pro"}},
+                        headers=AUTH_HEADERS,
+                    )
+            assert resp.status_code == 200
+            mock_batch.assert_called_once()
+            assert mock_batch.call_args.args[1] == {"gemini_model": '"gemini-3.1-pro"'}
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_patch_gemini_model_empty_rejected(self, *_):
+        app = _app_with_db(_make_mock_db())
+        try:
+            async with _client(app) as client:
+                resp = await client.patch(
+                    "/admin/settings",
+                    json={"overrides": {"gemini_model": "   "}},
+                    headers=AUTH_HEADERS,
+                )
+            assert resp.status_code == 400
+            assert "non-empty" in resp.json()["detail"]
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_patch_gemini_model_too_long_rejected(self, *_):
+        app = _app_with_db(_make_mock_db())
+        try:
+            async with _client(app) as client:
+                resp = await client.patch(
+                    "/admin/settings",
+                    json={"overrides": {"gemini_model": "x" * 201}},
+                    headers=AUTH_HEADERS,
+                )
+            assert resp.status_code == 400
+            assert "too long" in resp.json()["detail"]
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
     async def test_patch_empty_overrides_rejected(self, *_):
         app = _app_with_db(_make_mock_db())
         try:
