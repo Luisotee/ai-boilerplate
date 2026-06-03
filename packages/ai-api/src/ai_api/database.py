@@ -427,17 +427,6 @@ def get_setting_overrides(db) -> dict[str, str]:
     return {row.key: row.value for row in db.query(RuntimeSetting).all()}
 
 
-def set_setting_override(db, key: str, value: str) -> None:
-    """Upsert a single runtime-setting override (value is a JSON-encoded string)."""
-    row = db.query(RuntimeSetting).filter(RuntimeSetting.key == key).first()
-    if row is None:
-        row = RuntimeSetting(key=key, value=value)
-        db.add(row)
-    else:
-        row.value = value
-    db.commit()
-
-
 def set_setting_overrides_batch(db, mapping: dict[str, str]) -> None:
     """Upsert several runtime-setting overrides without committing.
 

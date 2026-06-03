@@ -22,6 +22,7 @@ from ai_api.schemas import (
     SaveMessageRequest,
     TTSRequest,
     UpdatePreferencesRequest,
+    UpdatePromptRequest,
 )
 
 # ---------------------------------------------------------------------------
@@ -331,3 +332,28 @@ class TestUpdatePreferencesRequest:
         assert req.tts_enabled is False
         assert req.tts_language == "de"
         assert req.stt_language == "auto"
+
+
+# ---------------------------------------------------------------------------
+# UpdatePromptRequest
+# ---------------------------------------------------------------------------
+
+
+class TestUpdatePromptRequest:
+    """Guards the 100 KB prompt cap (DoS / bloat regression)."""
+
+    def test_non_empty_minimal(self):
+        req = UpdatePromptRequest(content="x")
+        assert req.content == "x"
+
+    def test_at_cap_accepted(self):
+        req = UpdatePromptRequest(content="x" * 100_000)
+        assert len(req.content) == 100_000
+
+    def test_over_cap_rejected(self):
+        with pytest.raises(ValidationError):
+            UpdatePromptRequest(content="x" * 100_001)
+
+    def test_empty_rejected(self):
+        with pytest.raises(ValidationError):
+            UpdatePromptRequest(content="")
