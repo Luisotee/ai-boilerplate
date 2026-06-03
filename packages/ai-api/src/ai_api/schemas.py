@@ -139,7 +139,12 @@ class PromptResponse(BaseModel):
 class UpdatePromptRequest(BaseModel):
     """Request to set the active system-prompt override."""
 
-    content: str = Field(..., min_length=1, description="New system prompt (non-empty)")
+    content: str = Field(
+        ...,
+        min_length=1,
+        max_length=100_000,
+        description="New system prompt (non-empty; capped at 100 KB)",
+    )
 
 
 class SettingItem(BaseModel):

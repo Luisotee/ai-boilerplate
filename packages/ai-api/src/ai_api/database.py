@@ -288,6 +288,9 @@ def get_conversation_history(db, whatsapp_jid: str, conversation_type: str, limi
 
     # Load limit from runtime config (env default, overridable via /admin)
     if limit is None:
+        # Lazy import: runtime_config imports SessionLocal from this module
+        # at refresh time, so a top-level import here would create a cycle.
+        # Don't hoist this back to the top.
         from .runtime_config import runtime_config
 
         if user.conversation_type == ConversationType.GROUP:
@@ -424,15 +427,20 @@ def get_setting_overrides(db) -> dict[str, str]:
     return {row.key: row.value for row in db.query(RuntimeSetting).all()}
 
 
-def set_setting_override(db, key: str, value: str) -> None:
-    """Upsert a single runtime-setting override (value is a JSON-encoded string)."""
-    row = db.query(RuntimeSetting).filter(RuntimeSetting.key == key).first()
-    if row is None:
-        row = RuntimeSetting(key=key, value=value)
-        db.add(row)
-    else:
-        row.value = value
-    db.commit()
+def set_setting_overrides_batch(db, mapping: dict[str, str]) -> None:
+    """Upsert several runtime-setting overrides without committing.
+
+    The caller commits once after the loop, so a mid-batch failure rolls back
+    the whole transaction (not just the failing row). Use this for /admin
+    multi-key PATCH writes.
+    """
+    for key, value in mapping.items():
+        row = db.query(RuntimeSetting).filter(RuntimeSetting.key == key).first()
+        if row is None:
+            row = RuntimeSetting(key=key, value=value)
+            db.add(row)
+        else:
+            row.value = value
 
 
 def delete_setting_override(db, key: str) -> bool:

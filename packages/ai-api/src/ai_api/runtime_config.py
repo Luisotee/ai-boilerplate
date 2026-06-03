@@ -146,6 +146,15 @@ REGISTRY: tuple[SettingSpec, ...] = (
         "knowledge_base",
         "Hours a conversation-scoped PDF is retained before cleanup.",
     ),
+    # --- Hot: model ---
+    SettingSpec(
+        "gemini_model",
+        "str",
+        True,
+        "model",
+        "Primary Gemini model name (e.g. gemini-2.5-flash). Free-form string; "
+        "takes effect on the next message (≤ ~10s in the stream worker).",
+    ),
     # --- Hot: speech ---
     SettingSpec(
         "stt_provider",
@@ -287,6 +296,10 @@ class _RuntimeConfig:
             except Exception:
                 # Never let a settings read break a request — fall back to the
                 # last known overrides (or env defaults) and back off briefly.
+                # On the first-ever refresh failure self._overrides is still {},
+                # so the next ~_CACHE_TTL_SECONDS of reads serve env defaults
+                # silently — intentional, to avoid stampeding the DB when it's
+                # down. The TTL retry restores overrides once the DB recovers.
                 logger.error(
                     "Failed to refresh runtime settings; using last known values",
                     exc_info=True,

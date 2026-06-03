@@ -587,6 +587,58 @@ class TestGetJobStatus:
     @patch("ai_api.main.init_db")
     @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
     @patch("ai_api.main.cleanup_expired_documents")
+    async def test_failed_job_surfaces_error(self, mock_cleanup, mock_redis_init, mock_init_db):
+        """GET /chat/job/{id} for a failed job returns status=failed + error.
+
+        Guards the fast-fail path: when the processor writes terminal metadata
+        with status='failed', the route must (a) report 'failed' (not 'complete'),
+        (b) keep complete=False, and (c) include the error string so TS clients
+        can log it before throwing.
+        """
+        job_id = str(uuid.uuid4())
+
+        import json
+
+        metadata = json.dumps(
+            {
+                "user_id": str(uuid.uuid4()),
+                "whatsapp_jid": TEST_JID,
+                "message": "Hi",
+                "conversation_type": "private",
+                "status": "failed",
+                "error": "404 model not found",
+            }
+        )
+
+        mock_redis = AsyncMock()
+        mock_redis.get = AsyncMock(return_value=metadata)
+        mock_redis.lrange = AsyncMock(return_value=[])  # no chunks (failed early)
+        mock_redis.close = AsyncMock()
+
+        @asynccontextmanager
+        async def mock_get_redis_client():
+            yield mock_redis
+
+        with patch("ai_api.routes.chat.get_redis_client", mock_get_redis_client):
+            from ai_api.main import app
+
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                response = await client.get(
+                    f"/chat/job/{job_id}",
+                    headers=AUTH_HEADERS,
+                )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "failed"
+        assert data["complete"] is False
+        assert data["full_response"] is None
+        assert data["error"] == "404 model not found"
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
     async def test_job_status_requires_auth(self, mock_cleanup, mock_redis_init, mock_init_db):
         """GET /chat/job/{id} without API key returns 401."""
         from ai_api.main import app

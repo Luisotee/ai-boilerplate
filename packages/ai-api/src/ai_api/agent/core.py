@@ -2,6 +2,7 @@ from dataclasses import dataclass
 
 import httpx
 from pydantic_ai import Agent, RunContext
+from pydantic_ai.models import Model
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
 from sqlalchemy.orm import Session
@@ -9,6 +10,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import get_active_prompt, get_or_create_core_memory
 from ..embeddings import EmbeddingService
+from ..runtime_config import runtime_config
 from ..whatsapp import WhatsAppClient
 
 
@@ -31,9 +33,11 @@ class AgentDeps:
     current_message_id: str | None = None
 
 
-# Create Google provider and model with API key from settings
+# Create Google provider and model with API key from settings.
+# The module-level model is the startup default — every chat run overrides it
+# per-call via build_runtime_model() so /admin can change the model live.
 google_provider = GoogleProvider(api_key=settings.gemini_api_key)
-google_model = GoogleModel("gemini-2.5-flash", provider=google_provider)
+google_model = GoogleModel(settings.gemini_model, provider=google_provider)
 
 # Create the AI agent with dependencies
 agent = Agent(
@@ -41,6 +45,19 @@ agent = Agent(
     deps_type=AgentDeps,
     retries=3,  # Increase from default 1 to handle occasional malformed Gemini responses
 )
+
+
+def build_runtime_model() -> Model:
+    """Build a Model for this run from the current runtime_config value.
+
+    Called by ``agent/response.py`` for every ``agent.run_stream`` invocation, so a
+    ``/admin/settings`` change to ``gemini_model`` takes effect on the next
+    message without restarting the process (≤ ~10s in the stream worker, via
+    runtime_config's TTL cache; instant in the API process).
+    """
+    name = runtime_config.get("gemini_model")
+    return GoogleModel(name, provider=google_provider)
+
 
 # Default system prompt — used when no /admin override is stored in the DB.
 # The active prompt is loaded per-run via the `base_system_prompt` instructions

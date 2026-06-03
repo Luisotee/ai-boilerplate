@@ -35,6 +35,7 @@ interface JobStatus {
   status: string;
   complete: boolean;
   full_response?: string;
+  error?: string;
 }
 
 interface EnqueueResponse {
@@ -177,6 +178,13 @@ export async function sendMessageToAI(
     if (status.complete) {
       logger.info({ job_id, iterations, elapsedMs }, 'Job completed');
       return status.full_response || '';
+    }
+
+    // Terminal failure — bail out fast so the user gets the ❌ reaction within
+    // ~1s instead of waiting the full polling timeout.
+    if (status.status === 'failed') {
+      logger.error({ job_id, error: status.error }, 'Job failed');
+      throw new Error(status.error || 'AI processing failed');
     }
 
     iterations++;

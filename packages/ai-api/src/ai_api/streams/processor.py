@@ -298,6 +298,28 @@ async def process_chat_job_direct(
                 except Exception as save_error:
                     logger.error(f"[Job {job_id}] Failed to save partial response: {save_error}")
 
+            # Write terminal "failed" metadata so pollers stop waiting immediately
+            # instead of timing out at config.polling.maxDurationMs (~120s).
+            # Wrapped so a Redis hiccup never shadows the original exception.
+            try:
+                await set_job_metadata(
+                    redis,
+                    job_id,
+                    {
+                        "user_id": user_id,
+                        "whatsapp_jid": whatsapp_jid,
+                        "message": message,
+                        "conversation_type": conversation_type,
+                        "total_chunks": chunk_index,
+                        "user_message_id": user_message_id,
+                        "status": "failed",
+                        "error": str(e),
+                    },
+                )
+                logger.info(f"[Job {job_id}] Wrote failed-status metadata")
+            except Exception as meta_err:
+                logger.error(f"[Job {job_id}] Failed to write failure metadata: {meta_err}")
+
             # Re-raise exception
             raise
 
