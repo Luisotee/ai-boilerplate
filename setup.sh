@@ -32,8 +32,10 @@ escape_sed() { printf '%s' "$1" | sed -e 's/[&/|\\]/\\&/g'; }
 # Strip CR/LF from user-pasted input (common when copying tokens from the clipboard).
 sanitize() { printf '%s' "${1//$'\r'/}" | tr -d '\n'; }
 
-# Return 0 if a TCP port is currently bound on the host (any interface).
-# Tries ss → lsof → bash /dev/tcp so it works on minimal systems.
+# Return 0 if a TCP port is currently bound on the host.
+# ss/lsof check all interfaces; the bash /dev/tcp fallback only probes 127.0.0.1
+# (best-effort on minimal hosts that have neither tool — may miss a port bound to
+# a non-loopback interface). A probe that errors out is treated as "free".
 port_in_use() {
   local port="$1"
   if command -v ss &>/dev/null; then
@@ -158,6 +160,8 @@ print_header "Environment configuration"
 
 ENV_FILE=".env"
 ENV_EXAMPLE=".env.example"
+# Ports we couldn't free (declared here so the always-run final summary can read it).
+PORT_ERRORS=()
 
 if [ -f "$ENV_FILE" ]; then
   echo ""
@@ -197,6 +201,7 @@ if [ "$SKIP_ENV" = false ]; then
     SERVICE_NAME COMPOSE_PROJECT_NAME
     POSTGRES_PORT REDIS_PORT ADMINER_PORT AI_API_PORT WHISPER_PORT
     WHATSAPP_API_PORT WHATSAPP_CLOUD_PORT TELEGRAM_PORT
+    WHATSAPP_CLIENT_URL WHATSAPP_CLOUD_CLIENT_URL TELEGRAM_CLIENT_URL
   )
   MISSING_KEYS=()
   for key in "${REQUIRED_KEYS[@]}"; do
@@ -228,11 +233,16 @@ if [ "$SKIP_ENV" = false ]; then
   print_success "Service name set to '$SERVICE_NAME'"
 
   # ── Port conflict detection ───────────────────────────
-  # Each entry is VAR:DEFAULT. The .env value is the host-published port (and the
-  # local-dev bind/connect port); containers stay pinned to canonical internal
-  # ports in docker-compose.yml. We auto-bump any port already in use on the host.
+  # Each entry is VAR:DEFAULT. The .env value is the Docker host-published port
+  # (and, for the client *_PORT vars, the local-dev bind port); containers stay
+  # pinned to canonical internal ports in docker-compose.yml. We auto-bump any
+  # port already in use on the host.
   echo ""
   echo -e "  ${BOLD}Port check${NC}"
+  if ! command -v ss &>/dev/null && ! command -v lsof &>/dev/null; then
+    print_warning "Neither 'ss' nor 'lsof' found — port probing is best-effort"
+    print_warning "(loopback only); a conflict on a non-loopback interface may be missed"
+  fi
   PORT_SPECS=(
     "POSTGRES_PORT:5432"
     "REDIS_PORT:6379"
@@ -244,8 +254,11 @@ if [ "$SKIP_ENV" = false ]; then
     "WHISPER_PORT:8771"
   )
   PORT_CHANGES=0
-  # Captured for reuse in DATABASE_URL and the final summary.
+  # Captured to rebuild DATABASE_URL and the client callback URLs below.
   PG_PORT=5432
+  WA_PORT=3001
+  WA_CLOUD_PORT=3002
+  TG_PORT=3003
   for spec in "${PORT_SPECS[@]}"; do
     var="${spec%%:*}"
     default="${spec##*:}"
@@ -253,6 +266,7 @@ if [ "$SKIP_ENV" = false ]; then
       chosen="$FREE_PORT"
     else
       print_error "Could not find a free port near $default for $var — set $var manually in .env"
+      PORT_ERRORS+=("$var (default $default)")
       chosen="$default"
     fi
     sed -i "s|^${var}=.*|${var}=${chosen}|" "$ENV_FILE"
@@ -260,8 +274,22 @@ if [ "$SKIP_ENV" = false ]; then
       print_warning "Port $default in use → ${var}=${chosen}"
       PORT_CHANGES=$((PORT_CHANGES + 1))
     fi
-    [ "$var" = "POSTGRES_PORT" ] && PG_PORT="$chosen"
+    case "$var" in
+      POSTGRES_PORT) PG_PORT="$chosen" ;;
+      WHATSAPP_API_PORT) WA_PORT="$chosen" ;;
+      WHATSAPP_CLOUD_PORT) WA_CLOUD_PORT="$chosen" ;;
+      TELEGRAM_PORT) TG_PORT="$chosen" ;;
+    esac
   done
+
+  # Keep the inter-service callback URLs the AI API reads in sync with the chosen
+  # client ports, so local (non-Docker) dev works after a bump. In Docker these
+  # are overridden in docker-compose.yml, so this only affects local dev.
+  # AI_API_URL is intentionally left at :8000 — the local API always binds 8000.
+  sed -i "s|^WHATSAPP_CLIENT_URL=.*|WHATSAPP_CLIENT_URL=$(escape_sed "http://localhost:${WA_PORT}")|" "$ENV_FILE"
+  sed -i "s|^WHATSAPP_CLOUD_CLIENT_URL=.*|WHATSAPP_CLOUD_CLIENT_URL=$(escape_sed "http://localhost:${WA_CLOUD_PORT}")|" "$ENV_FILE"
+  sed -i "s|^TELEGRAM_CLIENT_URL=.*|TELEGRAM_CLIENT_URL=$(escape_sed "http://localhost:${TG_PORT}")|" "$ENV_FILE"
+
   if [ "$PORT_CHANGES" -eq 0 ]; then
     print_success "All default ports are free"
   else
@@ -543,6 +571,12 @@ fi
 
 # ── 4. Next steps ───────────────────────────────────────
 print_header "Setup complete!"
+
+if [ "${#PORT_ERRORS[@]}" -gt 0 ]; then
+  echo ""
+  print_warning "Could not auto-assign a free port for: ${PORT_ERRORS[*]}"
+  print_warning "Set these manually in .env before starting the stack."
+fi
 
 echo ""
 echo -e "  ${BOLD}Option A: Docker (recommended for production)${NC}"
