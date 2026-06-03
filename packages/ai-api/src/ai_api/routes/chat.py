@@ -75,12 +75,14 @@ async def get_stream_job_status(redis, job_id: str) -> str:
         job_id: Job identifier
 
     Returns:
-        Status string: 'complete', 'in_progress', or 'queued'
+        Status string: 'complete', 'failed', 'in_progress', or 'queued'
     """
-    # Check if metadata exists (job complete)
+    # Metadata exists ⇒ job is terminal. Honor an explicit "failed" status
+    # written by the processor; otherwise the successful path leaves no status
+    # field and we default to "complete".
     metadata = await get_job_metadata(redis, job_id)
     if metadata:
-        return "complete"
+        return metadata.get("status") or "complete"
 
     # Check if chunks exist (job in progress)
     chunks = await get_job_chunks(redis, job_id)
@@ -492,7 +494,9 @@ async def get_job_status(request: Request, job_id: str):
             chunks = await get_job_chunks(redis_client, job_id)
             total_chunks = len(chunks)
 
-            # Build response
+            # Build response. "failed" is terminal but not "complete" — the TS
+            # pollers bail on either, but only "complete" should expose
+            # full_response.
             response = JobStatusResponse(
                 job_id=job_id,
                 status=status,
@@ -504,6 +508,12 @@ async def get_job_status(request: Request, job_id: str):
             # If complete, assemble full response
             if status == "complete" and chunks:
                 response.full_response = "".join(chunk["content"] for chunk in chunks)
+
+            # Surface the agent error from metadata so the client can log it.
+            if status == "failed":
+                metadata = await get_job_metadata(redis_client, job_id)
+                if metadata:
+                    response.error = metadata.get("error")
 
             return response
 
