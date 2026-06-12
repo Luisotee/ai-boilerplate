@@ -5,6 +5,7 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import qrcode from 'qrcode-terminal';
+import { readdir, rm } from 'node:fs/promises';
 import { logger } from './logger.js';
 import { config } from './config.js';
 import { setBaileysSocket, setConnectionStatus, setLatestQr } from './services/baileys.js';
@@ -18,6 +19,20 @@ import { shouldRespondInGroup } from './utils/message.js';
 
 const DEFAULT_IMAGE_PROMPT = 'Please describe and analyze this image';
 const DEFAULT_DOCUMENT_PROMPT = 'I have uploaded a document for you to analyze';
+
+const AUTH_DIR = 'auth_info_baileys';
+
+/** Delete the stored Baileys creds so the next init drops back into QR (unregistered) mode.
+ *  Clears the directory contents — not the dir itself, which is the session volume mountpoint. */
+async function clearAuthState(): Promise<void> {
+  try {
+    const entries = await readdir(AUTH_DIR);
+    await Promise.all(entries.map((e) => rm(`${AUTH_DIR}/${e}`, { recursive: true, force: true })));
+    logger.info({ cleared: entries.length }, 'Cleared WhatsApp auth state');
+  } catch (err) {
+    logger.error({ err }, 'Failed to clear WhatsApp auth state');
+  }
+}
 
 // Reconnection state
 let reconnectionAttempts = 0;
@@ -55,7 +70,7 @@ function resetReconnectionState(): void {
 }
 
 export async function initializeWhatsApp(): Promise<void> {
-  const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
+  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
 
   const sock = makeWASocket({
     auth: state,
@@ -64,7 +79,7 @@ export async function initializeWhatsApp(): Promise<void> {
   });
 
   // Connection events
-  sock.ev.on('connection.update', (update) => {
+  sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
@@ -94,14 +109,17 @@ export async function initializeWhatsApp(): Promise<void> {
       if (shouldReconnect) {
         // Check if max attempts exceeded
         if (reconnectionAttempts >= config.reconnection.maxAttempts) {
-          logger.error(
+          // Don't give up — keep retrying at the capped backoff so a prolonged outage
+          // self-heals when connectivity returns. Clamp the counter so the delay stays
+          // pinned at maxDelayMs instead of overflowing or growing unbounded.
+          reconnectionAttempts = config.reconnection.maxAttempts;
+          logger.warn(
             {
               attempts: reconnectionAttempts,
               maxAttempts: config.reconnection.maxAttempts,
             },
-            '❌ Max reconnection attempts exceeded. Manual restart required.'
+            'Max reconnection attempts reached — continuing to retry at the capped interval.'
           );
-          return;
         }
 
         // Prevent multiple concurrent reconnection attempts
@@ -132,8 +150,13 @@ export async function initializeWhatsApp(): Promise<void> {
           initializeWhatsApp();
         }, delayMs);
       } else {
-        logger.info('Logged out. QR code required for reconnection.');
+        // Logged out (e.g. the linked phone unlinked this device). The on-disk creds are
+        // now invalid and Baileys won't emit a fresh QR while a registered cred set exists,
+        // so wipe the auth state and re-initialise to drop back into QR mode automatically.
+        logger.info('Logged out — clearing stale credentials and re-initialising to issue a fresh QR.');
         resetReconnectionState();
+        await clearAuthState();
+        initializeWhatsApp();
       }
     } else if (connection === 'open') {
       logger.info('✅ WhatsApp connection opened successfully');
