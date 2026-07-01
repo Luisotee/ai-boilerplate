@@ -120,6 +120,21 @@ class WhatsAppClient:
         )
         return await self._handle_response(response)
 
+    async def logout_whatsapp(self) -> SuccessResponse:
+        """Force-logout the Baileys session and trigger a fresh pairing QR.
+
+        POSTs to ``/whatsapp/logout``. The client unlinks the device, clears the
+        stored creds, and re-initialises the connection; poll
+        ``get_whatsapp_status()`` afterward for the new QR.
+        """
+        logger.info("Forcing WhatsApp logout / re-pair")
+        response = await self._client.post(
+            f"{self._base_url}/whatsapp/logout",
+            headers=self._get_headers(),
+        )
+        data = await self._handle_response(response)
+        return SuccessResponse(success=data.get("success", False))
+
     async def send_reaction(
         self,
         phone_number: str,

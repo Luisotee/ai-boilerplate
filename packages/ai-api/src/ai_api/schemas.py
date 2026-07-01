@@ -229,3 +229,10 @@ class WhatsAppStatusResponse(BaseModel):
     connected: bool = Field(..., description="True when the session is linked")
     qr: str | None = Field(None, description="Raw pairing QR payload; present only while 'qr'")
     qr_generated_at: str | None = Field(None, description="ISO timestamp the QR was issued")
+
+
+class WhatsAppLogoutResponse(BaseModel):
+    """Result of forcing a Baileys logout / re-pair."""
+
+    success: bool = Field(..., description="True when the logout + re-init was triggered")
+    detail: str = Field(..., description="Human-readable status message")

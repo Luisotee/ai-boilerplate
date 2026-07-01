@@ -8,7 +8,13 @@ import qrcode from 'qrcode-terminal';
 import { readdir, rm } from 'node:fs/promises';
 import { logger } from './logger.js';
 import { config } from './config.js';
-import { setBaileysSocket, setConnectionStatus, setLatestQr } from './services/baileys.js';
+import {
+  setBaileysSocket,
+  setConnectionStatus,
+  setLatestQr,
+  getBaileysSocket,
+  isBaileysReady,
+} from './services/baileys.js';
 import { handleTextMessage } from './handlers/text.js';
 import { transcribeAudioMessage } from './handlers/audio.js';
 import { extractImageData } from './handlers/image.js';
@@ -32,6 +38,29 @@ async function clearAuthState(): Promise<void> {
   } catch (err) {
     logger.error({ err }, 'Failed to clear WhatsApp auth state');
   }
+}
+
+/**
+ * Force a WhatsApp re-pair (used by the dashboard's "unlink" action).
+ *
+ * When a device is linked, ask WhatsApp to unlink it via `sock.logout()`. That
+ * ends the socket with `DisconnectReason.loggedOut`, so the `connection.update`
+ * handler wipes the stored creds and re-initialises into QR mode on its own. When
+ * there is no live session (already disconnected / mid-pairing) or the logout call
+ * fails, perform that same reset directly so a fresh QR is issued.
+ */
+export async function logoutWhatsApp(): Promise<void> {
+  if (isBaileysReady()) {
+    try {
+      await getBaileysSocket().logout();
+      return; // the loggedOut 'close' handler clears creds + re-issues the QR
+    } catch (err) {
+      logger.warn({ err }, 'sock.logout() failed; forcing a local re-pair instead');
+    }
+  }
+  resetReconnectionState();
+  await clearAuthState();
+  await initializeWhatsApp();
 }
 
 // Reconnection state

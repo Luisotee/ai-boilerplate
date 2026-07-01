@@ -45,6 +45,7 @@ from ..schemas import (
     UpdateSettingsRequest,
     UsersResponse,
     UserSummary,
+    WhatsAppLogoutResponse,
     WhatsAppStatusResponse,
 )
 from ..whatsapp import WhatsAppClientError, create_whatsapp_client
@@ -379,4 +380,31 @@ async def whatsapp_qr():
         connected=status == "connected",
         qr=data.get("qr"),
         qr_generated_at=data.get("qrGeneratedAt"),
+    )
+
+
+@router.post("/whatsapp/logout", response_model=WhatsAppLogoutResponse)
+async def whatsapp_logout():
+    """Force the Baileys session to log out, clear auth, and regenerate a QR.
+
+    Unlike the passive QR poll, this is an explicit action: it surfaces failure
+    (503) when no Baileys client is reachable. After it returns, poll
+    ``GET /admin/whatsapp/qr`` for the fresh pairing code.
+    """
+    base_url = get_whatsapp_client_url(None)  # Baileys client (client_id=None)
+    try:
+        async with httpx.AsyncClient(timeout=settings.whatsapp_client_timeout) as http_client:
+            client = create_whatsapp_client(
+                http_client=http_client,
+                base_url=base_url,
+                api_key=get_whatsapp_api_key(None),
+            )
+            result = await client.logout_whatsapp()
+    except (httpx.HTTPError, WhatsAppClientError) as e:
+        logger.warning("WhatsApp client unreachable for logout: %s", e)
+        raise HTTPException(status_code=503, detail="WhatsApp client unreachable") from e
+
+    return WhatsAppLogoutResponse(
+        success=result.success,
+        detail="Logout triggered; poll the QR endpoint for the new pairing code.",
     )
