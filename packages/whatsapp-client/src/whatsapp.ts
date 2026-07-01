@@ -14,6 +14,7 @@ import {
   setLatestQr,
   getBaileysSocket,
   isBaileysReady,
+  clearBaileysSocket,
 } from './services/baileys.js';
 import { handleTextMessage } from './handlers/text.js';
 import { transcribeAudioMessage } from './handlers/audio.js';
@@ -37,30 +38,46 @@ async function clearAuthState(): Promise<void> {
     logger.info({ cleared: entries.length }, 'Cleared WhatsApp auth state');
   } catch (err) {
     logger.error({ err }, 'Failed to clear WhatsApp auth state');
+    throw err;
   }
 }
 
 /**
  * Force a WhatsApp re-pair (used by the dashboard's "unlink" action).
  *
- * When a device is linked, ask WhatsApp to unlink it via `sock.logout()`. That
- * ends the socket with `DisconnectReason.loggedOut`, so the `connection.update`
- * handler wipes the stored creds and re-initialises into QR mode on its own. When
- * there is no live session (already disconnected / mid-pairing) or the logout call
- * fails, perform that same reset directly so a fresh QR is issued.
+ * Owns the full teardown → clear → re-init so the caller's success reflects the
+ * real outcome. When a device is linked, detach the socket's connection.update
+ * listener (so its logout-triggered `close` can't race the re-init below), ask
+ * WhatsApp to unlink via `sock.logout()`, then drop the stored socket. Either way
+ * the on-disk creds are wiped and the client re-initialises so a fresh pairing QR
+ * is issued; a failure to clear creds or re-init throws and surfaces to the caller.
+ *
+ * TODO(#4): a socket created but not yet `open`ed (initial pairing) isn't tracked
+ * by the baileys singleton, so an unlink during that brief window can orphan it.
  */
 export async function logoutWhatsApp(): Promise<void> {
+  logger.info('Forcing WhatsApp logout / re-pair');
+
   if (isBaileysReady()) {
+    const sock = getBaileysSocket();
+    // Detach so the logout-triggered 'close' can't race the re-init below.
+    sock.ev.removeAllListeners('connection.update');
     try {
-      await getBaileysSocket().logout();
-      return; // the loggedOut 'close' handler clears creds + re-issues the QR
+      await sock.logout();
     } catch (err) {
-      logger.warn({ err }, 'sock.logout() failed; forcing a local re-pair instead');
+      logger.warn({ err }, 'sock.logout() failed; ending the socket locally');
+      try {
+        sock.end(undefined);
+      } catch {
+        /* socket already dead */
+      }
     }
+    clearBaileysSocket();
   }
+
   resetReconnectionState();
-  await clearAuthState();
-  await initializeWhatsApp();
+  await clearAuthState(); // throws on FS failure → route 500 → dashboard 503
+  await initializeWhatsApp(); // awaited: single re-init owner, errors surface
 }
 
 // Reconnection state
@@ -123,6 +140,7 @@ export async function initializeWhatsApp(): Promise<void> {
     if (connection === 'close') {
       setConnectionStatus('disconnected');
       setLatestQr(null); // the socket that issued the QR is gone — don't serve a stale code
+      clearBaileysSocket(); // the socket is dead — stop reporting "ready" until re-open
       const shouldReconnect =
         (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
 
@@ -176,16 +194,25 @@ export async function initializeWhatsApp(): Promise<void> {
         reconnectionTimer = setTimeout(() => {
           logger.info({ attempt: reconnectionAttempts }, 'Attempting reconnection');
           isReconnecting = false;
-          initializeWhatsApp();
+          initializeWhatsApp().catch((err) => logger.error({ err }, 'Reconnection attempt failed'));
         }, delayMs);
       } else {
         // Logged out (e.g. the linked phone unlinked this device). The on-disk creds are
         // now invalid and Baileys won't emit a fresh QR while a registered cred set exists,
         // so wipe the auth state and re-initialise to drop back into QR mode automatically.
-        logger.info('Logged out — clearing stale credentials and re-initialising to issue a fresh QR.');
+        logger.info(
+          'Logged out — clearing stale credentials and re-initialising to issue a fresh QR.'
+        );
         resetReconnectionState();
-        await clearAuthState();
-        initializeWhatsApp();
+        try {
+          await clearAuthState();
+          await initializeWhatsApp();
+        } catch (err) {
+          logger.error(
+            { err },
+            'Failed to re-initialise after logout — manual intervention needed'
+          );
+        }
       }
     } else if (connection === 'open') {
       logger.info('✅ WhatsApp connection opened successfully');

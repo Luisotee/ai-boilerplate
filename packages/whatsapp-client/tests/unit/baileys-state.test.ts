@@ -5,6 +5,7 @@ import type { WASocket } from '@whiskeysockets/baileys';
 // We use resetModules + dynamic import in beforeEach to reset the singleton state.
 let getBaileysSocket: () => WASocket;
 let setBaileysSocket: (sock: WASocket) => void;
+let clearBaileysSocket: () => void;
 let isBaileysReady: () => boolean;
 let setConnectionStatus: (s: 'connecting' | 'qr' | 'connected' | 'disconnected') => void;
 let setLatestQr: (qr: string | null) => void;
@@ -22,6 +23,7 @@ describe('baileys state singleton', () => {
     const mod = await import('../../src/services/baileys.js');
     getBaileysSocket = mod.getBaileysSocket;
     setBaileysSocket = mod.setBaileysSocket;
+    clearBaileysSocket = mod.clearBaileysSocket;
     isBaileysReady = mod.isBaileysReady;
     setConnectionStatus = mod.setConnectionStatus;
     setLatestQr = mod.setLatestQr;
@@ -72,6 +74,19 @@ describe('baileys state singleton', () => {
       setBaileysSocket(fakeSock);
 
       expect(isBaileysReady()).toBe(true);
+    });
+  });
+
+  describe('clearBaileysSocket', () => {
+    it('should reset readiness so isBaileysReady returns false again', () => {
+      const fakeSock = { ev: {} } as unknown as WASocket;
+      setBaileysSocket(fakeSock);
+      expect(isBaileysReady()).toBe(true);
+
+      clearBaileysSocket();
+
+      expect(isBaileysReady()).toBe(false);
+      expect(() => getBaileysSocket()).toThrow();
     });
   });
 

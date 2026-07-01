@@ -6,6 +6,10 @@ export function setBaileysSocket(sock: WASocket): void {
   baileysSocket = sock;
 }
 
+export function clearBaileysSocket(): void {
+  baileysSocket = null;
+}
+
 export function getBaileysSocket(): WASocket {
   if (!baileysSocket) {
     throw new Error('Baileys socket not initialized. Please scan QR code first.');
