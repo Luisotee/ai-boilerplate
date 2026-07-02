@@ -387,9 +387,12 @@ async def whatsapp_qr():
 async def whatsapp_logout():
     """Force the Baileys session to log out, clear auth, and regenerate a QR.
 
-    Unlike the passive QR poll, this is an explicit action: it surfaces failure
-    (503) when no Baileys client is reachable. After it returns, poll
-    ``GET /admin/whatsapp/qr`` for the fresh pairing code.
+    Unlike the passive QR poll, this is an explicit action, so it surfaces failure
+    rather than degrading — and it distinguishes the two failure modes: a genuinely
+    unreachable client is a 503 (transport error), while a reachable client that
+    reports an error is a 502 (bad upstream response) carrying the real message, so
+    an operator can tell a networking problem from, say, a read-only auth volume.
+    After a success, poll ``GET /admin/whatsapp/qr`` for the fresh pairing code.
     """
     base_url = get_whatsapp_client_url(None)  # Baileys client (client_id=None)
     try:
@@ -400,11 +403,23 @@ async def whatsapp_logout():
                 api_key=get_whatsapp_api_key(None),
             )
             result = await client.logout_whatsapp()
-    except (httpx.HTTPError, WhatsAppClientError) as e:
+    except httpx.HTTPError as e:
+        # Transport-level failure — the client is genuinely unreachable.
         logger.warning("WhatsApp client unreachable for logout: %s", e)
         raise HTTPException(status_code=503, detail="WhatsApp client unreachable") from e
+    except WhatsAppClientError as e:
+        # Reachable, but the client returned an error status (e.g. a Node-side 500
+        # from a read-only auth volume). Surface it as a bad-gateway with the real
+        # message instead of masking it as "unreachable".
+        logger.warning("WhatsApp client failed to log out: %s", e)
+        raise HTTPException(status_code=502, detail=f"WhatsApp client error: {e.message}") from e
+
+    if not result.success:
+        # Reachable and 2xx, but the client reported the logout didn't take — don't
+        # pretend it worked with a 200.
+        raise HTTPException(status_code=502, detail="WhatsApp client reported logout failure")
 
     return WhatsAppLogoutResponse(
         success=result.success,
-        detail="Logout triggered; poll the QR endpoint for the new pairing code.",
+        detail="Logout completed; poll the QR endpoint for the new pairing code.",
     )

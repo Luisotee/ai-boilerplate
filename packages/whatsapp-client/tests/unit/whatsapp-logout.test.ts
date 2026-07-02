@@ -7,7 +7,7 @@
  * process). The heavy collaborators (baileys, fs) are mocked at their seams.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // makeWASocket is referenced inside the baileys mock factory, so hoist it.
 const { makeWASocket } = vi.hoisted(() => ({ makeWASocket: vi.fn() }));
@@ -37,9 +37,14 @@ vi.mock('@whiskeysockets/baileys', async (importOriginal) => ({
   useMultiFileAuthState: vi.fn().mockResolvedValue({ state: {}, saveCreds: vi.fn() }),
 }));
 
-import { logoutWhatsApp } from '../../src/whatsapp.js';
-import { isBaileysReady, getBaileysSocket, clearBaileysSocket } from '../../src/services/baileys.js';
+import { logoutWhatsApp, initializeWhatsApp } from '../../src/whatsapp.js';
+import {
+  isBaileysReady,
+  getBaileysSocket,
+  clearBaileysSocket,
+} from '../../src/services/baileys.js';
 import { readdir, rm } from 'node:fs/promises';
+import { DisconnectReason, useMultiFileAuthState } from '@whiskeysockets/baileys';
 
 const mockIsReady = isBaileysReady as ReturnType<typeof vi.fn>;
 const mockGetSocket = getBaileysSocket as ReturnType<typeof vi.fn>;
@@ -109,5 +114,129 @@ describe('logoutWhatsApp', () => {
     expect(mockGetSocket).not.toHaveBeenCalled();
     expect(mockRm).toHaveBeenCalled();
     expect(makeWASocket).toHaveBeenCalledOnce();
+  });
+});
+
+/**
+ * Tests for the connection.update 'close' handler — the passive reconnect + logged-out
+ * self-heal paths. These are the half of the force-logout work that had no coverage: the
+ * earlier mock swallowed listeners, so a synthetic close event could never be driven.
+ *
+ * The seam: makeWASocket returns a socket whose ev.on stores each handler in a Map, so a
+ * test can fetch the registered 'connection.update' callback and drive close/loggedOut
+ * updates. Fake timers + runOnlyPendingTimersAsync fire the backoff-scheduled reconnect
+ * without caring about the exact (jittered) delay.
+ */
+describe('connection.update close handler', () => {
+  const mockUseAuth = useMultiFileAuthState as unknown as ReturnType<typeof vi.fn>;
+
+  type CapturingSocket = {
+    handlers: Map<string, (update: unknown) => unknown>;
+    ev: { on: ReturnType<typeof vi.fn>; removeAllListeners: ReturnType<typeof vi.fn> };
+    logout: ReturnType<typeof vi.fn>;
+    end: ReturnType<typeof vi.fn>;
+  };
+
+  let socks: CapturingSocket[];
+
+  function makeCapturingSocket(): CapturingSocket {
+    const handlers = new Map<string, (update: unknown) => unknown>();
+    return {
+      handlers,
+      ev: {
+        on: vi.fn((event: string, cb: (update: unknown) => unknown) => {
+          handlers.set(event, cb);
+        }),
+        removeAllListeners: vi.fn(),
+      },
+      logout: vi.fn().mockResolvedValue(undefined),
+      end: vi.fn(),
+    };
+  }
+
+  // Drive the captured 'connection.update' listener of a given socket generation.
+  function driveClose(sock: CapturingSocket, statusCode: number) {
+    const handler = sock.handlers.get('connection.update');
+    if (!handler) throw new Error('connection.update handler not registered');
+    return handler({ connection: 'close', lastDisconnect: { error: { output: { statusCode } } } });
+  }
+  function driveOpen(sock: CapturingSocket) {
+    const handler = sock.handlers.get('connection.update');
+    if (!handler) throw new Error('connection.update handler not registered');
+    // 'open' calls resetReconnectionState(), returning module state to clean between tests.
+    return handler({ connection: 'open' });
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    socks = [];
+    mockUseAuth.mockResolvedValue({ state: {}, saveCreds: vi.fn() });
+    mockReaddir.mockResolvedValue(['creds.json']);
+    mockRm.mockResolvedValue(undefined);
+    makeWASocket.mockReset();
+    makeWASocket.mockImplementation(() => {
+      const sock = makeCapturingSocket();
+      socks.push(sock);
+      return sock;
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('non-logged-out close: drops the socket and re-inits on the backoff timer', async () => {
+    await initializeWhatsApp();
+    expect(makeWASocket).toHaveBeenCalledTimes(1);
+
+    await driveClose(socks[0], 515); // not loggedOut → should reconnect
+    expect(mockClearSocket).toHaveBeenCalled(); // stopped reporting "ready" on close
+
+    await vi.runOnlyPendingTimersAsync(); // fire the scheduled reconnect
+    expect(makeWASocket).toHaveBeenCalledTimes(2); // re-inited
+
+    await driveOpen(socks[1]);
+  });
+
+  it('a reconnect whose re-init throws reschedules itself and recovers (self-heal)', async () => {
+    await initializeWhatsApp();
+
+    // The next initializeWhatsApp() fails before a socket exists (no 'close' to re-arm),
+    // so without the retry it would stall at disconnected forever.
+    mockUseAuth.mockRejectedValueOnce(new Error('EMFILE: too many open files'));
+
+    await driveClose(socks[0], 515);
+    await vi.runOnlyPendingTimersAsync(); // fires reconnect → init throws → reschedules
+    expect(makeWASocket).toHaveBeenCalledTimes(1); // failed before makeWASocket
+
+    await vi.runOnlyPendingTimersAsync(); // fires the rescheduled reconnect → succeeds
+    expect(makeWASocket).toHaveBeenCalledTimes(2); // self-healed
+
+    await driveOpen(socks[1]);
+  });
+
+  it('logged-out close: wipes creds and re-inits to drop back into QR mode', async () => {
+    await initializeWhatsApp();
+
+    await driveClose(socks[0], DisconnectReason.loggedOut); // 401
+    expect(mockRm).toHaveBeenCalled(); // clearAuthState wiped the stale creds
+    expect(makeWASocket).toHaveBeenCalledTimes(2); // re-inited inline
+
+    await driveOpen(socks[1]);
+  });
+
+  it('logged-out re-init failure self-heals via the backoff timer (no manual restart)', async () => {
+    await initializeWhatsApp();
+
+    mockRm.mockRejectedValueOnce(new Error('EROFS: read-only file system'));
+
+    await driveClose(socks[0], DisconnectReason.loggedOut);
+    expect(makeWASocket).toHaveBeenCalledTimes(1); // clearAuthState threw → never re-inited inline
+
+    await vi.runOnlyPendingTimersAsync(); // the rescheduled reconnect re-inits
+    expect(makeWASocket).toHaveBeenCalledTimes(2);
+
+    await driveOpen(socks[1]);
   });
 });

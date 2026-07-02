@@ -234,5 +234,5 @@ class WhatsAppStatusResponse(BaseModel):
 class WhatsAppLogoutResponse(BaseModel):
     """Result of forcing a Baileys logout / re-pair."""
 
-    success: bool = Field(..., description="True when the logout + re-init was triggered")
+    success: bool = Field(..., description="True when the logout + re-init completed")
     detail: str = Field(..., description="Human-readable status message")

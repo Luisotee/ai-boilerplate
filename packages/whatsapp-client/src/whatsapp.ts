@@ -68,8 +68,8 @@ export async function logoutWhatsApp(): Promise<void> {
       logger.warn({ err }, 'sock.logout() failed; ending the socket locally');
       try {
         sock.end(undefined);
-      } catch {
-        /* socket already dead */
+      } catch (endErr) {
+        logger.trace({ err: endErr }, 'socket.end() failed (already dead)');
       }
     }
     clearBaileysSocket();
@@ -115,6 +115,65 @@ function resetReconnectionState(): void {
   }
 }
 
+/**
+ * Schedule a reconnection attempt with exponential backoff.
+ *
+ * Safe to call from the connection 'close' handler and from a failed re-init's
+ * `.catch`: the `isReconnecting` guard prevents double-arming the timer, and
+ * `reconnectionAttempts` is clamped at `maxAttempts` so a prolonged outage keeps
+ * retrying at the capped interval rather than giving up. Crucially, a failed
+ * attempt re-schedules itself — so an `initializeWhatsApp()` that throws *before*
+ * a socket exists (which would otherwise emit no 'close' to re-arm anything) still
+ * self-heals instead of stalling at disconnected/qr=null.
+ */
+function scheduleReconnect(): void {
+  // Check if max attempts exceeded
+  if (reconnectionAttempts >= config.reconnection.maxAttempts) {
+    // Don't give up — keep retrying at the capped backoff so a prolonged outage
+    // self-heals when connectivity returns. Clamp the counter so the delay stays
+    // pinned at maxDelayMs instead of overflowing or growing unbounded.
+    reconnectionAttempts = config.reconnection.maxAttempts;
+    logger.warn(
+      {
+        attempts: reconnectionAttempts,
+        maxAttempts: config.reconnection.maxAttempts,
+      },
+      'Max reconnection attempts reached — continuing to retry at the capped interval.'
+    );
+  }
+
+  // Prevent multiple concurrent reconnection attempts
+  if (isReconnecting) {
+    logger.debug('Reconnection already in progress, skipping');
+    return;
+  }
+
+  isReconnecting = true;
+  reconnectionAttempts++;
+
+  // Calculate backoff delay
+  const delayMs = calculateBackoffDelay(reconnectionAttempts - 1);
+
+  logger.info(
+    {
+      attempt: reconnectionAttempts,
+      maxAttempts: config.reconnection.maxAttempts,
+      delayMs: Math.round(delayMs),
+    },
+    `⏳ Reconnecting in ${Math.round(delayMs / 1000)}s...`
+  );
+
+  // Schedule reconnection with exponential backoff
+  reconnectionTimer = setTimeout(() => {
+    logger.info({ attempt: reconnectionAttempts }, 'Attempting reconnection');
+    isReconnecting = false;
+    initializeWhatsApp().catch((err) => {
+      logger.error({ err }, 'Reconnection attempt failed');
+      scheduleReconnect();
+    });
+  }, delayMs);
+}
+
 export async function initializeWhatsApp(): Promise<void> {
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
 
@@ -154,48 +213,7 @@ export async function initializeWhatsApp(): Promise<void> {
       );
 
       if (shouldReconnect) {
-        // Check if max attempts exceeded
-        if (reconnectionAttempts >= config.reconnection.maxAttempts) {
-          // Don't give up — keep retrying at the capped backoff so a prolonged outage
-          // self-heals when connectivity returns. Clamp the counter so the delay stays
-          // pinned at maxDelayMs instead of overflowing or growing unbounded.
-          reconnectionAttempts = config.reconnection.maxAttempts;
-          logger.warn(
-            {
-              attempts: reconnectionAttempts,
-              maxAttempts: config.reconnection.maxAttempts,
-            },
-            'Max reconnection attempts reached — continuing to retry at the capped interval.'
-          );
-        }
-
-        // Prevent multiple concurrent reconnection attempts
-        if (isReconnecting) {
-          logger.debug('Reconnection already in progress, skipping');
-          return;
-        }
-
-        isReconnecting = true;
-        reconnectionAttempts++;
-
-        // Calculate backoff delay
-        const delayMs = calculateBackoffDelay(reconnectionAttempts - 1);
-
-        logger.info(
-          {
-            attempt: reconnectionAttempts,
-            maxAttempts: config.reconnection.maxAttempts,
-            delayMs: Math.round(delayMs),
-          },
-          `⏳ Reconnecting in ${Math.round(delayMs / 1000)}s...`
-        );
-
-        // Schedule reconnection with exponential backoff
-        reconnectionTimer = setTimeout(() => {
-          logger.info({ attempt: reconnectionAttempts }, 'Attempting reconnection');
-          isReconnecting = false;
-          initializeWhatsApp().catch((err) => logger.error({ err }, 'Reconnection attempt failed'));
-        }, delayMs);
+        scheduleReconnect();
       } else {
         // Logged out (e.g. the linked phone unlinked this device). The on-disk creds are
         // now invalid and Baileys won't emit a fresh QR while a registered cred set exists,
@@ -208,10 +226,10 @@ export async function initializeWhatsApp(): Promise<void> {
           await clearAuthState();
           await initializeWhatsApp();
         } catch (err) {
-          logger.error(
-            { err },
-            'Failed to re-initialise after logout — manual intervention needed'
-          );
+          // Don't stall at disconnected/qr=null — reschedule with backoff so a transient
+          // FS/init failure self-heals instead of needing a manual restart.
+          logger.error({ err }, 'Failed to re-initialise after logout — retrying with backoff');
+          scheduleReconnect();
         }
       }
     } else if (connection === 'open') {
