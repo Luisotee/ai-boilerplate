@@ -228,6 +228,7 @@ Multipart routes can't use Zod validation directly. Follow the pattern in `route
 ## Gotchas
 
 ### Baileys / WhatsApp (TS)
+- **WA Web version must be fetched, never pinned**: Baileys bundles a hardcoded WhatsApp Web version that goes stale within months; once WhatsApp rejects it, pairing dies with `Connection Failure` / `statusCode: 405` at the handshake, before any QR is emitted (existing sessions keep working). `whatsapp.ts` `resolveWaVersion()` calls **`fetchLatestWaWebVersion()`** and passes the result to `makeWASocket`. Do NOT use `fetchLatestBaileysVersion()` — it returns a stale version while reporting `isLatest: true` (upstream #2679), and do NOT hardcode a version tuple: that's what left the forks broken. Both helpers *resolve* (never reject) on network failure, handing back the stale bundled default, so check the returned `error` field. The result is cached per process because `initializeWhatsApp()` is also the reconnect path; only successful fetches are cached
 - Must call `normalizeMessageContent()` before type-checking any message — unwraps viewOnce/ephemeral wrappers
 - `contextInfo` (mentions, quoted messages) is nested under specific message types (`imageMessage.contextInfo`, `audioMessage.contextInfo`, etc.) — NOT only on `extendedTextMessage`
 - Bot identity uses two formats: JID (`@s.whatsapp.net`) and LID (`@lid`) — both must be checked for mentions/replies (see `utils/message.ts`)

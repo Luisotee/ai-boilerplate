@@ -2,7 +2,9 @@ import makeWASocket, {
   DisconnectReason,
   useMultiFileAuthState,
   normalizeMessageContent,
+  fetchLatestWaWebVersion,
 } from '@whiskeysockets/baileys';
+import type { WAVersion } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import qrcode from 'qrcode-terminal';
 import { readdir, rm } from 'node:fs/promises';
@@ -69,11 +71,38 @@ function resetReconnectionState(): void {
   }
 }
 
+let cachedWaVersion: WAVersion | undefined;
+
+/** Resolve the current WhatsApp Web version. Baileys' bundled constant goes stale and
+ *  WhatsApp then rejects the handshake with a 405, so it must be fetched rather than
+ *  pinned. Cached per process because this runs on every reconnect attempt. */
+async function resolveWaVersion(): Promise<WAVersion | undefined> {
+  if (cachedWaVersion) return cachedWaVersion;
+
+  try {
+    const { version, error } = await fetchLatestWaWebVersion();
+    // Resolves rather than rejects on failure, handing back the stale bundled
+    // version — the very thing that causes the 405. Don't cache that.
+    if (error) {
+      logger.warn({ err: error }, 'Could not fetch WA Web version; using bundled default');
+      return undefined;
+    }
+    cachedWaVersion = version;
+    logger.info({ version }, 'Resolved WhatsApp Web version');
+    return version;
+  } catch (err) {
+    logger.warn({ err }, 'Could not fetch WA Web version; using bundled default');
+    return undefined;
+  }
+}
+
 export async function initializeWhatsApp(): Promise<void> {
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+  const version = await resolveWaVersion();
 
   const sock = makeWASocket({
     auth: state,
+    version,
     logger: logger.child({ module: 'baileys' }),
     browser: ['AI Boilerplate', 'Chrome', '131.0.0'],
   });
@@ -94,17 +123,18 @@ export async function initializeWhatsApp(): Promise<void> {
     if (connection === 'close') {
       setConnectionStatus('disconnected');
       setLatestQr(null); // the socket that issued the QR is gone — don't serve a stale code
-      const shouldReconnect =
-        (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
+      const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
+      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
-      logger.info(
-        {
-          shouldReconnect,
-          reconnectionAttempts,
-          statusCode: (lastDisconnect?.error as Boom)?.output?.statusCode,
-        },
-        'Connection closed'
-      );
+      if (statusCode === 405) {
+        logger.error(
+          { statusCode },
+          'WhatsApp rejected the connection (405) — usually an outdated WA Web version. ' +
+            'Retrying; if this persists, the fetched version may be stale.'
+        );
+      }
+
+      logger.info({ shouldReconnect, reconnectionAttempts, statusCode }, 'Connection closed');
 
       if (shouldReconnect) {
         // Check if max attempts exceeded
@@ -153,7 +183,9 @@ export async function initializeWhatsApp(): Promise<void> {
         // Logged out (e.g. the linked phone unlinked this device). The on-disk creds are
         // now invalid and Baileys won't emit a fresh QR while a registered cred set exists,
         // so wipe the auth state and re-initialise to drop back into QR mode automatically.
-        logger.info('Logged out — clearing stale credentials and re-initialising to issue a fresh QR.');
+        logger.info(
+          'Logged out — clearing stale credentials and re-initialising to issue a fresh QR.'
+        );
         resetReconnectionState();
         await clearAuthState();
         initializeWhatsApp();
