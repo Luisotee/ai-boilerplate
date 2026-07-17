@@ -9,6 +9,7 @@ import { readdir, rm } from 'node:fs/promises';
 import { logger } from './logger.js';
 import { config } from './config.js';
 import { setBaileysSocket, setConnectionStatus, setLatestQr } from './services/baileys.js';
+import { getWaVersionConfig } from './services/wa-version.js';
 import { handleTextMessage } from './handlers/text.js';
 import { transcribeAudioMessage } from './handlers/audio.js';
 import { extractImageData } from './handlers/image.js';
@@ -71,9 +72,13 @@ function resetReconnectionState(): void {
 
 export async function initializeWhatsApp(): Promise<void> {
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+  // Spread, never `version: versionConfig.version` — an explicit undefined key would
+  // clobber Baileys' bundled default and crash the handshake. See services/wa-version.ts.
+  const versionConfig = await getWaVersionConfig();
 
   const sock = makeWASocket({
     auth: state,
+    ...versionConfig,
     logger: logger.child({ module: 'baileys' }),
     browser: ['AI Boilerplate', 'Chrome', '131.0.0'],
   });
@@ -94,17 +99,18 @@ export async function initializeWhatsApp(): Promise<void> {
     if (connection === 'close') {
       setConnectionStatus('disconnected');
       setLatestQr(null); // the socket that issued the QR is gone — don't serve a stale code
-      const shouldReconnect =
-        (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
+      const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
+      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
-      logger.info(
-        {
-          shouldReconnect,
-          reconnectionAttempts,
-          statusCode: (lastDisconnect?.error as Boom)?.output?.statusCode,
-        },
-        'Connection closed'
-      );
+      if (statusCode === 405) {
+        logger.error(
+          { statusCode },
+          'WhatsApp rejected the connection (405) — usually an outdated WA Web version. ' +
+            'Retrying; if this persists, the fetched version may be stale.'
+        );
+      }
+
+      logger.info({ shouldReconnect, reconnectionAttempts, statusCode }, 'Connection closed');
 
       if (shouldReconnect) {
         // Check if max attempts exceeded
@@ -153,7 +159,9 @@ export async function initializeWhatsApp(): Promise<void> {
         // Logged out (e.g. the linked phone unlinked this device). The on-disk creds are
         // now invalid and Baileys won't emit a fresh QR while a registered cred set exists,
         // so wipe the auth state and re-initialise to drop back into QR mode automatically.
-        logger.info('Logged out — clearing stale credentials and re-initialising to issue a fresh QR.');
+        logger.info(
+          'Logged out — clearing stale credentials and re-initialising to issue a fresh QR.'
+        );
         resetReconnectionState();
         await clearAuthState();
         initializeWhatsApp();
