@@ -2,15 +2,14 @@ import makeWASocket, {
   DisconnectReason,
   useMultiFileAuthState,
   normalizeMessageContent,
-  fetchLatestWaWebVersion,
 } from '@whiskeysockets/baileys';
-import type { WAVersion } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import qrcode from 'qrcode-terminal';
 import { readdir, rm } from 'node:fs/promises';
 import { logger } from './logger.js';
 import { config } from './config.js';
 import { setBaileysSocket, setConnectionStatus, setLatestQr } from './services/baileys.js';
+import { getWaVersionConfig } from './services/wa-version.js';
 import { handleTextMessage } from './handlers/text.js';
 import { transcribeAudioMessage } from './handlers/audio.js';
 import { extractImageData } from './handlers/image.js';
@@ -71,38 +70,15 @@ function resetReconnectionState(): void {
   }
 }
 
-let cachedWaVersion: WAVersion | undefined;
-
-/** Resolve the current WhatsApp Web version. Baileys' bundled constant goes stale and
- *  WhatsApp then rejects the handshake with a 405, so it must be fetched rather than
- *  pinned. Cached per process because this runs on every reconnect attempt. */
-async function resolveWaVersion(): Promise<WAVersion | undefined> {
-  if (cachedWaVersion) return cachedWaVersion;
-
-  try {
-    const { version, error } = await fetchLatestWaWebVersion();
-    // Resolves rather than rejects on failure, handing back the stale bundled
-    // version — the very thing that causes the 405. Don't cache that.
-    if (error) {
-      logger.warn({ err: error }, 'Could not fetch WA Web version; using bundled default');
-      return undefined;
-    }
-    cachedWaVersion = version;
-    logger.info({ version }, 'Resolved WhatsApp Web version');
-    return version;
-  } catch (err) {
-    logger.warn({ err }, 'Could not fetch WA Web version; using bundled default');
-    return undefined;
-  }
-}
-
 export async function initializeWhatsApp(): Promise<void> {
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
-  const version = await resolveWaVersion();
+  // Spread, never `version: versionConfig.version` — an explicit undefined key would
+  // clobber Baileys' bundled default and crash the handshake. See services/wa-version.ts.
+  const versionConfig = await getWaVersionConfig();
 
   const sock = makeWASocket({
     auth: state,
-    version,
+    ...versionConfig,
     logger: logger.child({ module: 'baileys' }),
     browser: ['AI Boilerplate', 'Chrome', '131.0.0'],
   });
