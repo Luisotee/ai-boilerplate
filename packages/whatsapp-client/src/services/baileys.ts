@@ -1,13 +1,30 @@
 import type { WASocket } from '@whiskeysockets/baileys';
 
 let baileysSocket: WASocket | null = null;
+// True only while the connection is open (between the 'open' and 'close' events).
+// Split out from `baileysSocket` so the socket can be tracked at *creation* — for
+// teardown — while `isBaileysReady()` keeps meaning "the link is open" for senders.
+let socketOpen = false;
 
+/** Register the active socket. Called at socket *creation* so teardown can always
+ *  reach it — including a socket created but not yet `open` (the initial-pairing window). */
 export function setBaileysSocket(sock: WASocket): void {
   baileysSocket = sock;
 }
 
+/** Mark the connection open/closed. Only `true` between the 'open' and 'close' events. */
+export function setSocketOpen(open: boolean): void {
+  socketOpen = open;
+}
+
 export function clearBaileysSocket(): void {
   baileysSocket = null;
+  socketOpen = false;
+}
+
+/** The current socket if one exists, even pre-`open`; never throws. For teardown paths. */
+export function getLiveSocket(): WASocket | null {
+  return baileysSocket;
 }
 
 export function getBaileysSocket(): WASocket {
@@ -17,8 +34,9 @@ export function getBaileysSocket(): WASocket {
   return baileysSocket;
 }
 
+/** True only when a socket exists AND the connection is open — senders/health rely on this. */
 export function isBaileysReady(): boolean {
-  return baileysSocket !== null;
+  return baileysSocket !== null && socketOpen;
 }
 
 // ── Connection / pairing state ───────────────────────────────────────────────

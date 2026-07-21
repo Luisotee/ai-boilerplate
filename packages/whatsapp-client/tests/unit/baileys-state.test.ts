@@ -7,6 +7,8 @@ let getBaileysSocket: () => WASocket;
 let setBaileysSocket: (sock: WASocket) => void;
 let clearBaileysSocket: () => void;
 let isBaileysReady: () => boolean;
+let setSocketOpen: (open: boolean) => void;
+let getLiveSocket: () => WASocket | null;
 let setConnectionStatus: (s: 'connecting' | 'qr' | 'connected' | 'disconnected') => void;
 let setLatestQr: (qr: string | null) => void;
 let getConnectionInfo: () => {
@@ -25,6 +27,8 @@ describe('baileys state singleton', () => {
     setBaileysSocket = mod.setBaileysSocket;
     clearBaileysSocket = mod.clearBaileysSocket;
     isBaileysReady = mod.isBaileysReady;
+    setSocketOpen = mod.setSocketOpen;
+    getLiveSocket = mod.getLiveSocket;
     setConnectionStatus = mod.setConnectionStatus;
     setLatestQr = mod.setLatestQr;
     getConnectionInfo = mod.getConnectionInfo;
@@ -63,29 +67,53 @@ describe('baileys state singleton', () => {
     });
   });
 
+  describe('getLiveSocket', () => {
+    it('should return null when no socket exists', () => {
+      expect(getLiveSocket()).toBeNull();
+    });
+
+    it('should return a pre-open socket while isBaileysReady() is still false', () => {
+      const fakeSock = { ev: {} } as unknown as WASocket;
+
+      setBaileysSocket(fakeSock); // tracked at creation, before the connection opens
+
+      expect(getLiveSocket()).toBe(fakeSock);
+      expect(isBaileysReady()).toBe(false); // not "ready" until 'open'
+    });
+  });
+
   describe('isBaileysReady', () => {
     it('should return false when socket is not set', () => {
       expect(isBaileysReady()).toBe(false);
     });
 
-    it('should return true after socket is set', () => {
+    it('should return false when a socket exists but the connection is not open', () => {
+      setBaileysSocket({ ev: {} } as unknown as WASocket);
+
+      expect(isBaileysReady()).toBe(false);
+    });
+
+    it('should return true only after the socket is set AND the connection is open', () => {
       const fakeSock = { ev: {} } as unknown as WASocket;
 
       setBaileysSocket(fakeSock);
+      setSocketOpen(true);
 
       expect(isBaileysReady()).toBe(true);
     });
   });
 
   describe('clearBaileysSocket', () => {
-    it('should reset readiness so isBaileysReady returns false again', () => {
+    it('should reset both the socket ref and the open flag', () => {
       const fakeSock = { ev: {} } as unknown as WASocket;
       setBaileysSocket(fakeSock);
+      setSocketOpen(true);
       expect(isBaileysReady()).toBe(true);
 
       clearBaileysSocket();
 
       expect(isBaileysReady()).toBe(false);
+      expect(getLiveSocket()).toBeNull();
       expect(() => getBaileysSocket()).toThrow();
     });
   });
@@ -131,16 +159,20 @@ describe('baileys state singleton', () => {
   });
 
   describe('integration: full lifecycle', () => {
-    it('should transition from uninitialized to ready', () => {
+    it('should transition uninitialized → created (pre-open) → ready', () => {
       // Initially not ready
       expect(isBaileysReady()).toBe(false);
       expect(() => getBaileysSocket()).toThrow();
 
-      // Set socket
+      // Socket created (tracked at creation) but the connection isn't open yet
       const fakeSock = { ev: {} } as unknown as WASocket;
       setBaileysSocket(fakeSock);
+      expect(getBaileysSocket()).toBe(fakeSock);
+      expect(getLiveSocket()).toBe(fakeSock);
+      expect(isBaileysReady()).toBe(false);
 
-      // Now ready
+      // Connection opens → now ready
+      setSocketOpen(true);
       expect(isBaileysReady()).toBe(true);
       expect(getBaileysSocket()).toBe(fakeSock);
     });

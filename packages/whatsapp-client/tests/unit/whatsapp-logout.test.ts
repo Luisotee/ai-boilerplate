@@ -14,9 +14,10 @@ const { makeWASocket } = vi.hoisted(() => ({ makeWASocket: vi.fn() }));
 
 vi.mock('../../src/services/baileys.js', () => ({
   isBaileysReady: vi.fn(),
-  getBaileysSocket: vi.fn(),
+  getLiveSocket: vi.fn(),
   clearBaileysSocket: vi.fn(),
   setBaileysSocket: vi.fn(),
+  setSocketOpen: vi.fn(),
   setConnectionStatus: vi.fn(),
   setLatestQr: vi.fn(),
   getConnectionInfo: vi.fn(),
@@ -40,15 +41,17 @@ vi.mock('@whiskeysockets/baileys', async (importOriginal) => ({
 import { logoutWhatsApp, initializeWhatsApp } from '../../src/whatsapp.js';
 import {
   isBaileysReady,
-  getBaileysSocket,
+  getLiveSocket,
   clearBaileysSocket,
+  setSocketOpen,
 } from '../../src/services/baileys.js';
 import { readdir, rm } from 'node:fs/promises';
 import { DisconnectReason, useMultiFileAuthState } from '@whiskeysockets/baileys';
 
 const mockIsReady = isBaileysReady as ReturnType<typeof vi.fn>;
-const mockGetSocket = getBaileysSocket as ReturnType<typeof vi.fn>;
+const mockGetLiveSocket = getLiveSocket as ReturnType<typeof vi.fn>;
 const mockClearSocket = clearBaileysSocket as ReturnType<typeof vi.fn>;
+const mockSetSocketOpen = setSocketOpen as ReturnType<typeof vi.fn>;
 const mockReaddir = readdir as unknown as ReturnType<typeof vi.fn>;
 const mockRm = rm as unknown as ReturnType<typeof vi.fn>;
 
@@ -69,24 +72,42 @@ describe('logoutWhatsApp', () => {
     makeWASocket.mockReturnValue({ ev: { on: vi.fn() } });
   });
 
-  it('when connected: detaches the handler, logs out, drops the socket, clears creds and re-inits', async () => {
+  it('when connected: detaches both handlers, logs out, drops the socket, clears creds and re-inits', async () => {
     const sock = makeSocket();
-    mockIsReady.mockReturnValue(true);
-    mockGetSocket.mockReturnValue(sock);
+    mockGetLiveSocket.mockReturnValue(sock);
+    mockIsReady.mockReturnValue(true); // connection is open
 
     await logoutWhatsApp();
 
     expect(sock.ev.removeAllListeners).toHaveBeenCalledWith('connection.update');
+    expect(sock.ev.removeAllListeners).toHaveBeenCalledWith('creds.update');
     expect(sock.logout).toHaveBeenCalledOnce();
+    expect(sock.end).not.toHaveBeenCalled(); // logout() succeeded — no local end needed
     expect(mockClearSocket).toHaveBeenCalledOnce();
     expect(mockRm).toHaveBeenCalled(); // clearAuthState wiped the stored creds
     expect(makeWASocket).toHaveBeenCalledOnce(); // re-init issued a fresh socket
   });
 
+  it('when a socket exists but is pre-open: ends it locally WITHOUT logout(), then clears + re-inits', async () => {
+    const sock = makeSocket();
+    mockGetLiveSocket.mockReturnValue(sock);
+    mockIsReady.mockReturnValue(false); // socket created but not yet 'open' (initial pairing)
+
+    await logoutWhatsApp();
+
+    expect(sock.ev.removeAllListeners).toHaveBeenCalledWith('connection.update');
+    expect(sock.ev.removeAllListeners).toHaveBeenCalledWith('creds.update');
+    expect(sock.logout).not.toHaveBeenCalled(); // never logout() a pre-open socket (can hang the WS)
+    expect(sock.end).toHaveBeenCalledOnce(); // ended locally instead
+    expect(mockClearSocket).toHaveBeenCalledOnce();
+    expect(mockRm).toHaveBeenCalled();
+    expect(makeWASocket).toHaveBeenCalledOnce();
+  });
+
   it('propagates a clearAuthState failure so the caller can report it (no silent success)', async () => {
     const sock = makeSocket();
+    mockGetLiveSocket.mockReturnValue(sock);
     mockIsReady.mockReturnValue(true);
-    mockGetSocket.mockReturnValue(sock);
     mockRm.mockRejectedValue(new Error('EROFS: read-only file system'));
 
     await expect(logoutWhatsApp()).rejects.toThrow('EROFS');
@@ -96,8 +117,8 @@ describe('logoutWhatsApp', () => {
   it('when logout() throws: ends the socket locally and still clears + re-inits', async () => {
     const sock = makeSocket();
     sock.logout.mockRejectedValue(new Error('socket already closed'));
+    mockGetLiveSocket.mockReturnValue(sock);
     mockIsReady.mockReturnValue(true);
-    mockGetSocket.mockReturnValue(sock);
 
     await logoutWhatsApp();
 
@@ -106,12 +127,12 @@ describe('logoutWhatsApp', () => {
     expect(makeWASocket).toHaveBeenCalledOnce();
   });
 
-  it('when not ready: skips logout and just clears + re-inits', async () => {
-    mockIsReady.mockReturnValue(false);
+  it('when no live socket exists: skips teardown and just clears + re-inits', async () => {
+    mockGetLiveSocket.mockReturnValue(null);
 
     await logoutWhatsApp();
 
-    expect(mockGetSocket).not.toHaveBeenCalled();
+    expect(mockClearSocket).not.toHaveBeenCalled(); // nothing to tear down
     expect(mockRm).toHaveBeenCalled();
     expect(makeWASocket).toHaveBeenCalledOnce();
   });
@@ -238,5 +259,126 @@ describe('connection.update close handler', () => {
     expect(makeWASocket).toHaveBeenCalledTimes(2);
 
     await driveOpen(socks[1]);
+  });
+});
+
+/**
+ * Tests for the socket-generation (epoch) guard — the fix for the pre-open unlink race
+ * (issue #4). Each init claims a generation; the connection.update + creds.update handlers
+ * capture their generation and go inert once superseded. The load-bearing case: a stale
+ * socket's late creds.update must NOT re-persist the auth state a concurrent logout wiped.
+ *
+ * The seam: each init gets its own saveCreds spy (via useMultiFileAuthState), and the
+ * capturing socket stores its handlers so a test can drive a *specific* generation's events
+ * after a newer one has been claimed.
+ */
+describe('socket generation (epoch) guard', () => {
+  const mockUseAuth = useMultiFileAuthState as unknown as ReturnType<typeof vi.fn>;
+
+  type CapturingSocket = {
+    handlers: Map<string, (update: unknown) => unknown>;
+    ev: { on: ReturnType<typeof vi.fn>; removeAllListeners: ReturnType<typeof vi.fn> };
+    logout: ReturnType<typeof vi.fn>;
+    end: ReturnType<typeof vi.fn>;
+  };
+
+  let socks: CapturingSocket[];
+  let saveCredsSpies: Array<ReturnType<typeof vi.fn>>;
+
+  function makeCapturingSocket(): CapturingSocket {
+    const handlers = new Map<string, (update: unknown) => unknown>();
+    return {
+      handlers,
+      ev: {
+        on: vi.fn((event: string, cb: (update: unknown) => unknown) => {
+          handlers.set(event, cb);
+        }),
+        removeAllListeners: vi.fn(),
+      },
+      logout: vi.fn().mockResolvedValue(undefined),
+      end: vi.fn(),
+    };
+  }
+
+  function driveCreds(sock: CapturingSocket) {
+    const handler = sock.handlers.get('creds.update');
+    if (!handler) throw new Error('creds.update handler not registered');
+    return handler(undefined);
+  }
+  function driveClose(sock: CapturingSocket, statusCode: number) {
+    const handler = sock.handlers.get('connection.update');
+    if (!handler) throw new Error('connection.update handler not registered');
+    return handler({ connection: 'close', lastDisconnect: { error: { output: { statusCode } } } });
+  }
+  function driveOpen(sock: CapturingSocket) {
+    const handler = sock.handlers.get('connection.update');
+    if (!handler) throw new Error('connection.update handler not registered');
+    return handler({ connection: 'open' });
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    socks = [];
+    saveCredsSpies = [];
+    // Each init gets its own saveCreds spy so calls can be attributed to a generation.
+    mockUseAuth.mockImplementation(async () => {
+      const saveCreds = vi.fn();
+      saveCredsSpies.push(saveCreds);
+      return { state: {}, saveCreds };
+    });
+    mockReaddir.mockResolvedValue(['creds.json']);
+    mockRm.mockResolvedValue(undefined);
+    makeWASocket.mockReset();
+    makeWASocket.mockImplementation(() => {
+      const sock = makeCapturingSocket();
+      socks.push(sock);
+      return sock;
+    });
+  });
+
+  it('a superseded generation cannot re-persist creds after re-init (resurrection guard)', async () => {
+    await initializeWhatsApp(); // gen1
+    expect(makeWASocket).toHaveBeenCalledTimes(1);
+
+    // gen1's own creds.update still persists while it is the current generation.
+    await driveCreds(socks[0]);
+    expect(saveCredsSpies[0]).toHaveBeenCalledOnce();
+
+    // Simulate the pre-open unlink: getLiveSocket returns gen1, but it isn't open.
+    mockGetLiveSocket.mockReturnValue(socks[0]);
+    mockIsReady.mockReturnValue(false);
+
+    await logoutWhatsApp(); // bumps epoch, wipes creds, re-inits gen2
+    expect(makeWASocket).toHaveBeenCalledTimes(2);
+
+    // The resurrection vector: gen1's socket emits a late creds.update AFTER the wipe.
+    // The epoch guard must drop it so the wiped auth state stays wiped.
+    saveCredsSpies[0].mockClear();
+    await driveCreds(socks[0]);
+    expect(saveCredsSpies[0]).not.toHaveBeenCalled();
+
+    // Sanity: the fresh generation's own creds.update still persists.
+    await driveCreds(socks[1]);
+    expect(saveCredsSpies[1]).toHaveBeenCalledOnce();
+  });
+
+  it("a superseded generation's open/close events are inert (no clobbering the new socket)", async () => {
+    await initializeWhatsApp(); // gen1
+    mockGetLiveSocket.mockReturnValue(socks[0]);
+    mockIsReady.mockReturnValue(false);
+    await logoutWhatsApp(); // → gen2
+    expect(makeWASocket).toHaveBeenCalledTimes(2);
+
+    // Clear the recorded service-mock calls so we can attribute the next ones cleanly.
+    mockClearSocket.mockClear();
+    mockSetSocketOpen.mockClear();
+
+    // Drive gen1's stale connection.update: 'close' would normally clearBaileysSocket()
+    // and 'open' would setSocketOpen(true) — the epoch guard must make both no-ops.
+    await driveClose(socks[0], 515);
+    await driveOpen(socks[0]);
+
+    expect(mockClearSocket).not.toHaveBeenCalled();
+    expect(mockSetSocketOpen).not.toHaveBeenCalled();
   });
 });

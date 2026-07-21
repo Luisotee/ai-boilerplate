@@ -12,7 +12,8 @@ import {
   setBaileysSocket,
   setConnectionStatus,
   setLatestQr,
-  getBaileysSocket,
+  getLiveSocket,
+  setSocketOpen,
   isBaileysReady,
   clearBaileysSocket,
 } from './services/baileys.js';
@@ -46,26 +47,47 @@ async function clearAuthState(): Promise<void> {
  * Force a WhatsApp re-pair (used by the dashboard's "unlink" action).
  *
  * Owns the full teardown → clear → re-init so the caller's success reflects the
- * real outcome. When a device is linked, detach the socket's connection.update
- * listener (so its logout-triggered `close` can't race the re-init below), ask
- * WhatsApp to unlink via `sock.logout()`, then drop the stored socket. Either way
- * the on-disk creds are wiped and the client re-initialises so a fresh pairing QR
+ * real outcome. First bumps the socket generation (`socketEpoch`) so any in-flight
+ * events from the current socket — notably a `creds.update` that would otherwise
+ * re-persist the creds we're about to wipe — are ignored by the guarded handlers.
+ * Then reaches the socket via `getLiveSocket()` (which sees a socket created but not
+ * yet `open`ed, i.e. the initial-pairing window), detaches its listeners, unlinks
+ * via `sock.logout()` when open (or just ends it when pre-open), and drops it. Either
+ * way the on-disk creds are wiped and the client re-initialises so a fresh pairing QR
  * is issued; a failure to clear creds or re-init throws and surfaces to the caller.
  *
- * TODO(#4): a socket created but not yet `open`ed (initial pairing) isn't tracked
- * by the baileys singleton, so an unlink during that brief window can orphan it.
+ * The epoch guard + tracking-at-creation close the pre-open unlink race (issue #4):
+ * an unlink during initial pairing now tears the pending socket down instead of
+ * letting it resurrect the just-wiped auth state.
  */
 export async function logoutWhatsApp(): Promise<void> {
   logger.info('Forcing WhatsApp logout / re-pair');
 
-  if (isBaileysReady()) {
-    const sock = getBaileysSocket();
-    // Detach so the logout-triggered 'close' can't race the re-init below.
+  // Claim a new generation up front so the current socket's in-flight handlers go inert
+  // (belt-and-braces alongside the removeAllListeners below).
+  socketEpoch++;
+
+  // getLiveSocket() reaches a socket that is created but not yet `open` (the pairing
+  // window), so an unlink there tears it down instead of orphaning it.
+  const sock = getLiveSocket();
+  if (sock) {
+    const wasOpen = isBaileysReady();
     sock.ev.removeAllListeners('connection.update');
-    try {
-      await sock.logout();
-    } catch (err) {
-      logger.warn({ err }, 'sock.logout() failed; ending the socket locally');
+    sock.ev.removeAllListeners('creds.update');
+    if (wasOpen) {
+      try {
+        await sock.logout();
+      } catch (err) {
+        logger.warn({ err }, 'sock.logout() failed; ending the socket locally');
+        try {
+          sock.end(undefined);
+        } catch (endErr) {
+          logger.trace({ err: endErr }, 'socket.end() failed (already dead)');
+        }
+      }
+    } else {
+      // A not-yet-open socket has nothing registered server-side to unlink, and
+      // logout() on it can hang the WS — just end it locally.
       try {
         sock.end(undefined);
       } catch (endErr) {
@@ -76,9 +98,16 @@ export async function logoutWhatsApp(): Promise<void> {
   }
 
   resetReconnectionState();
+  setConnectionStatus('connecting'); // don't serve a stale 'connected' between wipe and re-open
+  setLatestQr(null);
   await clearAuthState(); // throws on FS failure → route 500 → dashboard 503
   await initializeWhatsApp(); // awaited: single re-init owner, errors surface
 }
+
+// Monotonic socket generation. Bumped on every init and on logout; the connection
+// and creds handlers capture their generation and go inert once it's superseded, so a
+// stale socket can't clobber a newer one or re-persist auth state we've since wiped.
+let socketEpoch = 0;
 
 // Reconnection state
 let reconnectionAttempts = 0;
@@ -175,6 +204,7 @@ function scheduleReconnect(): void {
 }
 
 export async function initializeWhatsApp(): Promise<void> {
+  const myEpoch = ++socketEpoch; // this socket's generation; guards below ignore stale ones
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
 
   const sock = makeWASocket({
@@ -182,9 +212,12 @@ export async function initializeWhatsApp(): Promise<void> {
     logger: logger.child({ module: 'baileys' }),
     browser: ['AI Boilerplate', 'Chrome', '131.0.0'],
   });
+  // Track at creation (not on 'open') so teardown can reach a not-yet-open socket.
+  setBaileysSocket(sock);
 
   // Connection events
   sock.ev.on('connection.update', async (update) => {
+    if (myEpoch !== socketEpoch) return; // a newer socket has superseded this generation
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
@@ -234,7 +267,7 @@ export async function initializeWhatsApp(): Promise<void> {
       }
     } else if (connection === 'open') {
       logger.info('✅ WhatsApp connection opened successfully');
-      setBaileysSocket(sock);
+      setSocketOpen(true); // socket already tracked at creation; just mark the link open
       setConnectionStatus('connected');
       setLatestQr(null); // clear the pairing QR once linked
 
@@ -243,7 +276,10 @@ export async function initializeWhatsApp(): Promise<void> {
     }
   });
 
-  sock.ev.on('creds.update', saveCreds);
+  sock.ev.on('creds.update', async () => {
+    if (myEpoch !== socketEpoch) return; // stale socket must not re-persist wiped creds
+    await saveCreds();
+  });
 
   // Message handler
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
