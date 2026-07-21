@@ -703,6 +703,14 @@ def _patch_wa_client(status_payload=None, raises=None):
     return patch("ai_api.routes.admin.create_whatsapp_client", return_value=client)
 
 
+def _patch_wa_client_logout(result=None, raises=None):
+    """Patch create_whatsapp_client to return a client whose logout_whatsapp
+    returns result (or raises)."""
+    client = MagicMock()
+    client.logout_whatsapp = AsyncMock(return_value=result, side_effect=raises)
+    return patch("ai_api.routes.admin.create_whatsapp_client", return_value=client)
+
+
 class TestWhatsAppQr:
     @patch("ai_api.main.init_db")
     @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
@@ -795,6 +803,77 @@ class TestWhatsAppQr:
             _cleanup()
 
 
+class TestWhatsAppLogout:
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_success(self, *_):
+        from ai_api.whatsapp.client import SuccessResponse
+
+        app = _app_with_db(_make_mock_db())
+        try:
+            with _patch_wa_client_logout(SuccessResponse(success=True)):
+                async with _client(app) as client:
+                    resp = await client.post("/admin/whatsapp/logout", headers=AUTH_HEADERS)
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["success"] is True
+            assert "detail" in data
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_unreachable_client_returns_503(self, *_):
+        # Unlike the passive QR poll (which degrades to a 200 "unavailable" body),
+        # logout is an explicit action: an unreachable Baileys client must surface 503.
+        app = _app_with_db(_make_mock_db())
+        try:
+            with _patch_wa_client_logout(raises=ConnectError("connection refused")):
+                async with _client(app) as client:
+                    resp = await client.post("/admin/whatsapp/logout", headers=AUTH_HEADERS)
+            assert resp.status_code == 503
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_client_error_returns_502(self, *_):
+        # Reachable but the Node client returned an error status (WhatsAppClientError)
+        # — distinct from an unreachable transport error. Surfaces as 502, not 503, so
+        # an operator can tell an upstream failure from a networking one.
+        from ai_api.whatsapp import WhatsAppClientError
+
+        app = _app_with_db(_make_mock_db())
+        try:
+            with _patch_wa_client_logout(raises=WhatsAppClientError("boom", status_code=500)):
+                async with _client(app) as client:
+                    resp = await client.post("/admin/whatsapp/logout", headers=AUTH_HEADERS)
+            assert resp.status_code == 502
+            assert "boom" in resp.json()["detail"]
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_reported_failure_returns_502(self, *_):
+        # Reachable and 2xx, but the client reports success=False: don't pretend it
+        # worked with a 200 — surface it as a bad-gateway.
+        from ai_api.whatsapp.client import SuccessResponse
+
+        app = _app_with_db(_make_mock_db())
+        try:
+            with _patch_wa_client_logout(SuccessResponse(success=False)):
+                async with _client(app) as client:
+                    resp = await client.post("/admin/whatsapp/logout", headers=AUTH_HEADERS)
+            assert resp.status_code == 502
+        finally:
+            _cleanup()
+
+
 # ---------------------------------------------------------------------------
 # Auth
 # ---------------------------------------------------------------------------
@@ -819,4 +898,15 @@ async def test_whatsapp_qr_requires_auth(*_):
 
     async with _client(app) as client:
         resp = await client.get("/admin/whatsapp/qr")
+    assert resp.status_code == 401
+
+
+@patch("ai_api.main.init_db")
+@patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+@patch("ai_api.main.cleanup_expired_documents")
+async def test_whatsapp_logout_requires_auth(*_):
+    from ai_api.main import app
+
+    async with _client(app) as client:
+        resp = await client.post("/admin/whatsapp/logout")
     assert resp.status_code == 401

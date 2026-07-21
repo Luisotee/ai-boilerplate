@@ -8,7 +8,15 @@ import qrcode from 'qrcode-terminal';
 import { readdir, rm } from 'node:fs/promises';
 import { logger } from './logger.js';
 import { config } from './config.js';
-import { setBaileysSocket, setConnectionStatus, setLatestQr } from './services/baileys.js';
+import {
+  setBaileysSocket,
+  setConnectionStatus,
+  setLatestQr,
+  getLiveSocket,
+  setSocketOpen,
+  isBaileysReady,
+  clearBaileysSocket,
+} from './services/baileys.js';
 import { getWaVersionConfig } from './services/wa-version.js';
 import { handleTextMessage } from './handlers/text.js';
 import { transcribeAudioMessage } from './handlers/audio.js';
@@ -32,8 +40,75 @@ async function clearAuthState(): Promise<void> {
     logger.info({ cleared: entries.length }, 'Cleared WhatsApp auth state');
   } catch (err) {
     logger.error({ err }, 'Failed to clear WhatsApp auth state');
+    throw err;
   }
 }
+
+/**
+ * Force a WhatsApp re-pair (used by the dashboard's "unlink" action).
+ *
+ * Owns the full teardown → clear → re-init so the caller's success reflects the
+ * real outcome. First bumps the socket generation (`socketEpoch`) so any in-flight
+ * events from the current socket — notably a `creds.update` that would otherwise
+ * re-persist the creds we're about to wipe — are ignored by the guarded handlers.
+ * Then reaches the socket via `getLiveSocket()` (which sees a socket created but not
+ * yet `open`ed, i.e. the initial-pairing window), detaches its listeners, unlinks
+ * via `sock.logout()` when open (or just ends it when pre-open), and drops it. Either
+ * way the on-disk creds are wiped and the client re-initialises so a fresh pairing QR
+ * is issued; a failure to clear creds or re-init throws and surfaces to the caller.
+ *
+ * The epoch guard + tracking-at-creation close the pre-open unlink race (issue #4):
+ * an unlink during initial pairing now tears the pending socket down instead of
+ * letting it resurrect the just-wiped auth state.
+ */
+export async function logoutWhatsApp(): Promise<void> {
+  logger.info('Forcing WhatsApp logout / re-pair');
+
+  // Claim a new generation up front so the current socket's in-flight handlers go inert
+  // (belt-and-braces alongside the removeAllListeners below).
+  socketEpoch++;
+
+  // getLiveSocket() reaches a socket that is created but not yet `open` (the pairing
+  // window), so an unlink there tears it down instead of orphaning it.
+  const sock = getLiveSocket();
+  if (sock) {
+    const wasOpen = isBaileysReady();
+    sock.ev.removeAllListeners('connection.update');
+    sock.ev.removeAllListeners('creds.update');
+    if (wasOpen) {
+      try {
+        await sock.logout();
+      } catch (err) {
+        logger.warn({ err }, 'sock.logout() failed; ending the socket locally');
+        try {
+          sock.end(undefined);
+        } catch (endErr) {
+          logger.trace({ err: endErr }, 'socket.end() failed (already dead)');
+        }
+      }
+    } else {
+      // A not-yet-open socket has nothing registered server-side to unlink, and
+      // logout() on it can hang the WS — just end it locally.
+      try {
+        sock.end(undefined);
+      } catch (endErr) {
+        logger.trace({ err: endErr }, 'socket.end() failed (already dead)');
+      }
+    }
+    clearBaileysSocket();
+  }
+
+  resetReconnectionState();
+  setConnectionStatus('connecting'); // don't serve a stale 'connected' between wipe and re-open
+  setLatestQr(null);
+  await clearAuthState(); // throws on FS failure → route 500 → dashboard 503
+  await initializeWhatsApp(); // awaited: single re-init owner, errors surface
+}
+
+// Monotonic socket generation. Bumped on every init and on logout; the connection
+// and creds handlers capture their generation and go inert once it's superseded, so a
+// stale socket can't clobber a newer one or re-persist auth state we've since wiped.
+let socketEpoch = 0;
 
 // Reconnection state
 let reconnectionAttempts = 0;
@@ -70,7 +145,67 @@ function resetReconnectionState(): void {
   }
 }
 
+/**
+ * Schedule a reconnection attempt with exponential backoff.
+ *
+ * Safe to call from the connection 'close' handler and from a failed re-init's
+ * `.catch`: the `isReconnecting` guard prevents double-arming the timer, and
+ * `reconnectionAttempts` is clamped at `maxAttempts` so a prolonged outage keeps
+ * retrying at the capped interval rather than giving up. Crucially, a failed
+ * attempt re-schedules itself — so an `initializeWhatsApp()` that throws *before*
+ * a socket exists (which would otherwise emit no 'close' to re-arm anything) still
+ * self-heals instead of stalling at disconnected/qr=null.
+ */
+function scheduleReconnect(): void {
+  // Check if max attempts exceeded
+  if (reconnectionAttempts >= config.reconnection.maxAttempts) {
+    // Don't give up — keep retrying at the capped backoff so a prolonged outage
+    // self-heals when connectivity returns. Clamp the counter so the delay stays
+    // pinned at maxDelayMs instead of overflowing or growing unbounded.
+    reconnectionAttempts = config.reconnection.maxAttempts;
+    logger.warn(
+      {
+        attempts: reconnectionAttempts,
+        maxAttempts: config.reconnection.maxAttempts,
+      },
+      'Max reconnection attempts reached — continuing to retry at the capped interval.'
+    );
+  }
+
+  // Prevent multiple concurrent reconnection attempts
+  if (isReconnecting) {
+    logger.debug('Reconnection already in progress, skipping');
+    return;
+  }
+
+  isReconnecting = true;
+  reconnectionAttempts++;
+
+  // Calculate backoff delay
+  const delayMs = calculateBackoffDelay(reconnectionAttempts - 1);
+
+  logger.info(
+    {
+      attempt: reconnectionAttempts,
+      maxAttempts: config.reconnection.maxAttempts,
+      delayMs: Math.round(delayMs),
+    },
+    `⏳ Reconnecting in ${Math.round(delayMs / 1000)}s...`
+  );
+
+  // Schedule reconnection with exponential backoff
+  reconnectionTimer = setTimeout(() => {
+    logger.info({ attempt: reconnectionAttempts }, 'Attempting reconnection');
+    isReconnecting = false;
+    initializeWhatsApp().catch((err) => {
+      logger.error({ err }, 'Reconnection attempt failed');
+      scheduleReconnect();
+    });
+  }, delayMs);
+}
+
 export async function initializeWhatsApp(): Promise<void> {
+  const myEpoch = ++socketEpoch; // this socket's generation; guards below ignore stale ones
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   // Spread, never `version: versionConfig.version` — an explicit undefined key would
   // clobber Baileys' bundled default and crash the handshake. See services/wa-version.ts.
@@ -82,9 +217,12 @@ export async function initializeWhatsApp(): Promise<void> {
     logger: logger.child({ module: 'baileys' }),
     browser: ['AI Boilerplate', 'Chrome', '131.0.0'],
   });
+  // Track at creation (not on 'open') so teardown can reach a not-yet-open socket.
+  setBaileysSocket(sock);
 
   // Connection events
   sock.ev.on('connection.update', async (update) => {
+    if (myEpoch !== socketEpoch) return; // a newer socket has superseded this generation
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
@@ -99,6 +237,7 @@ export async function initializeWhatsApp(): Promise<void> {
     if (connection === 'close') {
       setConnectionStatus('disconnected');
       setLatestQr(null); // the socket that issued the QR is gone — don't serve a stale code
+      clearBaileysSocket(); // the socket is dead — stop reporting "ready" until re-open
       const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
@@ -113,48 +252,7 @@ export async function initializeWhatsApp(): Promise<void> {
       logger.info({ shouldReconnect, reconnectionAttempts, statusCode }, 'Connection closed');
 
       if (shouldReconnect) {
-        // Check if max attempts exceeded
-        if (reconnectionAttempts >= config.reconnection.maxAttempts) {
-          // Don't give up — keep retrying at the capped backoff so a prolonged outage
-          // self-heals when connectivity returns. Clamp the counter so the delay stays
-          // pinned at maxDelayMs instead of overflowing or growing unbounded.
-          reconnectionAttempts = config.reconnection.maxAttempts;
-          logger.warn(
-            {
-              attempts: reconnectionAttempts,
-              maxAttempts: config.reconnection.maxAttempts,
-            },
-            'Max reconnection attempts reached — continuing to retry at the capped interval.'
-          );
-        }
-
-        // Prevent multiple concurrent reconnection attempts
-        if (isReconnecting) {
-          logger.debug('Reconnection already in progress, skipping');
-          return;
-        }
-
-        isReconnecting = true;
-        reconnectionAttempts++;
-
-        // Calculate backoff delay
-        const delayMs = calculateBackoffDelay(reconnectionAttempts - 1);
-
-        logger.info(
-          {
-            attempt: reconnectionAttempts,
-            maxAttempts: config.reconnection.maxAttempts,
-            delayMs: Math.round(delayMs),
-          },
-          `⏳ Reconnecting in ${Math.round(delayMs / 1000)}s...`
-        );
-
-        // Schedule reconnection with exponential backoff
-        reconnectionTimer = setTimeout(() => {
-          logger.info({ attempt: reconnectionAttempts }, 'Attempting reconnection');
-          isReconnecting = false;
-          initializeWhatsApp();
-        }, delayMs);
+        scheduleReconnect();
       } else {
         // Logged out (e.g. the linked phone unlinked this device). The on-disk creds are
         // now invalid and Baileys won't emit a fresh QR while a registered cred set exists,
@@ -163,12 +261,19 @@ export async function initializeWhatsApp(): Promise<void> {
           'Logged out — clearing stale credentials and re-initialising to issue a fresh QR.'
         );
         resetReconnectionState();
-        await clearAuthState();
-        initializeWhatsApp();
+        try {
+          await clearAuthState();
+          await initializeWhatsApp();
+        } catch (err) {
+          // Don't stall at disconnected/qr=null — reschedule with backoff so a transient
+          // FS/init failure self-heals instead of needing a manual restart.
+          logger.error({ err }, 'Failed to re-initialise after logout — retrying with backoff');
+          scheduleReconnect();
+        }
       }
     } else if (connection === 'open') {
       logger.info('✅ WhatsApp connection opened successfully');
-      setBaileysSocket(sock);
+      setSocketOpen(true); // socket already tracked at creation; just mark the link open
       setConnectionStatus('connected');
       setLatestQr(null); // clear the pairing QR once linked
 
@@ -177,7 +282,10 @@ export async function initializeWhatsApp(): Promise<void> {
     }
   });
 
-  sock.ev.on('creds.update', saveCreds);
+  sock.ev.on('creds.update', async () => {
+    if (myEpoch !== socketEpoch) return; // stale socket must not re-persist wiped creds
+    await saveCreds();
+  });
 
   // Message handler
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
