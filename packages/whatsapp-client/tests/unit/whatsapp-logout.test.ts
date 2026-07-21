@@ -38,6 +38,12 @@ vi.mock('@whiskeysockets/baileys', async (importOriginal) => ({
   useMultiFileAuthState: vi.fn().mockResolvedValue({ state: {}, saveCreds: vi.fn() }),
 }));
 
+// initializeWhatsApp() resolves the WA Web version on every init; stub it so tests never
+// hit the network (the real fetch would add a 5s timeout per uncached call).
+vi.mock('../../src/services/wa-version.js', () => ({
+  getWaVersionConfig: vi.fn().mockResolvedValue({}),
+}));
+
 import { logoutWhatsApp, initializeWhatsApp } from '../../src/whatsapp.js';
 import {
   isBaileysReady,
