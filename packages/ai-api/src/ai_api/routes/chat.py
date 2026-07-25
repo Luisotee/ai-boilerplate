@@ -53,7 +53,12 @@ def _parse_whitelist(raw: str) -> frozenset[str]:
 
 
 def _display_name(request: ChatRequest | SaveMessageRequest) -> str | None:
-    """Display name for the conversation itself (contact or group)."""
+    """Display name for the conversation itself (contact or group), or None.
+
+    In a private chat the sender *is* the conversation, so a legacy client's
+    `sender_name` is a valid fallback — `_clean_profile_name` scrubs it if that
+    client filled it with an identifier rather than a real name.
+    """
     if request.profile_name:
         return request.profile_name
     if request.conversation_type == "group":

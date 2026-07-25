@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 from ai_api.database import (
     RuntimeSetting,
     _clean_profile_name,
+    get_or_create_user,
     is_telegram_jid,
     phone_from_jid,
     set_setting_overrides_batch,
@@ -170,3 +171,52 @@ class TestSetSettingOverridesBatch:
         db, _ = self._make_db()
         set_setting_overrides_batch(db, {"a": '"1"'})
         db.commit.assert_not_called()
+
+
+class TestGetOrCreateUserAppliesSanitizer:
+    """The sanitizer is only useful if `get_or_create_user` actually calls it.
+
+    Every route-level test patches `get_or_create_user` out, so without these
+    the call site could be deleted with the whole suite still green.
+    """
+
+    @staticmethod
+    def _db(existing=None):
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = existing
+        return db
+
+    def test_identifier_name_is_not_stored_on_create(self):
+        db = self._db(None)
+
+        get_or_create_user(db, "109994229891095@lid", "private", name="109994229891095")
+
+        created = db.add.call_args[0][0]
+        assert created.name is None
+
+    def test_real_name_is_stored_on_create(self):
+        db = self._db(None)
+
+        get_or_create_user(db, "109994229891095@lid", "private", name="Ana Paula")
+
+        assert db.add.call_args[0][0].name == "Ana Paula"
+
+    def test_identifier_name_does_not_overwrite_a_known_name(self):
+        """A contact who clears their pushName must not clobber a good name."""
+        existing = MagicMock()
+        existing.name = "Ana Paula"
+        db = self._db(existing)
+
+        get_or_create_user(db, "109994229891095@lid", "private", name="109994229891095")
+
+        assert existing.name == "Ana Paula"
+
+    def test_new_real_name_replaces_the_old_one(self):
+        existing = MagicMock()
+        existing.name = "Ana"
+        db = self._db(existing)
+
+        get_or_create_user(db, "109994229891095@lid", "private", name="Ana Paula")
+
+        assert existing.name == "Ana Paula"
+        assert db.commit.called

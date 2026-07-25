@@ -160,7 +160,9 @@ describe('getPushName', () => {
   });
 
   it('treats an empty pushName as absent', () => {
-    expect(getPushName(createMessage({ pushName: '', verifiedBizName: undefined }))).toBeUndefined();
+    expect(
+      getPushName(createMessage({ pushName: '', verifiedBizName: undefined }))
+    ).toBeUndefined();
   });
 });
 
@@ -384,11 +386,7 @@ describe('isBotMentioned', () => {
       message: {
         extendedTextMessage: {
           contextInfo: {
-            mentionedJid: [
-              '5511111111111@s.whatsapp.net',
-              botJid,
-              '5511222222222@s.whatsapp.net',
-            ],
+            mentionedJid: ['5511111111111@s.whatsapp.net', botJid, '5511222222222@s.whatsapp.net'],
           },
         },
       },

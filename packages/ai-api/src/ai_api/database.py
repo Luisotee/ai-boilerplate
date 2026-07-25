@@ -200,11 +200,18 @@ def is_telegram_jid(jid: str) -> bool:
 
 
 def _clean_profile_name(name: str | None, whatsapp_jid: str, phone: str | None) -> str | None:
-    """Reject placeholder "names" that are really identifiers.
+    """Return the stripped name, or None if it is empty or looks like an identifier.
 
-    Clients fall back to the JID/LID local part (or the phone) when a contact
-    publishes no pushName; storing that would render a bare LID as if it were a
-    person's name. An all-digits name is always an identifier, never a person.
+    *Older* clients fall back to the JID/LID local part (or the phone) when a
+    contact publishes no pushName, and `_display_name` still passes a legacy
+    `sender_name` through for private chats. Storing that would render a bare
+    LID as if it were a person's name. Bots deploy on their own schedule, so
+    this stays a server-side guard even once every client has stopped doing it.
+
+    Known and accepted false negative: a genuinely all-digit business pushName
+    ("1688", "360") is rejected and the row falls back to showing its number.
+    That is the price of the rule that makes a bare LID unstorable, and the
+    safer direction to err in.
     """
     cleaned = (name or "").strip()
     if not cleaned:
@@ -214,6 +221,9 @@ def _clean_profile_name(name: str | None, whatsapp_jid: str, phone: str | None) 
     if phone:
         rejects.update({phone, phone.lstrip("+")})
     if cleaned in rejects or cleaned.lstrip("+").isdigit():
+        # Logged so a client regression that starts sending identifiers for
+        # every chat is greppable, instead of names just quietly vanishing.
+        logger.debug("Rejected identifier-shaped profile name for %s", whatsapp_jid)
         return None
     return cleaned
 

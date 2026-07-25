@@ -18,7 +18,7 @@ import {
   clearBaileysSocket,
 } from './services/baileys.js';
 import { getWaVersionConfig } from './services/wa-version.js';
-import { clearGroupCache, invalidateGroup, peekGroupMetadata } from './services/group-cache.js';
+import { clearGroupCache, invalidateGroup } from './services/group-cache.js';
 import { handleTextMessage } from './handlers/text.js';
 import { transcribeAudioMessage } from './handlers/audio.js';
 import { extractImageData } from './handlers/image.js';
@@ -218,7 +218,6 @@ export async function initializeWhatsApp(): Promise<void> {
     ...versionConfig,
     logger: logger.child({ module: 'baileys' }),
     browser: ['AI Boilerplate', 'Chrome', '131.0.0'],
-    cachedGroupMetadata: peekGroupMetadata,
   });
   // Track at creation (not on 'open') so teardown can reach a not-yet-open socket.
   setBaileysSocket(sock);
@@ -291,17 +290,18 @@ export async function initializeWhatsApp(): Promise<void> {
   });
 
   // A renamed group must not keep serving its old subject as the conversation
-  // name; participant changes matter too because the admin check reads the same
-  // cached metadata.
+  // name. Deliberately NOT epoch-guarded, unlike the handlers above: those
+  // gate side effects that must not happen twice (persisting creds, serving a
+  // QR), whereas this is an idempotent cache delete whose worst outcome is one
+  // refetch. Reconnect is exactly when buffered events flush, so dropping them
+  // on a superseded generation would pin a stale name for the full TTL.
   sock.ev.on('groups.update', (updates) => {
-    if (myEpoch !== socketEpoch) return;
     for (const update of updates) {
       if (update.id) invalidateGroup(update.id);
     }
   });
 
   sock.ev.on('group-participants.update', ({ id }) => {
-    if (myEpoch !== socketEpoch) return;
     invalidateGroup(id);
   });
 

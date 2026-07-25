@@ -34,6 +34,13 @@ vi.mock('../../src/logger.js', () => ({
   },
 }));
 
+vi.mock('../../src/services/group-cache.js', () => ({
+  getGroupSubject: vi.fn(),
+  clearGroupCache: vi.fn(),
+  invalidateGroup: vi.fn(),
+  getGroupMetadataCached: vi.fn(),
+}));
+
 vi.mock('../../src/utils/message-split.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/utils/message-split.js')>();
   return {
@@ -43,11 +50,13 @@ vi.mock('../../src/utils/message-split.js', async (importOriginal) => {
 });
 
 import { handleTextMessage } from '../../src/handlers/text.js';
+import { getGroupSubject } from '../../src/services/group-cache.js';
 import { sendMessageToAI } from '../../src/api-client.js';
 import { sleep } from '../../src/utils/message-split.js';
 import { logger } from '../../src/logger.js';
 
 const mockSendMessageToAI = sendMessageToAI as ReturnType<typeof vi.fn>;
+const mockGetGroupSubject = getGroupSubject as ReturnType<typeof vi.fn>;
 const mockSleep = sleep as ReturnType<typeof vi.fn>;
 const mockLoggerWarn = logger.warn as unknown as ReturnType<typeof vi.fn>;
 const mockLoggerInfo = logger.info as unknown as ReturnType<typeof vi.fn>;
@@ -235,5 +244,69 @@ describe('handleTextMessage — burst sending', () => {
       ([, message]) => message === 'Sent AI response'
     );
     expect(successInfo).toBeUndefined();
+  });
+});
+
+describe("handleTextMessage — profileName (the conversation's display name)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSendMessageToAI.mockResolvedValue('ok');
+  });
+
+  const optsOf = (call: number) => mockSendMessageToAI.mock.calls[call][2];
+
+  it('sends the GROUP SUBJECT for a group, never the participant pushName', async () => {
+    // The headline regression: profileName becomes User.name, so sending the
+    // participant here renames the whole conversation after whoever spoke last.
+    mockGetGroupSubject.mockResolvedValue('Equipe Terra Krya');
+    const msg = makeGroupTextMsg('hello'); // fixture pushName is 'Test User'
+
+    await handleTextMessage(makeMockSocket() as any, msg as any, 'hello');
+
+    expect(optsOf(0).profileName).toBe('Equipe Terra Krya');
+    expect(optsOf(0).profileName).not.toBe('Test User');
+    expect(optsOf(0).senderName).toBe('Test User'); // still labels the message row
+  });
+
+  it('sends the group subject on the saveOnly path too', async () => {
+    // Most group traffic is save-only (the bot was not addressed), so this is
+    // the path that names most group conversations.
+    mockGetGroupSubject.mockResolvedValue('Equipe Terra Krya');
+    const msg = makeGroupTextMsg('chatter');
+
+    await handleTextMessage(makeMockSocket() as any, msg as any, 'chatter', undefined, undefined, {
+      saveOnly: true,
+    });
+
+    expect(optsOf(0).saveOnly).toBe(true);
+    expect(optsOf(0).profileName).toBe('Equipe Terra Krya');
+  });
+
+  it('leaves a group nameless rather than mislabelled when the subject fails', async () => {
+    mockGetGroupSubject.mockResolvedValue(undefined);
+    const msg = makeGroupTextMsg('hello');
+
+    await handleTextMessage(makeMockSocket() as any, msg as any, 'hello');
+
+    expect(optsOf(0).profileName).toBeUndefined();
+  });
+
+  it('sends the contact pushName for a private chat, without asking for a subject', async () => {
+    const msg = makeTextMsg('hello');
+
+    await handleTextMessage(makeMockSocket() as any, msg as any, 'hello');
+
+    expect(optsOf(0).profileName).toBe('Test User');
+    expect(mockGetGroupSubject).not.toHaveBeenCalled();
+  });
+
+  it('sends no profileName for a private chat when the contact publishes none', async () => {
+    // Must not fall back to an identifier: that would show a bare LID as a name.
+    const msg = makeTextMsg('hello');
+    msg.pushName = undefined as never;
+
+    await handleTextMessage(makeMockSocket() as any, msg as any, 'hello');
+
+    expect(optsOf(0).profileName).toBeUndefined();
   });
 });
