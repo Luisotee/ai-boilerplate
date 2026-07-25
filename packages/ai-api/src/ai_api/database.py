@@ -199,6 +199,25 @@ def is_telegram_jid(jid: str) -> bool:
     return jid.startswith("tg:")
 
 
+def _clean_profile_name(name: str | None, whatsapp_jid: str, phone: str | None) -> str | None:
+    """Reject placeholder "names" that are really identifiers.
+
+    Clients fall back to the JID/LID local part (or the phone) when a contact
+    publishes no pushName; storing that would render a bare LID as if it were a
+    person's name. An all-digits name is always an identifier, never a person.
+    """
+    cleaned = (name or "").strip()
+    if not cleaned:
+        return None
+    local_part = whatsapp_jid.split("@")[0]
+    rejects = {local_part, f"+{local_part}"}
+    if phone:
+        rejects.update({phone, phone.lstrip("+")})
+    if cleaned in rejects or cleaned.lstrip("+").isdigit():
+        return None
+    return cleaned
+
+
 def get_or_create_user(
     db,
     whatsapp_jid: str,
@@ -222,6 +241,8 @@ def get_or_create_user(
     # Auto-extract phone from phone-based JID if not provided
     if not phone:
         phone = phone_from_jid(whatsapp_jid)
+
+    name = _clean_profile_name(name, whatsapp_jid, phone)
 
     # Step 1: Direct lookup by primary identity column
     if is_telegram:
@@ -322,10 +343,15 @@ def save_message(
     embedding: list = None,
     phone: str = None,
     whatsapp_lid: str = None,
+    name: str = None,
 ):
-    """Save a message to the database with optional group context and embedding"""
+    """Save a message to the database with optional group context and embedding
+
+    `name` is the *conversation's* display name (contact pushName or group
+    subject) — not `sender_name`, which in a group is the individual participant.
+    """
     user = get_or_create_user(
-        db, whatsapp_jid, conversation_type, phone=phone, whatsapp_lid=whatsapp_lid
+        db, whatsapp_jid, conversation_type, name=name, phone=phone, whatsapp_lid=whatsapp_lid
     )
     message = ConversationMessage(
         user_id=user.id,

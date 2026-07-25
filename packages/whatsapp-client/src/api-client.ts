@@ -23,6 +23,8 @@ interface MessageOptions {
   conversationType: 'private' | 'group';
   senderJid?: string;
   senderName?: string;
+  /** Display name of the conversation: contact pushName, or group subject. */
+  profileName?: string;
   saveOnly?: boolean;
   messageId?: string;
   image?: ImagePayload;
@@ -65,6 +67,7 @@ export async function sendMessageToAI(
     conversationType,
     senderJid,
     senderName,
+    profileName,
     saveOnly,
     messageId,
     image,
@@ -88,6 +91,7 @@ export async function sendMessageToAI(
           message,
           sender_jid: senderJid,
           sender_name: senderName,
+          profile_name: profileName,
           conversation_type: conversationType,
           whatsapp_message_id: messageId,
           phone,
@@ -115,6 +119,7 @@ export async function sendMessageToAI(
     message,
     sender_jid: senderJid,
     sender_name: senderName,
+    profile_name: profileName,
     conversation_type: conversationType,
     whatsapp_message_id: messageId,
     phone,

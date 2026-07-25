@@ -609,7 +609,14 @@ class TestConversationViewer:
     @patch("ai_api.main.cleanup_expired_documents")
     async def test_list_users(self, *_):
         mock_db = _make_mock_db()
-        user = make_user("5511999999999@s.whatsapp.net", name="Alice")
+        # A LID-addressed row whose phone was already resolved at ingestion: the
+        # dashboard must receive the phone, not just the opaque LID.
+        user = make_user(
+            "109994229891095@lid",
+            name="Alice",
+            phone="+5511999999999",
+            whatsapp_lid="109994229891095@lid",
+        )
         last = datetime(2026, 5, 25, tzinfo=UTC)
         mock_db.query.return_value.count.return_value = 1
         chain = mock_db.query.return_value.outerjoin.return_value.group_by.return_value
@@ -625,6 +632,8 @@ class TestConversationViewer:
             assert data["total"] == 1
             assert data["users"][0]["name"] == "Alice"
             assert data["users"][0]["message_count"] == 5
+            assert data["users"][0]["phone"] == "+5511999999999"
+            assert data["users"][0]["whatsapp_lid"] == "109994229891095@lid"
         finally:
             _cleanup()
 

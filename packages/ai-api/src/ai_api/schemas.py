@@ -12,6 +12,10 @@ class ChatRequest(BaseModel):
     )
     sender_jid: str | None = Field(None, description="Sender JID in group chats")
     sender_name: str | None = Field(None, description="Sender name in group chats")
+    profile_name: str | None = Field(
+        None,
+        description="Display name of the conversation (contact's pushName, or group subject)",
+    )
     whatsapp_message_id: str | None = Field(None, description="WhatsApp message ID for reactions")
     image_data: str | None = Field(None, description="Base64-encoded image data for vision")
     image_mimetype: str | None = Field(None, description="Image MIME type (e.g., image/jpeg)")
@@ -45,6 +49,10 @@ class SaveMessageRequest(BaseModel):
     )
     sender_jid: str | None = Field(None, description="Sender JID in group chats")
     sender_name: str | None = Field(None, description="Sender name in group chats")
+    profile_name: str | None = Field(
+        None,
+        description="Display name of the conversation (contact's pushName, or group subject)",
+    )
     whatsapp_message_id: str | None = Field(None, description="WhatsApp message ID for reactions")
     phone: str | None = Field(None, description="E.164 phone number (e.g., +5491126726818)")
     whatsapp_lid: str | None = Field(None, description="WhatsApp LID if known")
@@ -179,6 +187,8 @@ class UserSummary(BaseModel):
 
     whatsapp_jid: str
     name: str | None = None
+    phone: str | None = None
+    whatsapp_lid: str | None = None
     conversation_type: str
     message_count: int
     last_message_at: datetime | None = None

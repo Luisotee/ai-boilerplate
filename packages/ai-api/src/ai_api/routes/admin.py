@@ -291,6 +291,8 @@ async def list_users(
         UserSummary(
             whatsapp_jid=user.whatsapp_jid,
             name=user.name,
+            phone=user.phone,
+            whatsapp_lid=user.whatsapp_lid,
             conversation_type=user.conversation_type,
             message_count=message_count,
             last_message_at=last_message_at,

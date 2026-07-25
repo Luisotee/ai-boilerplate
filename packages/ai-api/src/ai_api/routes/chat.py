@@ -52,6 +52,17 @@ def _parse_whitelist(raw: str) -> frozenset[str]:
     return frozenset(p.strip() for p in raw.split(",") if p.strip())
 
 
+def _display_name(request: ChatRequest | SaveMessageRequest) -> str | None:
+    """Display name for the conversation itself (contact or group)."""
+    if request.profile_name:
+        return request.profile_name
+    if request.conversation_type == "group":
+        # Legacy clients only send `sender_name`, which in a group is the
+        # *participant* — never the group. Better nameless than mislabelled.
+        return None
+    return request.sender_name
+
+
 def _is_whitelisted(whatsapp_jid: str) -> bool:
     """Check if a JID is whitelisted. Returns True if whitelist is empty (disabled).
 
@@ -144,6 +155,7 @@ async def save_message_only(request: SaveMessageRequest, db: Session = Depends(g
             embedding=user_embedding,
             phone=request.phone,
             whatsapp_lid=request.whatsapp_lid,
+            name=_display_name(request),
         )
 
         return {"success": True}
@@ -216,6 +228,7 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
             chat_request.conversation_type,
             phone=chat_request.phone,
             whatsapp_lid=chat_request.whatsapp_lid,
+            name=_display_name(chat_request),
         )
 
         # /link and /unlink need an async Redis client, so they're handled
@@ -324,6 +337,7 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
             chat_request.conversation_type,
             phone=chat_request.phone,
             whatsapp_lid=chat_request.whatsapp_lid,
+            name=_display_name(chat_request),
         )
 
         # Generate embedding for user message
@@ -351,6 +365,7 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
             embedding=user_embedding,
             phone=chat_request.phone,
             whatsapp_lid=chat_request.whatsapp_lid,
+            name=_display_name(chat_request),
         )
 
         # Add message to user's Redis Stream for sequential processing
@@ -582,6 +597,7 @@ async def chat(request: Request, chat_request: ChatRequest, db: Session = Depend
             embedding=user_embedding,
             phone=chat_request.phone,
             whatsapp_lid=chat_request.whatsapp_lid,
+            name=_display_name(chat_request),
         )
 
         # Prepare agent dependencies for semantic search tool (dependency injection)
@@ -591,6 +607,7 @@ async def chat(request: Request, chat_request: ChatRequest, db: Session = Depend
             chat_request.conversation_type,
             phone=chat_request.phone,
             whatsapp_lid=chat_request.whatsapp_lid,
+            name=_display_name(chat_request),
         )
 
         # Initialize embedding service following Pydantic AI best practices

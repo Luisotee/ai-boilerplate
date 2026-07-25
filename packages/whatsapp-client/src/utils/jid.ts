@@ -1,3 +1,5 @@
+import type { WASocket } from '@whiskeysockets/baileys';
+import { logger } from '../logger.js';
 import { getBaileysSocket } from '../services/baileys.js';
 
 /**
@@ -39,6 +41,56 @@ export function phoneFromJid(jid: string): string | null {
  */
 export function isLid(jid: string): boolean {
   return jid.endsWith('@lid');
+}
+
+/**
+ * Resolve the real phone behind a LID via Baileys' LID↔PN mapping store.
+ *
+ * `getPNForLID` hands back a *device-suffixed* JID (`5511…:0@s.whatsapp.net`),
+ * and `@hosted` for hosted LIDs — so the result must go through
+ * stripDeviceSuffix before phoneFromJid, or this returns null every time.
+ *
+ * Never throws: a mapping miss must not stop a message from being handled.
+ */
+export async function resolveLidToPhone(sock: WASocket, lidJid: string): Promise<string | null> {
+  if (!isLid(lidJid)) return null;
+
+  try {
+    // Optional-chained so a socket without the store (mocks, older Baileys)
+    // degrades to "unknown phone" rather than a TypeError.
+    const pnJid = await sock.signalRepository?.lidMapping?.getPNForLID(lidJid);
+    return pnJid ? phoneFromJid(stripDeviceSuffix(pnJid)) : null;
+  } catch (error) {
+    logger.warn({ error, lidJid }, 'LID→PN lookup failed; continuing without phone');
+    return null;
+  }
+}
+
+/**
+ * Resolve the E.164 phone for an incoming message's chat.
+ *
+ * Under Baileys v7 a chat is LID-addressed by default, so `remoteJid` is often
+ * an `@lid` whose digits are an anonymized account id, NOT a phone. Sources, in
+ * cost order:
+ *   1. phone-based JID (`@s.whatsapp.net`) → its number directly
+ *   2. the PN Baileys already carries on `key.remoteJidAlt` — free
+ *   3. the LID↔PN mapping store — local cache, USync round-trip on a miss
+ *
+ * Returns undefined when the phone simply isn't knowable yet.
+ */
+export async function resolveSenderPhone(
+  sock: WASocket,
+  remoteJid: string,
+  remoteJidAlt: string | null | undefined
+): Promise<string | undefined> {
+  const jid = stripDeviceSuffix(remoteJid);
+
+  const direct = phoneFromJid(jid);
+  if (direct) return direct;
+  if (!isLid(jid)) return undefined;
+
+  const alt = remoteJidAlt ? phoneFromJid(stripDeviceSuffix(remoteJidAlt)) : null;
+  return alt ?? (await resolveLidToPhone(sock, jid)) ?? undefined;
 }
 
 /**

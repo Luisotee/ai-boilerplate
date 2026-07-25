@@ -18,12 +18,13 @@ import {
   clearBaileysSocket,
 } from './services/baileys.js';
 import { getWaVersionConfig } from './services/wa-version.js';
+import { clearGroupCache, invalidateGroup, peekGroupMetadata } from './services/group-cache.js';
 import { handleTextMessage } from './handlers/text.js';
 import { transcribeAudioMessage } from './handlers/audio.js';
 import { extractImageData } from './handlers/image.js';
 import { extractDocumentData } from './handlers/document.js';
 import { sendFailureReaction } from './utils/reactions.js';
-import { stripDeviceSuffix, isGroupChat, phoneFromJid, isLid } from './utils/jid.js';
+import { stripDeviceSuffix, isGroupChat, isLid, resolveSenderPhone } from './utils/jid.js';
 import { shouldRespondInGroup } from './utils/message.js';
 
 const DEFAULT_IMAGE_PROMPT = 'Please describe and analyze this image';
@@ -96,6 +97,7 @@ export async function logoutWhatsApp(): Promise<void> {
       }
     }
     clearBaileysSocket();
+    clearGroupCache();
   }
 
   resetReconnectionState();
@@ -216,6 +218,7 @@ export async function initializeWhatsApp(): Promise<void> {
     ...versionConfig,
     logger: logger.child({ module: 'baileys' }),
     browser: ['AI Boilerplate', 'Chrome', '131.0.0'],
+    cachedGroupMetadata: peekGroupMetadata,
   });
   // Track at creation (not on 'open') so teardown can reach a not-yet-open socket.
   setBaileysSocket(sock);
@@ -287,6 +290,21 @@ export async function initializeWhatsApp(): Promise<void> {
     await saveCreds();
   });
 
+  // A renamed group must not keep serving its old subject as the conversation
+  // name; participant changes matter too because the admin check reads the same
+  // cached metadata.
+  sock.ev.on('groups.update', (updates) => {
+    if (myEpoch !== socketEpoch) return;
+    for (const update of updates) {
+      if (update.id) invalidateGroup(update.id);
+    }
+  });
+
+  sock.ev.on('group-participants.update', ({ id }) => {
+    if (myEpoch !== socketEpoch) return;
+    invalidateGroup(id);
+  });
+
   // Message handler
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     for (const msg of messages) {
@@ -325,9 +343,13 @@ export async function initializeWhatsApp(): Promise<void> {
         const botLid = sock.user?.lid ? stripDeviceSuffix(sock.user.lid) : undefined;
         const saveOnly = isGroup && !shouldRespondInGroup(msg, botJid, botLid);
 
-        // Extract phone number and LID for user identity resolution
-        const phone = phoneFromJid(whatsappJid) ?? undefined;
+        // Extract phone number and LID for user identity resolution.
+        // A LID-addressed chat carries no phone in its JID, so recover it from
+        // the message envelope (key.remoteJidAlt), falling back to Baileys'
+        // LID↔PN mapping store. Groups resolve to undefined — correct, since
+        // the User row *is* the group and has no phone of its own.
         const whatsappLid = isLid(whatsappJid) ? whatsappJid : undefined;
+        const phone = await resolveSenderPhone(sock, msg.key.remoteJid!, msg.key.remoteJidAlt);
 
         // Get text from normalized message or transcribe audio
         let text = normalizedMessage?.conversation || normalizedMessage?.extendedTextMessage?.text;
