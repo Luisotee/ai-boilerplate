@@ -1,15 +1,32 @@
 import type { WAMessage } from '@whiskeysockets/baileys';
-import { extractPhoneFromJid } from './jid.js';
+import { extractPhoneFromJid, phoneFromJid, stripDeviceSuffix } from './jid.js';
 import { logger } from '../logger.js';
 
 /**
- * Get sender name from message
+ * The display name the sender actually publishes, or undefined.
+ *
+ * Deliberately has NO identifier fallback: under v7 LID addressing the JID's
+ * local part is an anonymized account id, and storing that as someone's profile
+ * name renders a bare LID as if it were a person. Use this wherever the value
+ * may reach `User.name`; use getSenderName() for message-row labels.
+ */
+export function getPushName(msg: WAMessage): string | undefined {
+  return msg.pushName || msg.verifiedBizName || undefined;
+}
+
+/**
+ * Get sender name from message.
+ *
+ * Always returns something — this labels the message row (group bubbles, the
+ * content prefix), so a last-resort identifier beats an empty string. Prefers
+ * the PN Baileys carries alongside a LID over the LID's meaningless digits.
  */
 export function getSenderName(msg: WAMessage): string {
+  const altPhone = phoneFromJid(
+    stripDeviceSuffix(msg.key.participantAlt || msg.key.remoteJidAlt || '')
+  );
   return (
-    msg.pushName ||
-    msg.verifiedBizName ||
-    extractPhoneFromJid(msg.key.participant || msg.key.remoteJid!)
+    getPushName(msg) ?? altPhone ?? extractPhoneFromJid(msg.key.participant || msg.key.remoteJid!)
   );
 }
 

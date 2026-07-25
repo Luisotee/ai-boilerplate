@@ -1,16 +1,61 @@
 """
 Unit tests for ai_api.database — pure functions phone_from_jid, is_telegram_jid,
-plus the set_setting_overrides_batch contract.
+_clean_profile_name, plus the set_setting_overrides_batch contract.
 """
 
 from unittest.mock import MagicMock
 
 from ai_api.database import (
     RuntimeSetting,
+    _clean_profile_name,
+    get_or_create_user,
     is_telegram_jid,
     phone_from_jid,
     set_setting_overrides_batch,
 )
+
+
+class TestCleanProfileName:
+    """A contact who publishes no pushName makes clients fall back to an
+    identifier; storing that would show a bare LID as if it were a person."""
+
+    def test_rejects_lid_digits(self):
+        assert _clean_profile_name("109994229891095", "109994229891095@lid", None) is None
+
+    def test_rejects_any_all_digit_name(self):
+        assert _clean_profile_name("5511999999999", "109994229891095@lid", None) is None
+
+    def test_rejects_plus_prefixed_phone(self):
+        assert (
+            _clean_profile_name("+5511999999999", "109994229891095@lid", "+5511999999999") is None
+        )
+
+    def test_rejects_bare_phone_matching_known_phone(self):
+        assert _clean_profile_name("5511999999999", "109994229891095@lid", "+5511999999999") is None
+
+    def test_rejects_jid_local_part(self):
+        assert _clean_profile_name("5511999999999", "5511999999999@s.whatsapp.net", None) is None
+
+    def test_accepts_real_name(self):
+        assert _clean_profile_name("Ana Paula", "109994229891095@lid", None) == "Ana Paula"
+
+    def test_accepts_name_containing_digits(self):
+        assert _clean_profile_name("Loja 24h", "109994229891095@lid", None) == "Loja 24h"
+
+    def test_accepts_group_subject(self):
+        assert _clean_profile_name("Equipe Terra Krya", "120363012345678@g.us", None) == (
+            "Equipe Terra Krya"
+        )
+
+    def test_strips_surrounding_whitespace(self):
+        assert _clean_profile_name("  Ana  ", "109994229891095@lid", None) == "Ana"
+
+    def test_empty_and_whitespace_are_none(self):
+        assert _clean_profile_name("", "109994229891095@lid", None) is None
+        assert _clean_profile_name("   ", "109994229891095@lid", None) is None
+
+    def test_none_is_none(self):
+        assert _clean_profile_name(None, "109994229891095@lid", None) is None
 
 
 class TestPhoneFromJid:
@@ -126,3 +171,52 @@ class TestSetSettingOverridesBatch:
         db, _ = self._make_db()
         set_setting_overrides_batch(db, {"a": '"1"'})
         db.commit.assert_not_called()
+
+
+class TestGetOrCreateUserAppliesSanitizer:
+    """The sanitizer is only useful if `get_or_create_user` actually calls it.
+
+    Every route-level test patches `get_or_create_user` out, so without these
+    the call site could be deleted with the whole suite still green.
+    """
+
+    @staticmethod
+    def _db(existing=None):
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = existing
+        return db
+
+    def test_identifier_name_is_not_stored_on_create(self):
+        db = self._db(None)
+
+        get_or_create_user(db, "109994229891095@lid", "private", name="109994229891095")
+
+        created = db.add.call_args[0][0]
+        assert created.name is None
+
+    def test_real_name_is_stored_on_create(self):
+        db = self._db(None)
+
+        get_or_create_user(db, "109994229891095@lid", "private", name="Ana Paula")
+
+        assert db.add.call_args[0][0].name == "Ana Paula"
+
+    def test_identifier_name_does_not_overwrite_a_known_name(self):
+        """A contact who clears their pushName must not clobber a good name."""
+        existing = MagicMock()
+        existing.name = "Ana Paula"
+        db = self._db(existing)
+
+        get_or_create_user(db, "109994229891095@lid", "private", name="109994229891095")
+
+        assert existing.name == "Ana Paula"
+
+    def test_new_real_name_replaces_the_old_one(self):
+        existing = MagicMock()
+        existing.name = "Ana"
+        db = self._db(existing)
+
+        get_or_create_user(db, "109994229891095@lid", "private", name="Ana Paula")
+
+        assert existing.name == "Ana Paula"
+        assert db.commit.called

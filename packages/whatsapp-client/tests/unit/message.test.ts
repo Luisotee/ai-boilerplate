@@ -11,6 +11,7 @@ vi.mock('../../src/logger.js', () => ({
 }));
 
 import {
+  getPushName,
   getSenderName,
   isBotMentioned,
   isReplyToBotMessage,
@@ -90,6 +91,78 @@ describe('getSenderName', () => {
     });
 
     expect(getSenderName(msg)).toBe('Business');
+  });
+
+  it('prefers the PN on remoteJidAlt over a LID’s meaningless digits', () => {
+    const msg = createMessage({
+      pushName: undefined,
+      key: {
+        remoteJid: '109994229891095@lid',
+        remoteJidAlt: '5511999999999:0@s.whatsapp.net',
+      },
+    });
+
+    expect(getSenderName(msg)).toBe('+5511999999999');
+  });
+
+  it('prefers the PN on participantAlt in groups', () => {
+    const msg = createMessage({
+      pushName: undefined,
+      key: {
+        remoteJid: '120363012345678@g.us',
+        participant: '109994229891095@lid',
+        participantAlt: '5511888888888@s.whatsapp.net',
+      },
+    });
+
+    expect(getSenderName(msg)).toBe('+5511888888888');
+  });
+
+  it('still falls back to the raw identifier when no alt PN is carried', () => {
+    const msg = createMessage({
+      pushName: undefined,
+      key: { remoteJid: '109994229891095@lid' },
+    });
+
+    expect(getSenderName(msg)).toBe('109994229891095');
+  });
+});
+
+describe('getPushName', () => {
+  // This value can reach User.name, so an identifier fallback here would render
+  // a bare LID in the dashboard as if it were a person's name.
+  it('returns the pushName when the contact publishes one', () => {
+    expect(getPushName(createMessage({ pushName: 'John Doe' }))).toBe('John Doe');
+  });
+
+  it('falls back to verifiedBizName', () => {
+    expect(
+      getPushName(createMessage({ pushName: undefined, verifiedBizName: 'Business Inc' }))
+    ).toBe('Business Inc');
+  });
+
+  it('returns undefined rather than a LID when no name is published', () => {
+    const msg = createMessage({
+      pushName: undefined,
+      key: { remoteJid: '109994229891095@lid' },
+    });
+
+    expect(getPushName(msg)).toBeUndefined();
+  });
+
+  it('returns undefined rather than a phone number when no name is published', () => {
+    const msg = createMessage({
+      pushName: undefined,
+      key: { remoteJid: '5511999999999@s.whatsapp.net' },
+    });
+
+    expect(getPushName(msg)).toBeUndefined();
+  });
+
+  it('treats an empty pushName as absent', () => {
+    expect(
+      getPushName(createMessage({ pushName: '', verifiedBizName: undefined }))
+    ).toBeUndefined();
   });
 });
 
@@ -313,11 +386,7 @@ describe('isBotMentioned', () => {
       message: {
         extendedTextMessage: {
           contextInfo: {
-            mentionedJid: [
-              '5511111111111@s.whatsapp.net',
-              botJid,
-              '5511222222222@s.whatsapp.net',
-            ],
+            mentionedJid: ['5511111111111@s.whatsapp.net', botJid, '5511222222222@s.whatsapp.net'],
           },
         },
       },

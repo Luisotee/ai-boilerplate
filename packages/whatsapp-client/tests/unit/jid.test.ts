@@ -1,4 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+vi.mock('../../src/logger.js', () => ({
+  logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), trace: vi.fn() },
+}));
+
 import {
   stripDeviceSuffix,
   isGroupChat,
@@ -6,11 +11,118 @@ import {
   phoneFromJid,
   isLid,
   isJid,
+  resolveLidToPhone,
+  resolveSenderPhone,
 } from '../../src/utils/jid.js';
 
 vi.mock('../../src/services/baileys.js', () => ({
   getBaileysSocket: vi.fn(),
 }));
+
+const LID = '109994229891095@lid';
+
+/** Socket whose LID↔PN store answers with `pn` (Baileys returns it device-suffixed). */
+function sockWithMapping(pn: string | null) {
+  return {
+    signalRepository: { lidMapping: { getPNForLID: vi.fn().mockResolvedValue(pn) } },
+  } as any;
+}
+
+describe('resolveLidToPhone', () => {
+  it('strips the device suffix Baileys returns before parsing the phone', () => {
+    // Without stripping, phoneFromJid splits on "@" and yields "+5511999999999:0".
+    return expect(
+      resolveLidToPhone(sockWithMapping('5511999999999:0@s.whatsapp.net'), LID)
+    ).resolves.toBe('+5511999999999');
+  });
+
+  it('handles an already-unsuffixed PN', async () => {
+    await expect(
+      resolveLidToPhone(sockWithMapping('5511999999999@s.whatsapp.net'), LID)
+    ).resolves.toBe('+5511999999999');
+  });
+
+  it('returns null for a hosted LID (no real phone behind it)', async () => {
+    await expect(resolveLidToPhone(sockWithMapping('123456:0@hosted'), LID)).resolves.toBeNull();
+  });
+
+  it('returns null when the store has no mapping', async () => {
+    await expect(resolveLidToPhone(sockWithMapping(null), LID)).resolves.toBeNull();
+  });
+
+  it('returns null (never throws) when the lookup rejects', async () => {
+    const sock = {
+      signalRepository: { lidMapping: { getPNForLID: vi.fn().mockRejectedValue(new Error('x')) } },
+    } as any;
+
+    await expect(resolveLidToPhone(sock, LID)).resolves.toBeNull();
+  });
+
+  it('returns null when the socket has no LID mapping store at all', async () => {
+    await expect(resolveLidToPhone({} as any, LID)).resolves.toBeNull();
+  });
+
+  it('returns null for a non-LID input without touching the store', async () => {
+    const sock = sockWithMapping('5511999999999@s.whatsapp.net');
+
+    await expect(resolveLidToPhone(sock, '5511999999999@s.whatsapp.net')).resolves.toBeNull();
+    expect(sock.signalRepository.lidMapping.getPNForLID).not.toHaveBeenCalled();
+  });
+});
+
+describe('resolveSenderPhone', () => {
+  it('reads a phone-based JID directly, without consulting the store', async () => {
+    const sock = sockWithMapping('5599999999999@s.whatsapp.net');
+
+    await expect(resolveSenderPhone(sock, '5511999999999@s.whatsapp.net', undefined)).resolves.toBe(
+      '+5511999999999'
+    );
+    expect(sock.signalRepository.lidMapping.getPNForLID).not.toHaveBeenCalled();
+  });
+
+  it('strips a device suffix on the primary JID', async () => {
+    await expect(
+      resolveSenderPhone(sockWithMapping(null), '5511999999999:12@s.whatsapp.net', undefined)
+    ).resolves.toBe('+5511999999999');
+  });
+
+  it('prefers the free envelope PN (remoteJidAlt) over a store round-trip', async () => {
+    const sock = sockWithMapping('5599999999999@s.whatsapp.net');
+
+    await expect(resolveSenderPhone(sock, LID, '5511999999999:0@s.whatsapp.net')).resolves.toBe(
+      '+5511999999999'
+    );
+    expect(sock.signalRepository.lidMapping.getPNForLID).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the mapping store when the envelope carries no PN', async () => {
+    const sock = sockWithMapping('5511999999999:0@s.whatsapp.net');
+
+    await expect(resolveSenderPhone(sock, LID, undefined)).resolves.toBe('+5511999999999');
+    expect(sock.signalRepository.lidMapping.getPNForLID).toHaveBeenCalledWith(LID);
+  });
+
+  it('ignores a remoteJidAlt that is itself a LID', async () => {
+    const sock = sockWithMapping('5511999999999@s.whatsapp.net');
+
+    await expect(resolveSenderPhone(sock, LID, '888888888888@lid')).resolves.toBe('+5511999999999');
+  });
+
+  it('returns undefined when the phone is not knowable yet', async () => {
+    await expect(
+      resolveSenderPhone(sockWithMapping(null), LID, undefined)
+    ).resolves.toBeUndefined();
+  });
+
+  it('returns undefined for a group — the conversation has no phone of its own', async () => {
+    const sock = sockWithMapping('5511999999999@s.whatsapp.net');
+
+    await expect(
+      resolveSenderPhone(sock, '120363012345678@g.us', undefined)
+    ).resolves.toBeUndefined();
+    expect(sock.signalRepository.lidMapping.getPNForLID).not.toHaveBeenCalled();
+  });
+});
 
 describe('stripDeviceSuffix', () => {
   it('should strip device suffix from JID', () => {
@@ -32,9 +144,7 @@ describe('stripDeviceSuffix', () => {
   });
 
   it('should return JID unchanged if no device suffix', () => {
-    expect(stripDeviceSuffix('5491126726818@s.whatsapp.net')).toBe(
-      '5491126726818@s.whatsapp.net'
-    );
+    expect(stripDeviceSuffix('5491126726818@s.whatsapp.net')).toBe('5491126726818@s.whatsapp.net');
   });
 
   it('should handle group JIDs (no device suffix expected)', () => {
@@ -46,9 +156,7 @@ describe('stripDeviceSuffix', () => {
   });
 
   it('should handle JID with multi-digit device number', () => {
-    expect(stripDeviceSuffix('1234567890:123@s.whatsapp.net')).toBe(
-      '1234567890@s.whatsapp.net'
-    );
+    expect(stripDeviceSuffix('1234567890:123@s.whatsapp.net')).toBe('1234567890@s.whatsapp.net');
   });
 });
 
@@ -232,9 +340,7 @@ describe('normalizeJid', () => {
 
     const { normalizeJid } = await import('../../src/utils/jid.js');
 
-    await expect(normalizeJid('5491126726818')).rejects.toThrow(
-      /is not registered on WhatsApp/
-    );
+    await expect(normalizeJid('5491126726818')).rejects.toThrow(/is not registered on WhatsApp/);
   });
 
   it('should throw "not registered" when onWhatsApp returns empty array', async () => {
@@ -244,9 +350,7 @@ describe('normalizeJid', () => {
 
     const { normalizeJid } = await import('../../src/utils/jid.js');
 
-    await expect(normalizeJid('5491126726818')).rejects.toThrow(
-      /is not registered on WhatsApp/
-    );
+    await expect(normalizeJid('5491126726818')).rejects.toThrow(/is not registered on WhatsApp/);
   });
 
   // Regression: Baileys onWhatsApp can return undefined (socket disconnected /

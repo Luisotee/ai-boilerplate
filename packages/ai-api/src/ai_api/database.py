@@ -199,6 +199,35 @@ def is_telegram_jid(jid: str) -> bool:
     return jid.startswith("tg:")
 
 
+def _clean_profile_name(name: str | None, whatsapp_jid: str, phone: str | None) -> str | None:
+    """Return the stripped name, or None if it is empty or looks like an identifier.
+
+    *Older* clients fall back to the JID/LID local part (or the phone) when a
+    contact publishes no pushName, and `_display_name` still passes a legacy
+    `sender_name` through for private chats. Storing that would render a bare
+    LID as if it were a person's name. Bots deploy on their own schedule, so
+    this stays a server-side guard even once every client has stopped doing it.
+
+    Known and accepted false negative: a genuinely all-digit business pushName
+    ("1688", "360") is rejected and the row falls back to showing its number.
+    That is the price of the rule that makes a bare LID unstorable, and the
+    safer direction to err in.
+    """
+    cleaned = (name or "").strip()
+    if not cleaned:
+        return None
+    local_part = whatsapp_jid.split("@")[0]
+    rejects = {local_part, f"+{local_part}"}
+    if phone:
+        rejects.update({phone, phone.lstrip("+")})
+    if cleaned in rejects or cleaned.lstrip("+").isdigit():
+        # Logged so a client regression that starts sending identifiers for
+        # every chat is greppable, instead of names just quietly vanishing.
+        logger.debug("Rejected identifier-shaped profile name for %s", whatsapp_jid)
+        return None
+    return cleaned
+
+
 def get_or_create_user(
     db,
     whatsapp_jid: str,
@@ -222,6 +251,8 @@ def get_or_create_user(
     # Auto-extract phone from phone-based JID if not provided
     if not phone:
         phone = phone_from_jid(whatsapp_jid)
+
+    name = _clean_profile_name(name, whatsapp_jid, phone)
 
     # Step 1: Direct lookup by primary identity column
     if is_telegram:
@@ -322,10 +353,15 @@ def save_message(
     embedding: list = None,
     phone: str = None,
     whatsapp_lid: str = None,
+    name: str = None,
 ):
-    """Save a message to the database with optional group context and embedding"""
+    """Save a message to the database with optional group context and embedding
+
+    `name` is the *conversation's* display name (contact pushName or group
+    subject) — not `sender_name`, which in a group is the individual participant.
+    """
     user = get_or_create_user(
-        db, whatsapp_jid, conversation_type, phone=phone, whatsapp_lid=whatsapp_lid
+        db, whatsapp_jid, conversation_type, name=name, phone=phone, whatsapp_lid=whatsapp_lid
     )
     message = ConversationMessage(
         user_id=user.id,
