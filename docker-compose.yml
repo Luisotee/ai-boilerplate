@@ -2,23 +2,23 @@ services:
   # ============== Infrastructure ==============
   postgres:
     image: pgvector/pgvector:pg16
-    container_name: aiagent-postgres
+    container_name: ${SERVICE_NAME:-aiagent}-postgres
     restart: unless-stopped
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
+        max-size: '10m'
+        max-file: '3'
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-aiagent}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB:-aiagent}
     ports:
-      - "127.0.0.1:5432:5432"
+      - '127.0.0.1:${POSTGRES_PORT:-5432}:5432'
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aiagent}"]
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-aiagent}']
       interval: 5s
       timeout: 5s
       retries: 5
@@ -28,25 +28,25 @@ services:
       resources:
         limits:
           memory: 512M
-          cpus: "0.5"
+          cpus: '0.5'
 
   redis:
     image: redis:7-alpine
-    container_name: aiagent-redis
+    container_name: ${SERVICE_NAME:-aiagent}-redis
     restart: unless-stopped
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
+        max-size: '10m'
+        max-file: '3'
     environment:
       REDISCLI_AUTH: ${REDIS_PASSWORD}
     ports:
-      - "127.0.0.1:6379:6379"
+      - '127.0.0.1:${REDIS_PORT:-6379}:6379'
     volumes:
       - redis-data:/data
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli -a \"$$REDISCLI_AUTH\" --no-auth-warning ping | grep -q PONG"]
+      test: ['CMD-SHELL', 'redis-cli -a "$$REDISCLI_AUTH" --no-auth-warning ping | grep -q PONG']
       interval: 5s
       timeout: 3s
       retries: 5
@@ -57,20 +57,20 @@ services:
       resources:
         limits:
           memory: 256M
-          cpus: "0.25"
+          cpus: '0.25'
 
   adminer:
     image: adminer:latest
-    container_name: aiagent-adminer
+    container_name: ${SERVICE_NAME:-aiagent}-adminer
     restart: unless-stopped
-    profiles: ["dev"]
+    profiles: ['dev']
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
+        max-size: '10m'
+        max-file: '3'
     ports:
-      - "127.0.0.1:8080:8080"
+      - '127.0.0.1:${ADMINER_PORT:-8080}:8080'
     depends_on:
       postgres:
         condition: service_healthy
@@ -85,31 +85,34 @@ services:
   # Any variable in .env is automatically available; environment > env_file.
 
   api:
-    image: aiagent-api:latest
+    image: ${SERVICE_NAME:-aiagent}-api:latest
     build:
       context: ./packages/ai-api
       dockerfile: Dockerfile
       args:
         # Set INSTALL_DOCLING=true in your shell to bake the Docling fallback
         # into the image (adds ~1GB for poppler/tesseract + docling deps).
-        INSTALL_DOCLING: "${INSTALL_DOCLING:-false}"
-    container_name: aiagent-api
+        INSTALL_DOCLING: '${INSTALL_DOCLING:-false}'
+    container_name: ${SERVICE_NAME:-aiagent}-api
     restart: unless-stopped
     env_file: .env
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
+        max-size: '10m'
+        max-file: '3'
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-aiagent}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-aiagent}
       REDIS_HOST: redis
+      # Pin the in-cluster redis port: .env REDIS_PORT may be remapped for the
+      # host/local-dev mapping, but containers always reach redis on 6379.
+      REDIS_PORT: 6379
       KB_UPLOAD_DIR: /app/knowledge_base
       WHATSAPP_CLIENT_URL: http://whatsapp:3001
       WHATSAPP_CLOUD_CLIENT_URL: http://whatsapp-cloud:3002
       TELEGRAM_CLIENT_URL: http://telegram:3003
     ports:
-      - "8000:8000"
+      - '${AI_API_PORT:-8000}:8000'
     volumes:
       - knowledge-base-data:/app/knowledge_base
     depends_on:
@@ -118,7 +121,13 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      test:
+        [
+          'CMD',
+          'python',
+          '-c',
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')",
+        ]
       interval: 30s
       timeout: 10s
       start_period: 30s
@@ -129,24 +138,26 @@ services:
       resources:
         limits:
           memory: 2G
-          cpus: "1.5"
+          cpus: '1.5'
 
   worker:
     # Reuses the image built by the `api` service — `depends_on: api` below
     # guarantees the image exists before this container starts.
-    image: aiagent-api:latest
-    container_name: aiagent-worker
-    command: ["python", "-m", "ai_api.scripts.run_stream_worker"]
+    image: ${SERVICE_NAME:-aiagent}-api:latest
+    container_name: ${SERVICE_NAME:-aiagent}-worker
+    command: ['python', '-m', 'ai_api.scripts.run_stream_worker']
     restart: unless-stopped
     env_file: .env
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
+        max-size: '10m'
+        max-file: '3'
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-aiagent}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-aiagent}
       REDIS_HOST: redis
+      # Pin the in-cluster redis port (see api service above).
+      REDIS_PORT: 6379
       KB_UPLOAD_DIR: /app/knowledge_base
       WHATSAPP_CLIENT_URL: http://whatsapp:3001
       WHATSAPP_CLOUD_CLIENT_URL: http://whatsapp-cloud:3002
@@ -166,32 +177,36 @@ services:
       resources:
         limits:
           memory: 2G
-          cpus: "1.5"
+          cpus: '1.5'
 
   whatsapp:
     build:
       context: .
       dockerfile: packages/whatsapp-client/Dockerfile
-    container_name: aiagent-whatsapp
+    container_name: ${SERVICE_NAME:-aiagent}-whatsapp
     restart: unless-stopped
     env_file: .env
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
+        max-size: '10m'
+        max-file: '3'
     environment:
       AI_API_URL: http://api:8000
       WHATSAPP_API_HOST: 0.0.0.0
+      # Pin the in-cluster listen port: .env WHATSAPP_API_PORT may be remapped
+      # for the host mapping, but the container always listens on 3001 (matching
+      # the healthcheck and http://whatsapp:3001 used by the API).
+      WHATSAPP_API_PORT: 3001
     ports:
-      - "3001:3001"
+      - '${WHATSAPP_API_PORT:-3001}:3001'
     volumes:
       - whatsapp-session:/app/packages/whatsapp-client/auth_info_baileys
     depends_on:
       api:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/health"]
+      test: ['CMD', 'wget', '--no-verbose', '--tries=1', '--spider', 'http://localhost:3001/health']
       interval: 30s
       timeout: 10s
       start_period: 10s
@@ -202,7 +217,7 @@ services:
       resources:
         limits:
           memory: 512M
-          cpus: "0.5"
+          cpus: '0.5'
 
   # Self-hosted Whisper (OpenAI-compatible STT). Opt-in:
   #   docker compose --profile whisper up -d
@@ -210,16 +225,16 @@ services:
   # Switch to `:latest-cuda` + uncomment the deploy.reservations block for GPU.
   whisper:
     image: ghcr.io/speaches-ai/speaches:latest-cpu
-    container_name: aiagent-whisper
+    container_name: ${SERVICE_NAME:-aiagent}-whisper
     restart: unless-stopped
-    profiles: ["whisper"]
+    profiles: ['whisper']
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
+        max-size: '10m'
+        max-file: '3'
     ports:
-      - "127.0.0.1:8771:8000"
+      - '127.0.0.1:${WHISPER_PORT:-8771}:8000'
     volumes:
       # speaches runs as non-root `ubuntu` with $HOME=/home/ubuntu — this
       # mount target must match or model downloads won't persist across restarts.
@@ -231,7 +246,13 @@ services:
     healthcheck:
       # speaches-specific — `/health` is exposed by the speaches image. If you
       # swap images, update this healthcheck (or remove it and rely on depends_on).
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      test:
+        [
+          'CMD',
+          'python',
+          '-c',
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')",
+        ]
       interval: 30s
       timeout: 10s
       # speaches starts serving /health immediately, but models are NOT lazy-
@@ -246,7 +267,7 @@ services:
       resources:
         limits:
           memory: 3G
-          cpus: "2.0"
+          cpus: '2.0'
       # GPU (uncomment and switch image tag to `:latest-cuda`):
       # resources:
       #   reservations:
@@ -267,9 +288,9 @@ services:
   # pre-load models yourself.
   whisper-init:
     image: curlimages/curl:8.10.1
-    container_name: aiagent-whisper-init
-    profiles: ["whisper"]
-    restart: "no"
+    container_name: ${SERVICE_NAME:-aiagent}-whisper-init
+    profiles: ['whisper']
+    restart: 'no'
     depends_on:
       whisper:
         condition: service_healthy
@@ -291,25 +312,27 @@ services:
     build:
       context: .
       dockerfile: packages/whatsapp-cloud/Dockerfile
-    container_name: aiagent-whatsapp-cloud
+    container_name: ${SERVICE_NAME:-aiagent}-whatsapp-cloud
     restart: unless-stopped
-    profiles: ["cloud"]
+    profiles: ['cloud']
     env_file: .env
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
+        max-size: '10m'
+        max-file: '3'
     environment:
       AI_API_URL: http://api:8000
       WHATSAPP_CLOUD_HOST: 0.0.0.0
+      # Pin the in-cluster listen port (see whatsapp service above).
+      WHATSAPP_CLOUD_PORT: 3002
     ports:
-      - "3002:3002"
+      - '${WHATSAPP_CLOUD_PORT:-3002}:3002'
     depends_on:
       api:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3002/health"]
+      test: ['CMD', 'wget', '--no-verbose', '--tries=1', '--spider', 'http://localhost:3002/health']
       interval: 30s
       timeout: 10s
       start_period: 10s
@@ -320,31 +343,33 @@ services:
       resources:
         limits:
           memory: 512M
-          cpus: "0.5"
+          cpus: '0.5'
 
   telegram:
     build:
       context: .
       dockerfile: packages/telegram-client/Dockerfile
-    container_name: aiagent-telegram
+    container_name: ${SERVICE_NAME:-aiagent}-telegram
     restart: unless-stopped
-    profiles: ["telegram"]
+    profiles: ['telegram']
     env_file: .env
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
+        max-size: '10m'
+        max-file: '3'
     environment:
       AI_API_URL: http://api:8000
       TELEGRAM_HOST: 0.0.0.0
+      # Pin the in-cluster listen port (see whatsapp service above).
+      TELEGRAM_PORT: 3003
     ports:
-      - "3003:3003"
+      - '${TELEGRAM_PORT:-3003}:3003'
     depends_on:
       api:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3003/health"]
+      test: ['CMD', 'wget', '--no-verbose', '--tries=1', '--spider', 'http://localhost:3003/health']
       interval: 30s
       timeout: 10s
       start_period: 10s
@@ -355,7 +380,7 @@ services:
       resources:
         limits:
           memory: 512M
-          cpus: "0.5"
+          cpus: '0.5'
 
 volumes:
   postgres-data:
@@ -365,5 +390,8 @@ volumes:
   whisper-cache:
 
 networks:
+  # The key 'aiagent-network' is the internal alias each service references; the
+  # actual created network is named ${SERVICE_NAME}-network.
   aiagent-network:
+    name: ${SERVICE_NAME:-aiagent}-network
     driver: bridge
