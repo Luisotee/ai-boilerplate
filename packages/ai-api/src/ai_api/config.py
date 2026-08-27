@@ -157,6 +157,11 @@ class Settings(BaseSettings):
     db_pool_pre_ping: bool = True
     db_echo_pool: bool = False
 
+    # Observability — Logfire is disabled entirely unless a write token is set.
+    # Read once at startup by instrument.py; changing them needs a restart.
+    logfire_token: str | None = None
+    logfire_environment: str = "development"
+
     model_config = SettingsConfigDict(
         env_file=get_env_files(),
         env_file_encoding="utf-8",

@@ -222,6 +222,21 @@ REGISTRY: tuple[SettingSpec, ...] = (
     ),
     SettingSpec("redis_host", "str", False, "infra", "Redis host (applied at startup)."),
     SettingSpec("redis_port", "int", False, "infra", "Redis port (applied at startup)."),
+    SettingSpec(
+        "logfire_token",
+        "str",
+        False,
+        "runtime",
+        "Logfire write token; blank disables tracing (applied at startup).",
+        secret=True,
+    ),
+    SettingSpec(
+        "logfire_environment",
+        "str",
+        False,
+        "runtime",
+        "Logfire environment label (applied at startup).",
+    ),
 )
 
 REGISTRY_BY_KEY: dict[str, SettingSpec] = {spec.key: spec for spec in REGISTRY}

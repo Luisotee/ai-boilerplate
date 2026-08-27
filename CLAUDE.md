@@ -125,6 +125,12 @@ cd packages/ai-api && uv run pytest tests/unit  # AI API unit tests only
 ## Observability
 
 - **Sentry**: Error tracking is opt-in via `SENTRY_DSN_NODE`. Each TS package has `src/instrument.ts` which must be imported first in `main.ts` (before `config.ts`) so Sentry's OpenTelemetry hooks load before other modules. When `SENTRY_DSN_NODE` is unset, `instrument.ts` is a no-op and `Sentry.setupFastifyErrorHandler` is skipped.
+- **Logfire (LLM token + cost tracking)**: Opt-in via `LOGFIRE_TOKEN` (Python AI API only). `src/ai_api/instrument.py` is the Python mirror of `instrument.ts` — `setup_instrumentation(service_name)` calls `logfire.configure(send_to_logfire="if-token-present", ...)` then `logfire.instrument_pydantic_ai(include_content=False)`. `"if-token-present"` means the whole thing is a silent no-op (no error, no network) when the token is unset
+  - **Must be invoked in BOTH entrypoints**: `main.py` (service `ai-api`, called at the top of the file before any other import, so instrumentation is in place before `agent/core.py` builds the module-level `Agent`) and `scripts/run_stream_worker.py` (service `ai-api-worker`, inside `main()`). **The agent runs in the worker**, so instrumenting only the API yields zero LLM spans — that's also the end-to-end check: traces should appear under `ai-api-worker`
+  - `agent/core.py` and `agent/response.py` are deliberately untouched: `instrument_pydantic_ai()` is global, so the `Agent` singleton and the per-run `build_runtime_model()` need no `instrument=True` kwarg
+  - **`include_content=False` is a privacy guarantee, not a preference** — it excludes prompts, completions, and tool args/results while keeping `gen_ai.usage.*` token counts and the `operation.cost` metric. Locked down by `tests/unit/test_instrument.py`. Consequence: Logfire answers "what is this costing me", *not* "what did the bot say" — use the existing logs for that
+  - Dollar costs come from the `genai-prices` dataset, which is **not** a hard dependency of Logfire — it's a separate explicit dep in `pyproject.toml`. Prices are resolved per model name, so a hot `gemini_model` switch via `PATCH /admin/settings` is costed correctly with no local price table
+  - `LOGFIRE_TOKEN` / `LOGFIRE_ENVIRONMENT` reach both containers through `env_file: .env` — no `docker-compose.yml` entry needed. Both are `hot=False` in the `runtime_config` REGISTRY (read once at startup; restart to change)
 
 ## Database
 

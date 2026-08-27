@@ -157,6 +157,7 @@ if [ "$SKIP_ENV" = false ]; then
     META_PHONE_NUMBER_ID META_ACCESS_TOKEN META_APP_SECRET META_WEBHOOK_VERIFY_TOKEN
     STT_PROVIDER WHISPER_MODEL WHISPER_TIMEOUT_SECONDS INSTALL_DOCLING
     TELEGRAM_BOT_TOKEN TELEGRAM_WEBHOOK_SECRET
+    LOGFIRE_TOKEN LOGFIRE_ENVIRONMENT
   )
   MISSING_KEYS=()
   for key in "${REQUIRED_KEYS[@]}"; do
@@ -404,6 +405,31 @@ if [ "$SKIP_ENV" = false ]; then
     else
       print_warning "Skipped self-hosted Whisper — enable later by uncommenting WHISPER_BASE_URL in .env"
     fi
+  fi
+
+  # ── Optional: Logfire (LLM cost tracking) ─────────────
+  echo ""
+  echo "  Logfire tracks how many tokens each conversation uses and what it costs."
+  echo "  Free tier: 10M records/month, hard-capped at \$0 — it can never bill you."
+  echo "  Message content is NOT sent: token counts, cost and latency only."
+  read -rp "  Set up Logfire for LLM cost tracking? (y/N): " SETUP_LOGFIRE
+  if [[ "$SETUP_LOGFIRE" =~ ^[Yy]$ ]]; then
+    echo -e "  ${YELLOW}Create a project and write token at: https://logfire.pydantic.dev${NC}"
+    read -rsp "  LOGFIRE_TOKEN: " LOGFIRE_KEY
+    echo
+    LOGFIRE_KEY=$(sanitize "$LOGFIRE_KEY")
+    if [ -n "$LOGFIRE_KEY" ]; then
+      sed -i "s|^LOGFIRE_TOKEN=.*|LOGFIRE_TOKEN=$(escape_sed "$LOGFIRE_KEY")|" "$ENV_FILE"
+      read -rp "  LOGFIRE_ENVIRONMENT (Enter for 'development'): " LOGFIRE_ENV
+      LOGFIRE_ENV=$(sanitize "${LOGFIRE_ENV:-development}")
+      sed -i "s|^LOGFIRE_ENVIRONMENT=.*|LOGFIRE_ENVIRONMENT=$(escape_sed "$LOGFIRE_ENV")|" "$ENV_FILE"
+      print_success "Logfire configured (environment: $LOGFIRE_ENV)"
+      echo "  Traces appear under the 'ai-api-worker' service — that's the process running the agent."
+    else
+      print_warning "LOGFIRE_TOKEN left empty — cost tracking stays disabled"
+    fi
+  else
+    print_warning "Skipped Logfire — set LOGFIRE_TOKEN in .env later to enable cost tracking"
   fi
 fi
 

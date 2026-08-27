@@ -1,3 +1,9 @@
+# Must run before agent/core.py is imported (via .routes below) so Pydantic AI
+# instrumentation is in place before the module-level Agent is constructed.
+from .instrument import setup_instrumentation  # isort: skip
+
+setup_instrumentation("ai-api")
+
 import asyncio
 import hmac
 from contextlib import asynccontextmanager

@@ -172,6 +172,21 @@ pnpm dev:queue                           # Terminal 3: background worker
 2. The AI agent responds with context-aware replies
 3. API docs available at http://localhost:8000/docs
 
+### LLM cost tracking (optional)
+
+To see how many input/output tokens each conversation burns and what it costs in dollars, create a free project at [logfire.pydantic.dev](https://logfire.pydantic.dev), generate a write token, and set it in `.env`:
+
+```
+LOGFIRE_TOKEN=your-write-token
+LOGFIRE_ENVIRONMENT=production
+```
+
+Restart the `api` and `worker` services. Every agent run then appears in Logfire with `gen_ai.usage.input_tokens` / `output_tokens` and an `operation.cost` value priced from the [genai-prices](https://github.com/pydantic/genai-prices) dataset — so costs stay correct even when you switch models via `PATCH /admin/settings`. Traces show up under the **`ai-api-worker`** service, since the worker is the process that runs the agent.
+
+The free tier covers 10M records/month and is hard-capped at $0 — it can never bill you; ingestion simply pauses at the limit. With `LOGFIRE_TOKEN` empty, instrumentation is a complete no-op.
+
+**Message content is deliberately not captured.** Instrumentation runs with `include_content=False`, so token counts, cost, latency, model name, and tool names are recorded but prompts and replies never leave your infrastructure. Logfire answers "what is this costing me", not "what did the bot say" — use the service logs for that.
+
 ## API Endpoints
 
 ### Chat
@@ -233,6 +248,8 @@ pnpm format          # Format all code
 | `DATABASE_URL` | PostgreSQL connection string |
 | `REDIS_URL` | Redis connection string |
 | `AI_API_URL` | AI API endpoint for WhatsApp client |
+| `LOGFIRE_TOKEN` | Pydantic Logfire write token for LLM token/cost tracking (optional; empty disables it) |
+| `LOGFIRE_ENVIRONMENT` | Environment label shown in the Logfire UI (default `development`) |
 
 See `packages/*/.env.example` for full configuration options.
 
