@@ -32,3 +32,6 @@ postgres-data/
 *.swo
 
 serena/
+
+# Logfire — `logfire auth` writes a live write token here
+.logfire/

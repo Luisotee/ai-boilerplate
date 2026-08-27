@@ -1,42 +1,91 @@
 """Unit tests for opt-in Logfire instrumentation (instrument.py).
 
-The `include_content=False` assertion is the privacy guarantee: it is the only
-thing keeping real WhatsApp conversation text out of a third-party service.
+The content-exclusion test is the privacy guarantee: `include_content=False` is
+the only thing keeping real WhatsApp conversation text out of a third-party
+service, so it is verified against real spans rather than a mock's own kwargs.
 """
 
 from unittest.mock import patch
 
+import logfire
+import pytest
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from pydantic_ai import Agent
+from pydantic_ai.models.test import TestModel
+
 from ai_api.instrument import setup_instrumentation
 
 
-def test_configure_uses_if_token_present():
-    """Logfire must be a no-op when no write token is set."""
-    with patch("ai_api.instrument.logfire") as mock_logfire:
-        setup_instrumentation("ai-api")
+class TestTokenGuard:
+    """Logfire must stay completely inert without a write token."""
 
-    kwargs = mock_logfire.configure.call_args.kwargs
-    assert kwargs["send_to_logfire"] == "if-token-present"
+    def test_no_token_never_touches_logfire(self):
+        with patch("ai_api.instrument.settings") as mock_settings:
+            mock_settings.logfire_token = None
+            with patch("ai_api.instrument.logfire") as mock_logfire:
+                setup_instrumentation("ai-api")
+
+        mock_logfire.configure.assert_not_called()
+        mock_logfire.instrument_pydantic_ai.assert_not_called()
+
+    def test_empty_token_is_treated_as_absent(self):
+        with patch("ai_api.instrument.settings") as mock_settings:
+            mock_settings.logfire_token = ""
+            with patch("ai_api.instrument.logfire") as mock_logfire:
+                setup_instrumentation("ai-api")
+
+        mock_logfire.configure.assert_not_called()
+
+    def test_token_is_passed_explicitly(self):
+        """Regression: .env reaches Settings but never os.environ, so Logfire
+        cannot discover the token on its own — it must be handed over."""
+        with patch("ai_api.instrument.settings") as mock_settings:
+            mock_settings.logfire_token = "pylf_v1_us_example"
+            mock_settings.logfire_environment = "production"
+            with patch("ai_api.instrument.logfire") as mock_logfire:
+                setup_instrumentation("ai-api-worker")
+
+        kwargs = mock_logfire.configure.call_args.kwargs
+        assert kwargs["token"] == "pylf_v1_us_example"
+        assert kwargs["service_name"] == "ai-api-worker"
+        assert kwargs["environment"] == "production"
 
 
-def test_message_content_is_not_captured():
-    """Prompts, completions, and tool args must never be sent to Logfire."""
-    with patch("ai_api.instrument.logfire") as mock_logfire:
-        setup_instrumentation("ai-api")
+class TestContentExclusion:
+    """Real spans, real agent run — no mocks standing in for the SDK."""
 
-    mock_logfire.instrument_pydantic_ai.assert_called_once_with(include_content=False)
+    @pytest.fixture
+    def exported_spans(self):
+        """Run an agent through instrumented Logfire, capturing spans locally."""
+        from logfire.testing import TestExporter
 
+        exporter = TestExporter()
+        logfire.configure(
+            send_to_logfire=False,
+            console=False,
+            additional_span_processors=[SimpleSpanProcessor(exporter)],
+        )
+        logfire.instrument_pydantic_ai(include_content=False)
 
-def test_service_name_is_propagated():
-    """The two processes must be distinguishable in the Logfire UI."""
-    with patch("ai_api.instrument.logfire") as mock_logfire:
-        setup_instrumentation("ai-api-worker")
+        agent = Agent(TestModel(), name="privacy_probe")
+        agent.run_sync(self.CANARY)
 
-    assert mock_logfire.configure.call_args.kwargs["service_name"] == "ai-api-worker"
+        yield exporter.exported_spans
 
+        # Leave global instrumentation off for any test that runs after this one.
+        Agent.instrument_all(False)
 
-def test_console_exporter_disabled():
-    """stdout logging is already handled by logger.py — avoid duplicate output."""
-    with patch("ai_api.instrument.logfire") as mock_logfire:
-        setup_instrumentation("ai-api")
+    CANARY = "SUPERSECRETUSERMESSAGE about my bank account"
 
-    assert mock_logfire.configure.call_args.kwargs["console"] is False
+    def test_message_content_is_not_captured(self, exported_spans):
+        for span in exported_spans:
+            for key, value in (span.attributes or {}).items():
+                assert self.CANARY not in str(value), f"leaked via attribute {key!r}"
+
+    def test_token_usage_is_still_captured(self, exported_spans):
+        attrs = {}
+        for span in exported_spans:
+            attrs.update(dict(span.attributes or {}))
+
+        assert attrs.get("gen_ai.usage.input_tokens", 0) > 0
+        assert attrs.get("gen_ai.usage.output_tokens", 0) > 0

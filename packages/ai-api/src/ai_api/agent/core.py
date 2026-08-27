@@ -40,6 +40,10 @@ google_provider = GoogleProvider(api_key=settings.gemini_api_key)
 google_model = GoogleModel(settings.gemini_model, provider=google_provider)
 
 # Create the AI agent with dependencies
+# Do NOT pass instrument= here. instrument.py enables Logfire globally via
+# instrument_pydantic_ai(), which sets the Agent._instrument_default ClassVar;
+# a per-agent instrument= takes precedence over it and would silently disable
+# token/cost tracking. Leaving it unset is what makes the global setting apply.
 agent = Agent(
     model=google_model,
     deps_type=AgentDeps,

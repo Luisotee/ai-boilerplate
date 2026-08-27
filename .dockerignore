@@ -32,3 +32,6 @@ packages/*/.env.*
 # Other
 *.md
 !packages/*/README.md
+
+# Logfire local credentials (never bake a write token into an image)
+.logfire/
