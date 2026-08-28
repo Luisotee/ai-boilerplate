@@ -15,6 +15,12 @@ a restart. These tests patch that accessor.
 from unittest.mock import patch
 
 from ai_api.routes.chat import _is_whitelisted, _parse_whitelist
+from ai_api.whitelist import (
+    _PHONE_DIGITS,
+    DEVICE_SUFFIX,
+    parse_whitelist,
+    phone_digits,
+)
 
 
 def _patch_whitelist(value: str):
@@ -143,6 +149,103 @@ class TestParseWhitelistCache:
         assert wl.phones == frozenset({"4915755945319"})
         assert "tg:-1001234567890" in wl.ids
         _parse_whitelist.cache_clear()
+
+
+class TestNamespaceScoping:
+    """A phone entry's NORMALIZED digits must not admit a same-digit chat in
+    another namespace. Pre-split those entries matched nothing at all."""
+
+    PHONE = "4915755945319"
+
+    def test_phone_jid_entry_does_not_admit_a_lid(self):
+        with _patch_whitelist(f"{self.PHONE}@s.whatsapp.net"):
+            assert _is_whitelisted(f"{self.PHONE}@lid") is False
+
+    def test_cosmetic_entry_does_not_cross_namespaces(self):
+        with _patch_whitelist("+49 157 5594 5319"):
+            for jid in (f"{self.PHONE}@lid", f"{self.PHONE}@g.us", f"{self.PHONE}@broadcast"):
+                assert _is_whitelisted(jid) is False, jid
+
+    def test_cosmetic_entry_still_admits_its_own_chat(self):
+        with _patch_whitelist("+49 157 5594 5319"):
+            assert _is_whitelisted(f"{self.PHONE}@s.whatsapp.net") is True
+            assert _is_whitelisted("109994229891095@lid", f"+{self.PHONE}") is True
+
+    def test_pins_the_legacy_namespace_blind_bare_entry_match(self):
+        # PINNED, NOT A BUG. A bare entry is an untyped local part and stays
+        # namespace-blind: exactly what `jid.split("@")[0] in whitelist` did
+        # pre-split, and the same code path that keeps a bare "120363..."
+        # admitting its group. Do NOT "fix" without a migration note.
+        with _patch_whitelist(self.PHONE):
+            for jid in (f"{self.PHONE}@lid", f"{self.PHONE}@g.us", f"{self.PHONE}@broadcast"):
+                assert _is_whitelisted(jid) is True, jid
+
+
+class TestDeviceSuffixedEntries:
+    PHONE = "4915755945319"
+    ENTRY = "4915755945319:50@s.whatsapp.net"
+
+    def test_parses_to_verbatim_and_stripped_ids_plus_the_phone(self):
+        wl = parse_whitelist(self.ENTRY)
+        assert wl.ids == frozenset({self.ENTRY, f"{self.PHONE}@s.whatsapp.net"})
+        assert wl.phones == frozenset({self.PHONE})
+        assert wl.size == 1
+
+    def test_matches_the_plain_jid_and_a_resolved_lid(self):
+        with _patch_whitelist(self.ENTRY):
+            assert _is_whitelisted(f"{self.PHONE}@s.whatsapp.net") is True
+            assert _is_whitelisted("109994229891095@lid", f"+{self.PHONE}") is True
+
+    def test_tg_entries_are_untouched(self):
+        wl = parse_whitelist("tg:-1001234567890, tg:42")
+        assert wl.ids == frozenset({"tg:-1001234567890", "tg:42"})
+        assert wl.phones == frozenset()
+
+
+class TestPythonParityWithTypeScript:
+    """Each of these was a real divergence where the Python backstop accepted an
+    entry the TS gate rejects. A backstop looser than the gate it backs up is the
+    wrong direction, so they must all reject."""
+
+    def test_double_plus_rejected(self):
+        # str.lstrip("+") ate a run of them; JS /^\+/ strips exactly one.
+        assert phone_digits("++4915755945319") is None
+
+    def test_non_ascii_digits_rejected(self):
+        # Python's \d is Unicode-aware; JS's is [0-9].
+        assert phone_digits("\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668") is None
+
+    def test_trailing_newline_is_stripped_in_both_engines(self):
+        # Not a divergence: U+000A is in the shared punctuation class, so both
+        # engines strip it before the digit check and both accept. Verified
+        # against the TS matcher.
+        assert phone_digits("4915755945319\n") == "4915755945319"
+
+    def test_digit_pattern_uses_fullmatch_not_a_dollar_anchor(self):
+        # The class above currently masks this, but Python's "$" also matches
+        # BEFORE a trailing newline while JS's does not — so if the punctuation
+        # class is ever narrowed, `re.match(r"^\d{5,}$", ...)` would silently
+        # start accepting what the TS gate rejects. fullmatch cannot.
+        assert _PHONE_DIGITS.fullmatch("4915755945319\n") is None
+        assert _PHONE_DIGITS.fullmatch("4915755945319") is not None
+
+    def test_device_suffix_sub_replaces_only_the_first_match(self):
+        # JS String.replace without /g is first-match only.
+        assert DEVICE_SUFFIX.sub("@", "1:2@3:4@s.whatsapp.net", count=1) == "1@3:4@s.whatsapp.net"
+
+    def test_non_ascii_device_suffix_is_not_stripped(self):
+        with _patch_whitelist("4915755945319"):
+            assert _is_whitelisted("4915755945319:\u0661\u0662@s.whatsapp.net") is False
+
+    def test_nbsp_separator_accepted_like_js(self):
+        # JS \s includes NBSP, so the backstop must too (re.ASCII would not).
+        assert phone_digits("+49\u00a0157\u00a05594\u00a05319") == "4915755945319"
+
+    def test_documented_dot_separator_accepted(self):
+        assert phone_digits("49.157.5594.5319") == "4915755945319"
+
+    def test_below_the_five_digit_floor_is_not_a_phone(self):
+        assert phone_digits("1234") is None
 
 
 class TestWhitelistOverridePropagation:

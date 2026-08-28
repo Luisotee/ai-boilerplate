@@ -919,3 +919,65 @@ async def test_whatsapp_logout_requires_auth(*_):
     async with _client(app) as client:
         resp = await client.post("/admin/whatsapp/logout")
     assert resp.status_code == 401
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_patch_whitelist_empty_rejected(self, *_):
+        """An empty whitelist means "allow everyone", and the stored override
+        shadows the env value across restarts — so clearing a dashboard field to
+        "revert to default" would silently disable the gate for good."""
+        app = _app_with_db(_make_mock_db())
+        try:
+            async with _client(app) as client:
+                for value in ("", "   ", ",", " , , "):
+                    resp = await client.patch(
+                        "/admin/settings",
+                        json={"overrides": {"whitelist_phones": value}},
+                        headers=AUTH_HEADERS,
+                    )
+                    assert resp.status_code == 400, value
+                    assert "DELETE /admin/settings/whitelist_phones" in resp.json()["detail"]
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_patch_whitelist_too_long_rejected(self, *_):
+        app = _app_with_db(_make_mock_db())
+        try:
+            async with _client(app) as client:
+                resp = await client.patch(
+                    "/admin/settings",
+                    json={"overrides": {"whitelist_phones": "4915755945319," * 400}},
+                    headers=AUTH_HEADERS,
+                )
+            assert resp.status_code == 400
+            assert "too long" in resp.json()["detail"]
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_patch_whitelist_accepted(self, *_):
+        app = _app_with_db(_make_mock_db())
+        try:
+            with (
+                patch("ai_api.routes.admin.set_setting_overrides_batch") as mock_batch,
+                patch(
+                    "ai_api.routes.admin.get_setting_overrides",
+                    return_value={"whitelist_phones": '"4915755945319"'},
+                ),
+            ):
+                async with _client(app) as client:
+                    resp = await client.patch(
+                        "/admin/settings",
+                        json={"overrides": {"whitelist_phones": "4915755945319"}},
+                        headers=AUTH_HEADERS,
+                    )
+            assert resp.status_code == 200
+            mock_batch.assert_called_once()
+        finally:
+            _cleanup()

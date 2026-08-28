@@ -96,3 +96,83 @@ describe('isWhitelisted', () => {
     expect(isWhitelisted(parseWhitelist('123456789'), 'tg:123456789')).toBe(false);
   });
 });
+
+describe('namespace scoping of the phone set', () => {
+  // A phone entry's NORMALIZED digits must not admit a same-digit chat in
+  // another namespace. Pre-split these entries matched nothing at all, so
+  // narrowing them cannot regress anyone.
+  it('a phone-JID entry does not admit the same digits as a LID', () => {
+    expect(isWhitelisted(parseWhitelist(PHONE_JID), `${PHONE}@lid`)).toBe(false);
+  });
+
+  it('a cosmetic phone entry does not admit the same digits elsewhere', () => {
+    for (const jid of [`${PHONE}@lid`, `${PHONE}@g.us`, `${PHONE}@broadcast`]) {
+      expect(isWhitelisted(parseWhitelist('+49 157 5594 5319'), jid), jid).toBe(false);
+    }
+  });
+
+  it('but still admits its intended phone chat', () => {
+    expect(isWhitelisted(parseWhitelist('+49 157 5594 5319'), PHONE_JID)).toBe(true);
+    expect(isWhitelisted(parseWhitelist('+49 157 5594 5319'), LID, `+${PHONE}`)).toBe(true);
+  });
+
+  // PINNED, NOT A BUG. A BARE entry is an untyped local part and stays
+  // namespace-blind: that is exactly what `jid.split('@')[0] in whitelist` did
+  // before the two-set split, and it is the same code path that keeps a bare
+  // `120363…` admitting its group. Nothing distinguishes a bare group id from
+  // a bare phone. Do NOT "fix" this without a migration note.
+  it('pins the legacy namespace-blind bare-entry match', () => {
+    for (const jid of [`${PHONE}@lid`, `${PHONE}@g.us`, `${PHONE}@broadcast`]) {
+      expect(isWhitelisted(parseWhitelist(PHONE), jid), jid).toBe(true);
+    }
+  });
+});
+
+describe('device-suffixed entries', () => {
+  const DEV_ENTRY = `${PHONE}:50@s.whatsapp.net`;
+
+  it('parses to both the verbatim and the stripped id, plus the phone', () => {
+    const wl = parseWhitelist(DEV_ENTRY);
+    expect(wl.ids).toEqual(new Set([DEV_ENTRY, PHONE_JID]));
+    expect(wl.phones).toEqual(new Set([PHONE]));
+    expect(wl.size).toBe(1);
+  });
+
+  it('matches the plain phone JID and a resolved LID', () => {
+    expect(isWhitelisted(parseWhitelist(DEV_ENTRY), PHONE_JID)).toBe(true);
+    expect(isWhitelisted(parseWhitelist(DEV_ENTRY), LID, `+${PHONE}`)).toBe(true);
+  });
+
+  it('leaves tg: entries untouched (":\\d+@" needs an @, which tg: ids lack)', () => {
+    const wl = parseWhitelist('tg:-1001234567890, tg:42');
+    expect(wl.ids).toEqual(new Set(['tg:-1001234567890', 'tg:42']));
+    expect(wl.phones.size).toBe(0);
+  });
+});
+
+describe('phoneDigits strictness (the TS half of the TS/Python parity contract)', () => {
+  it('rejects a doubled plus', () => {
+    expect(parseWhitelist(`++${PHONE}`).phones.size).toBe(0);
+  });
+
+  it('rejects non-ASCII digits', () => {
+    expect(parseWhitelist('\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668').phones.size).toBe(0);
+  });
+
+  it('rejects a trailing newline after the digits', () => {
+    expect(parseWhitelist(`${PHONE}\n`).phones.has(PHONE)).toBe(true); // trim() eats it
+    expect(parseWhitelist(`${PHONE}5\u000b`).phones.size).toBe(1); // vertical tab is punctuation
+  });
+
+  it('accepts a non-breaking space, as pasted from a web page', () => {
+    expect(isWhitelisted(parseWhitelist('+49\u00a0157\u00a05594\u00a05319'), PHONE_JID)).toBe(true);
+  });
+
+  it('accepts the documented "." separator', () => {
+    expect(isWhitelisted(parseWhitelist('49.157.5594.5319'), PHONE_JID)).toBe(true);
+  });
+
+  it('ignores numeric entries below the 5-digit floor', () => {
+    expect(parseWhitelist('1234').phones.size).toBe(0);
+  });
+});

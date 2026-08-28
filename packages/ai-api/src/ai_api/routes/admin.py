@@ -49,6 +49,7 @@ from ..schemas import (
     WhatsAppStatusResponse,
 )
 from ..whatsapp import WhatsAppClientError, create_whatsapp_client
+from ..whitelist import parse_whitelist
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
@@ -190,16 +191,31 @@ def _validate_cross_constraints(coerced: dict[str, object]) -> None:
                 detail="gemini_model is too long (max 200 characters)",
             )
     if "whitelist_phones" in coerced:
-        # Deliberately no format check: entry shapes are forward-compatible
+        # Deliberately no *format* check: entry shapes are forward-compatible
         # (future JID schemes land in the id set and simply never match), and
-        # normalization happens read-side in _parse_whitelist so /admin echoes
-        # back exactly what the operator typed. Only cap the size.
+        # normalization happens read-side in parse_whitelist so /admin echoes
+        # back exactly what the operator typed.
         value = coerced["whitelist_phones"]
-        if isinstance(value, str) and len(value) > 4000:
-            raise HTTPException(
-                status_code=400,
-                detail="whitelist_phones is too long (max 4000 characters)",
-            )
+        if isinstance(value, str):
+            if len(value) > 4000:
+                raise HTTPException(
+                    status_code=400,
+                    detail="whitelist_phones is too long (max 4000 characters)",
+                )
+            # But an *empty* whitelist means "allow everyone", and an override
+            # shadows the env value across restarts (runtime_config.get prefers
+            # an existing override). So clearing a dashboard field to "revert to
+            # default" would silently disable the gate for good. Refuse, and
+            # point at the only operation that actually reverts.
+            if parse_whitelist(value).size == 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "whitelist_phones cannot be set to an empty list (that would "
+                        "allow every user). Use DELETE /admin/settings/whitelist_phones "
+                        "to revert to the WHITELIST_PHONES value from the environment."
+                    ),
+                )
 
 
 @router.get("/settings", response_model=SettingsResponse)
@@ -246,6 +262,16 @@ async def patch_settings(request: UpdateSettingsRequest, db: Session = Depends(g
 
     runtime_config.invalidate()
     logger.info("Runtime settings updated: %s", ", ".join(coerced))
+    if "whitelist_phones" in coerced:
+        # Log the parsed shape, not the raw value: an operator needs to see that
+        # the entries they typed actually landed where they expect.
+        wl = parse_whitelist(coerced["whitelist_phones"])
+        logger.info(
+            "Whitelist updated: %d entries (%d phone, %d id)",
+            wl.size,
+            len(wl.phones),
+            len(wl.ids),
+        )
     return _settings_payload(db)
 
 

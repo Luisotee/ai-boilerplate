@@ -26,9 +26,18 @@ export interface Whitelist {
 
 const PHONE_JID_SUFFIX = '@s.whatsapp.net';
 const GROUP_JID_SUFFIX = '@g.us';
-/** Only cosmetic separators — never "all non-digits", which would strip the
- *  sign off `tg:-100…` and leak ids into the phone set. */
-const PHONE_PUNCTUATION = /[\s\-().]/g;
+/**
+ * Only cosmetic separators — never "all non-digits", which would strip the sign
+ * off `tg:-100…` and leak ids into the phone set.
+ *
+ * The whitespace half is the ECMAScript `\s` set written out literally rather
+ * than as `\s`, so the Python mirror can reproduce it exactly: the two engines
+ * disagree (Python's `\s` omits U+FEFF and adds U+0085 / U+001C–001F, and
+ * `re.ASCII` drops NBSP and U+2000–200A). A backstop that accepts an entry the
+ * gate rejects is the wrong direction, so both sides pin the same 25 codepoints.
+ */
+const PHONE_PUNCTUATION =
+  /[\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff\-().]/g;
 const DEVICE_SUFFIX = /:\d+@/;
 
 /** Digits of a phone-shaped value, or null if it isn't one. */
@@ -51,9 +60,22 @@ export function parseWhitelist(raw: string): Whitelist {
     ids.add(trimmed);
 
     if (trimmed.startsWith('tg:')) continue;
-    const local = trimmed.endsWith(PHONE_JID_SUFFIX)
-      ? trimmed.slice(0, -PHONE_JID_SUFFIX.length)
-      : trimmed;
+
+    // A device-suffixed entry ("…:50@s.whatsapp.net") would otherwise be dead:
+    // matching strips the suffix off the incoming jid, so the entry could never
+    // equal it. Normalize the entry the same way — BEFORE the @s.whatsapp.net
+    // strip, since the suffix sits in front of the '@'. Additive: the verbatim
+    // form stays in `ids`. Safe by construction — DEVICE_SUFFIX requires an '@',
+    // so `normalized` always contains one and is reachable only by the full-jid
+    // clauses, never by the local-part ones. (Checked after the `tg:` continue,
+    // so a Telegram id — always a possibly-negative integer, never an '@' — is
+    // provably untouched rather than merely argued to be.)
+    const normalized = trimmed.replace(DEVICE_SUFFIX, '@');
+    if (normalized !== trimmed) ids.add(normalized);
+
+    const local = normalized.endsWith(PHONE_JID_SUFFIX)
+      ? normalized.slice(0, -PHONE_JID_SUFFIX.length)
+      : normalized;
     // Any residual '@' means a non-phone scheme (@lid, @g.us, future ones).
     if (local.includes('@')) continue;
 
@@ -69,9 +91,11 @@ export function parseWhitelist(raw: string): Whitelist {
  * @param chatJid the CONVERSATION's jid — never a group participant's
  * @param phone   the CONVERSATION's E.164 phone if known ('+49…'), else undefined
  *
- * Groups have no phone of their own, so callers pass `undefined` for them and a
- * group is matchable only by its `…@g.us` id. A participant's whitelisted phone
- * must never admit the whole group.
+ * Groups have no phone of their own, so callers pass `undefined` for them, and
+ * the `phone` ARGUMENT is never consulted for a group jid: a participant's
+ * whitelisted phone must never admit the whole group. That is narrower than
+ * "a group can only be matched by its `@g.us` id" — a legacy bare entry equal
+ * to the group's id still admits it, via the id clause below.
  */
 export function isWhitelisted(wl: Whitelist, chatJid: string, phone?: string | null): boolean {
   if (wl.size === 0) return true;
@@ -84,12 +108,24 @@ export function isWhitelisted(wl: Whitelist, chatJid: string, phone?: string | n
   const at = jid.indexOf('@');
   if (at > 0) {
     const local = jid.slice(0, at);
-    if (wl.phones.has(local) || wl.ids.has(local)) return true;
+    // Deliberately namespace-blind, because this IS the pre-split matcher:
+    // the whole check used to be `jid.split('@')[0] in whitelist`. It is what
+    // keeps a bare `120363…` admitting its group and a bare LID admitting its
+    // chat on existing installs — the same code path for both, since nothing
+    // distinguishes a bare group id from a bare phone (`\d{5,}` matches both).
+    // Cannot be narrowed without breaking documented behaviour; pinned by test.
+    if (wl.ids.has(local)) return true;
+    // Normalized digits, though, are only ever a phone. Consulting them for an
+    // @lid / @g.us / @broadcast local part would let a phone entry admit an
+    // unrelated namespace that merely shares digits — so, phone JIDs only.
+    if (jid.endsWith(PHONE_JID_SUFFIX) && wl.phones.has(local)) return true;
   }
 
-  // A group is never admitted by a phone. Callers pass `undefined` for groups
-  // anyway, but enforcing it here makes the rule structural rather than a
-  // convention every call site has to remember.
+  // The `phone` argument is never consulted for a group. Callers pass
+  // `undefined` for groups anyway, but enforcing it here makes THAT rule
+  // structural rather than a convention every call site has to remember.
+  // Independent of the guard above: this clause reads the caller-supplied
+  // E.164, that one reads the jid's own local part.
   if (phone && !jid.endsWith(GROUP_JID_SUFFIX)) {
     const digits = phoneDigits(phone);
     if (digits && wl.phones.has(digits)) return true;

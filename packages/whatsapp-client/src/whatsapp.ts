@@ -349,7 +349,10 @@ export async function initializeWhatsApp(): Promise<void> {
               remoteJid: msg.key.remoteJid,
               whatsappJid,
               isGroup,
-              phoneResolved: Boolean(phone),
+              // Only meaningful for a private chat: a group has no phone of its
+              // own, so logging phoneResolved:false there would read as a
+              // resolution failure and send the operator after the wrong fix.
+              ...(isGroup ? {} : { phoneResolved: Boolean(phone) }),
             },
             'Skipping non-whitelisted chat'
           );
