@@ -30,6 +30,7 @@ from .routes import (
     speech_router,
 )
 from .scripts.cleanup_expired_documents import cleanup_expired_documents
+from .whitelist import parse_whitelist
 
 
 async def _cleanup_loop():
@@ -64,11 +65,13 @@ async def lifespan(app: FastAPI):
 
     # Startup-only banner: shows the env value at boot. /admin can override it
     # at runtime — chat.py reads the effective value via runtime_config.
-    wl_env = [p.strip() for p in settings.whitelist_phones.split(",") if p.strip()]
-    if wl_env:
+    wl_env = parse_whitelist(settings.whitelist_phones)
+    if wl_env.size:
         logger.info(
-            "User whitelist (startup env): %d entries — overridable via /admin",
-            len(wl_env),
+            "User whitelist (startup env): %d entries (%d phone, %d id) — overridable via /admin",
+            wl_env.size,
+            len(wl_env.phones),
+            len(wl_env.ids),
         )
     else:
         logger.info("User whitelist DISABLED (env) — overridable via /admin")

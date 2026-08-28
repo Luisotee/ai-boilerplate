@@ -47,7 +47,7 @@ vi.mock('../../src/config.js', () => ({
       maxDelayMs: 0,
       maxChunks: 5,
     },
-    whitelistPhones: new Set<string>(),
+    whitelistPhones: { ids: new Set<string>(), phones: new Set<string>(), size: 0 },
   },
 }));
 
