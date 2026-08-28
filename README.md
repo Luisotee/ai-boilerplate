@@ -241,6 +241,7 @@ pnpm format          # Format all code
 | Variable | Description |
 |----------|-------------|
 | `GEMINI_API_KEY` | Google Gemini API key (required) |
+| `GEMINI_MODEL` | Primary chat model (default `gemini-3.1-flash-lite`); any Gemini model ID, hot-swappable via `PATCH /admin/settings` |
 | `LLAMA_CLOUD_API_KEY` | LlamaCloud API key for PDF parsing via LlamaParse (optional; required when `PDF_PARSER=llamaparse` or `auto` without the `[docling]` extra) |
 | `GROQ_API_KEY` | Groq API key (optional, for STT) |
 | `PDF_PARSER` | `auto` (default), `llamaparse`, or `docling` |

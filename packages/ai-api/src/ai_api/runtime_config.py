@@ -152,7 +152,7 @@ REGISTRY: tuple[SettingSpec, ...] = (
         "str",
         True,
         "model",
-        "Primary Gemini model name (e.g. gemini-2.5-flash). Free-form string; "
+        "Primary Gemini model name (e.g. gemini-3.1-flash-lite). Free-form string; "
         "takes effect on the next message (≤ ~10s in the stream worker).",
     ),
     # --- Hot: speech ---

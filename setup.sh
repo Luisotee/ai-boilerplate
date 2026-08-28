@@ -152,7 +152,7 @@ if [ "$SKIP_ENV" = false ]; then
   # otherwise sed substitutions silently no-op and the user ends up with a
   # half-configured .env only discovered at runtime.
   REQUIRED_KEYS=(
-    POSTGRES_PASSWORD REDIS_PASSWORD GEMINI_API_KEY AI_API_KEY
+    POSTGRES_PASSWORD REDIS_PASSWORD GEMINI_API_KEY GEMINI_MODEL AI_API_KEY
     WHATSAPP_API_KEY DATABASE_URL GROQ_API_KEY LLAMA_CLOUD_API_KEY
     META_PHONE_NUMBER_ID META_ACCESS_TOKEN META_APP_SECRET META_WEBHOOK_VERIFY_TOKEN
     STT_PROVIDER WHISPER_MODEL WHISPER_TIMEOUT_SECONDS INSTALL_DOCLING
@@ -198,6 +198,12 @@ if [ "$SKIP_ENV" = false ]; then
     print_error "Gemini API key is required"
   done
 
+  echo ""
+  echo "  Chat model. The default is Google's cheapest tier; change it any time in"
+  echo "  .env, or live via PATCH /admin/settings (no restart needed)."
+  read -rp "  GEMINI_MODEL (Enter for 'gemini-3.1-flash-lite'): " GEMINI_MODEL_IN
+  GEMINI_MODEL_IN=$(sanitize "${GEMINI_MODEL_IN:-gemini-3.1-flash-lite}")
+
   # Inter-service auth keys
   echo ""
   echo "  Inter-service authentication keys (used internally between services)."
@@ -221,6 +227,7 @@ if [ "$SKIP_ENV" = false ]; then
   sed -i "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$(escape_sed "$PG_PASS")|" "$ENV_FILE"
   sed -i "s|^REDIS_PASSWORD=.*|REDIS_PASSWORD=$(escape_sed "$REDIS_PASS")|" "$ENV_FILE"
   sed -i "s|^GEMINI_API_KEY=.*|GEMINI_API_KEY=$(escape_sed "$GEMINI_KEY")|" "$ENV_FILE"
+  sed -i "s|^GEMINI_MODEL=.*|GEMINI_MODEL=$(escape_sed "$GEMINI_MODEL_IN")|" "$ENV_FILE"
   sed -i "s|^AI_API_KEY=.*|AI_API_KEY=$(escape_sed "$AI_KEY")|" "$ENV_FILE"
   sed -i "s|^WHATSAPP_API_KEY=.*|WHATSAPP_API_KEY=$(escape_sed "$WA_KEY")|" "$ENV_FILE"
   sed -i "s|^DATABASE_URL=.*|DATABASE_URL=$(escape_sed "$DATABASE_URL")|" "$ENV_FILE"
