@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     # Required
     database_url: str
     gemini_api_key: str
-    gemini_model: str = "gemini-2.5-flash"  # primary LLM; overridable at runtime via /admin
+    gemini_model: str = "gemini-3.1-flash-lite"  # primary LLM; overridable at runtime via /admin
 
     # API Authentication
     ai_api_key: str  # Required — app fails to start if not set
@@ -156,6 +156,11 @@ class Settings(BaseSettings):
     db_pool_recycle: int = 3600
     db_pool_pre_ping: bool = True
     db_echo_pool: bool = False
+
+    # Observability — Logfire is disabled entirely unless a write token is set.
+    # Read once at startup by instrument.py; changing them needs a restart.
+    logfire_token: str | None = None
+    logfire_environment: str = "development"
 
     model_config = SettingsConfigDict(
         env_file=get_env_files(),

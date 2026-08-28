@@ -12,12 +12,17 @@ import asyncio
 from redis.asyncio import Redis
 
 from ..config import settings
+from ..instrument import setup_instrumentation
 from ..logger import logger
 from ..streams.consumer import run_stream_consumer
 
 
 async def main():
     """Main function to start the Redis Streams consumer."""
+    # This is the process that actually runs the Pydantic AI agent, so it is the
+    # one that emits the token-usage and cost metrics.
+    setup_instrumentation("ai-api-worker")
+
     redis = Redis(
         host=settings.redis_host,
         port=settings.redis_port,
