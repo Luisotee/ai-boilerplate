@@ -4,8 +4,8 @@ Unit tests for the whitelist check in ai_api.routes.chat._is_whitelisted.
 Verifies whitelist semantics across JID formats:
 - WhatsApp phone JID (`<phone>@s.whatsapp.net`) — phone-extraction match
 - WhatsApp group JID (`<id>@g.us`) — full-string match
-- Telegram synthetic JID (`tg:<chat_id>`) — full-string match; the
-  `split("@")[0]` fallback is a no-op since there is no `@` in the string
+- Telegram synthetic JID (`tg:<chat_id>`) — full-string match; phone-shaped
+  entries live in a separate set that a `tg:` jid never consults
 
 The whitelist is read at request time via ``runtime_config.get("whitelist_phones")``
 (a comma-separated string), so it can be changed through the /admin API without
@@ -14,7 +14,7 @@ a restart. These tests patch that accessor.
 
 from unittest.mock import patch
 
-from ai_api.routes.chat import _is_whitelisted
+from ai_api.routes.chat import _is_whitelisted, _parse_whitelist
 
 
 def _patch_whitelist(value: str):
@@ -40,7 +40,7 @@ class TestIsWhitelisted:
             assert _is_whitelisted("120363111111111111@g.us") is False
 
     def test_telegram_full_jid_match(self):
-        # For tg: JIDs there is no '@', so split("@")[0] returns the full string.
+        # A tg: jid has no '@', so only the verbatim-id clause can match it.
         # Whitelist entries must be the full "tg:<chat_id>" string.
         with _patch_whitelist("tg:123456789"):
             assert _is_whitelisted("tg:123456789") is True
@@ -63,6 +63,86 @@ class TestIsWhitelisted:
             assert _is_whitelisted("120363000000000000@g.us") is True
             assert _is_whitelisted("tg:42") is True
             assert _is_whitelisted("tg:43") is False
+
+
+class TestLidAddressedChats:
+    """Under Baileys v7 a chat is usually LID-addressed: `whatsapp_jid` is an
+    anonymized `@lid` whose digits are NOT a phone. The resolved E.164 that the
+    client already sends as `phone` is what lets a bare-phone entry match."""
+
+    PHONE = "4915755945319"
+    LID = "109994229891095@lid"
+
+    def test_bare_phone_matches_lid_jid_when_phone_supplied(self):
+        with _patch_whitelist(self.PHONE):
+            assert _is_whitelisted(self.LID, f"+{self.PHONE}") is True
+
+    def test_lid_without_phone_is_blocked(self):
+        # Fail closed: a cold LID<->PN mapping must not open the whitelist.
+        with _patch_whitelist(self.PHONE):
+            assert _is_whitelisted(self.LID) is False
+            assert _is_whitelisted(self.LID, None) is False
+
+    def test_verbatim_lid_entry_is_the_escape_hatch(self):
+        with _patch_whitelist(self.LID):
+            assert _is_whitelisted(self.LID) is True
+
+    def test_wrong_phone_does_not_match(self):
+        with _patch_whitelist(self.PHONE):
+            assert _is_whitelisted(self.LID, "+4915700000000") is False
+
+
+class TestEntryFormats:
+    PHONE = "4915755945319"
+
+    def test_plus_spaced_and_suffixed_entries(self):
+        for entry in (
+            "4915755945319",
+            "+4915755945319",
+            "+49 157 5594 5319",
+            "49-157-5594-5319",
+            "4915755945319@s.whatsapp.net",
+        ):
+            with _patch_whitelist(entry):
+                assert _is_whitelisted(f"{self.PHONE}@s.whatsapp.net") is True, entry
+                assert _is_whitelisted("109994229891095@lid", f"+{self.PHONE}") is True, entry
+
+    def test_device_suffixed_jid_matches(self):
+        with _patch_whitelist(self.PHONE):
+            assert _is_whitelisted(f"{self.PHONE}:50@s.whatsapp.net") is True
+
+    def test_legacy_bare_group_id_still_matches(self):
+        with _patch_whitelist("120363000000000000"):
+            assert _is_whitelisted("120363000000000000@g.us") is True
+
+
+class TestGroupScoping:
+    def test_group_not_allowed_by_participant_phone(self):
+        # A group has no phone of its own; a whitelisted participant must never
+        # admit the whole group.
+        with _patch_whitelist("4915755945319"):
+            assert _is_whitelisted("120363000000000000@g.us", "+4915755945319") is False
+
+
+class TestParseWhitelistCache:
+    def test_cache_holds_a_single_entry(self):
+        _parse_whitelist.cache_clear()
+        raw = "4915755945319, tg:42"
+        first = _parse_whitelist(raw)
+        second = _parse_whitelist(raw)
+        assert first is second
+        info = _parse_whitelist.cache_info()
+        assert info.hits == 1
+        assert info.currsize == 1
+        _parse_whitelist.cache_clear()
+
+    def test_ids_and_phones_are_kept_separate(self):
+        _parse_whitelist.cache_clear()
+        wl = _parse_whitelist("4915755945319, 120363000000000000@g.us, tg:-1001234567890")
+        assert wl.size == 3
+        assert wl.phones == frozenset({"4915755945319"})
+        assert "tg:-1001234567890" in wl.ids
+        _parse_whitelist.cache_clear()
 
 
 class TestWhitelistOverridePropagation:

@@ -189,6 +189,17 @@ def _validate_cross_constraints(coerced: dict[str, object]) -> None:
                 status_code=400,
                 detail="gemini_model is too long (max 200 characters)",
             )
+    if "whitelist_phones" in coerced:
+        # Deliberately no format check: entry shapes are forward-compatible
+        # (future JID schemes land in the id set and simply never match), and
+        # normalization happens read-side in _parse_whitelist so /admin echoes
+        # back exactly what the operator typed. Only cap the size.
+        value = coerced["whitelist_phones"]
+        if isinstance(value, str) and len(value) > 4000:
+            raise HTTPException(
+                status_code=400,
+                detail="whitelist_phones is too long (max 4000 characters)",
+            )
 
 
 @router.get("/settings", response_model=SettingsResponse)

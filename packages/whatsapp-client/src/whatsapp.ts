@@ -25,6 +25,7 @@ import { extractImageData } from './handlers/image.js';
 import { extractDocumentData } from './handlers/document.js';
 import { sendFailureReaction } from './utils/reactions.js';
 import { stripDeviceSuffix, isGroupChat, isLid, resolveSenderPhone } from './utils/jid.js';
+import { isWhitelisted } from './utils/whitelist.js';
 import { shouldRespondInGroup } from './utils/message.js';
 
 const DEFAULT_IMAGE_PROMPT = 'Please describe and analyze this image';
@@ -323,33 +324,45 @@ export async function initializeWhatsApp(): Promise<void> {
         if (msg.key.fromMe || msg.key.remoteJid === 'status@broadcast') continue;
         if (!msg.key.remoteJid) continue;
 
-        // Whitelist check: skip non-whitelisted JIDs
-        if (config.whitelistPhones.size > 0) {
-          const remoteJid = msg.key.remoteJid!;
-          const phone = remoteJid.replace(/@.*$/, '');
-          if (!config.whitelistPhones.has(phone) && !config.whitelistPhones.has(remoteJid)) {
-            logger.info({ remoteJid }, 'Skipping non-whitelisted JID');
-            continue;
-          }
-        }
-
-        // Normalize message content to handle wrappers (viewOnce, ephemeral, etc.)
-        const normalizedMessage = normalizeMessageContent(msg.message);
-
-        // Determine if this is a group message and whether the bot should respond
-        const whatsappJid = stripDeviceSuffix(msg.key.remoteJid!);
-        const isGroup = isGroupChat(whatsappJid);
-        const botJid = stripDeviceSuffix(sock.user!.id);
-        const botLid = sock.user?.lid ? stripDeviceSuffix(sock.user.lid) : undefined;
-        const saveOnly = isGroup && !shouldRespondInGroup(msg, botJid, botLid);
-
         // Extract phone number and LID for user identity resolution.
         // A LID-addressed chat carries no phone in its JID, so recover it from
         // the message envelope (key.remoteJidAlt), falling back to Baileys'
         // LID↔PN mapping store. Groups resolve to undefined — correct, since
         // the User row *is* the group and has no phone of its own.
+        const whatsappJid = stripDeviceSuffix(msg.key.remoteJid!);
+        const isGroup = isGroupChat(whatsappJid);
         const whatsappLid = isLid(whatsappJid) ? whatsappJid : undefined;
         const phone = await resolveSenderPhone(sock, msg.key.remoteJid!, msg.key.remoteJidAlt);
+
+        // Whitelist check. Must run AFTER resolveSenderPhone — a LID-addressed
+        // chat's JID digits are an anonymized account id, not a phone, so a
+        // bare-phone whitelist entry can only match via the resolved E.164.
+        // Must run BEFORE `sock.user!.id` below: if sock.user is unset that
+        // throws into the per-message catch, which reacts to the message —
+        // sending an outbound reaction into a chat we just blocked. It also
+        // stays ahead of every expensive step (transcription, media download,
+        // groupMetadata). An unresolvable phone fails closed; whitelist the raw
+        // `@lid` if a contact is ever stuck behind a cold LID↔PN mapping.
+        if (!isWhitelisted(config.whitelistPhones, whatsappJid, phone)) {
+          logger.info(
+            {
+              remoteJid: msg.key.remoteJid,
+              whatsappJid,
+              isGroup,
+              phoneResolved: Boolean(phone),
+            },
+            'Skipping non-whitelisted chat'
+          );
+          continue;
+        }
+
+        // Normalize message content to handle wrappers (viewOnce, ephemeral, etc.)
+        const normalizedMessage = normalizeMessageContent(msg.message);
+
+        // Determine whether the bot should respond in a group
+        const botJid = stripDeviceSuffix(sock.user!.id);
+        const botLid = sock.user?.lid ? stripDeviceSuffix(sock.user.lid) : undefined;
+        const saveOnly = isGroup && !shouldRespondInGroup(msg, botJid, botLid);
 
         // Get text from normalized message or transcribe audio
         let text = normalizedMessage?.conversation || normalizedMessage?.extendedTextMessage?.text;

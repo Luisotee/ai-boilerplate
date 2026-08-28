@@ -17,6 +17,8 @@ import { handleTextMessage } from '../handlers/text.js';
 import { extractAndTranscribeAudio } from '../handlers/audio.js';
 import { extractImageData } from '../handlers/image.js';
 import { extractDocumentData } from '../handlers/document.js';
+import { isWhitelisted } from '../utils/whitelist.js';
+import { phoneToJid } from '../utils/jid.js';
 
 export async function registerWebhookRoutes(app: FastifyInstance) {
   // ==================== GET /webhook — Meta verification ====================
@@ -141,6 +143,19 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
 }
 
 /**
+ * Whitelist gate for an inbound Cloud API message.
+ *
+ * The webhook carries only the sender's bare phone (`message.from`) and no group
+ * context, so the conversation is always private here: both the phone and the
+ * equivalent `…@s.whatsapp.net` id are offered to the matcher, which is what
+ * lets `+49…`, spaced, and JID-form entries all work. Group JID entries remain
+ * inert on Cloud — a documented platform limitation, not a matcher one.
+ */
+function passesWhitelist(senderPhone: string): boolean {
+  return isWhitelisted(config.whitelistPhones, phoneToJid(senderPhone), `+${senderPhone}`);
+}
+
+/**
  * Process incoming webhook messages asynchronously.
  * This runs after the 200 response has been sent to Meta.
  */
@@ -158,11 +173,9 @@ async function processWebhookMessages(body: WebhookBody): Promise<void> {
     const messageId = message.id;
 
     // Whitelist check: skip non-whitelisted phones
-    if (config.whitelistPhones.size > 0) {
-      if (!config.whitelistPhones.has(senderPhone)) {
-        logger.info({ senderPhone }, 'Skipping non-whitelisted phone');
-        continue;
-      }
+    if (!passesWhitelist(senderPhone)) {
+      logger.info({ senderPhone }, 'Skipping non-whitelisted phone');
+      continue;
     }
 
     logger.info(
@@ -283,3 +296,6 @@ async function processWebhookMessages(body: WebhookBody): Promise<void> {
     }
   }
 }
+
+// Exported for unit tests only.
+export const _internals = { passesWhitelist };

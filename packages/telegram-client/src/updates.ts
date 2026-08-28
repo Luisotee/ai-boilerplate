@@ -15,6 +15,7 @@ import * as telegramApi from './services/telegram-api.js';
 import { chatIdToJid, chatTypeToConversationType } from './utils/telegram-id.js';
 import { isAddressedToBot, stripBotMention } from './utils/mention.js';
 import { documentMarker, imageMarker } from './utils/group-media-marker.js';
+import { isWhitelisted } from './utils/whitelist.js';
 
 export function registerUpdateHandlers(): void {
   // ---------------- Text ----------------
@@ -188,10 +189,16 @@ export function registerUpdateHandlers(): void {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Telegram matches on the `tg:<chat_id>` id only — the Bot API exposes no phone
+ * number for a chat, so no phone is passed. Phone-shaped entries in a mixed
+ * whitelist live in a separate set the matcher never consults here, so a bare
+ * number can never accidentally admit a Telegram chat with the same digits.
+ */
 function passesWhitelist(chatId: number | undefined): boolean {
   if (config.whitelistPhones.size === 0) return true;
   if (chatId === undefined) return false;
-  return config.whitelistPhones.has(chatIdToJid(chatId));
+  return isWhitelisted(config.whitelistPhones, chatIdToJid(chatId));
 }
 
 // Exported for unit tests only.

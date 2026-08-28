@@ -1,7 +1,9 @@
 import base64
 import functools
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import NamedTuple
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -44,12 +46,67 @@ from ..whatsapp import create_whatsapp_client
 router = APIRouter()
 
 
+_PHONE_JID_SUFFIX = "@s.whatsapp.net"
+_GROUP_JID_SUFFIX = "@g.us"
+# Only cosmetic separators — never "all non-digits", which would strip the sign
+# off "tg:-100…" and leak chat ids into the phone set.
+_PHONE_PUNCTUATION = re.compile(r"[\s\-().]")
+_DEVICE_SUFFIX = re.compile(r":\d+@")
+_PHONE_DIGITS = re.compile(r"^\d{5,}$")
+
+
+class _Whitelist(NamedTuple):
+    """A whitelist split into the two ways an entry can match."""
+
+    ids: frozenset[str]
+    phones: frozenset[str]
+    size: int
+
+
+def _phone_digits(value: str) -> str | None:
+    """Digits of a phone-shaped value, or None if it isn't one."""
+    digits = _PHONE_PUNCTUATION.sub("", value).lstrip("+")
+    return digits if _PHONE_DIGITS.match(digits) else None
+
+
 @functools.lru_cache(maxsize=1)
-def _parse_whitelist(raw: str) -> frozenset[str]:
-    """Parse the comma-separated whitelist into a set. Cached by the raw string,
-    so hot paths don't re-parse on every message — the cache misses only when
-    runtime_config.get("whitelist_phones") returns a new value."""
-    return frozenset(p.strip() for p in raw.split(",") if p.strip())
+def _parse_whitelist(raw: str) -> _Whitelist:
+    """Parse the comma-separated whitelist into ids + phone digits.
+
+    Each entry is matched as EITHER a phone number OR a verbatim chat id. Cached
+    by the raw string, so hot paths don't re-parse on every message — the cache
+    misses only when runtime_config.get("whitelist_phones") returns a new value.
+    (lru_cache keys on the argument; the NamedTuple return needs no hashability.)
+
+    Keep in sync with `parseWhitelist` in each TS client's src/utils/whitelist.ts.
+    """
+    ids: set[str] = set()
+    phones: set[str] = set()
+    size = 0
+
+    for entry in raw.split(","):
+        trimmed = entry.strip()
+        if not trimmed:
+            continue
+        size += 1
+        # Every entry is kept verbatim, so nothing an operator already relies on
+        # can stop matching.
+        ids.add(trimmed)
+
+        if trimmed.startswith("tg:"):
+            continue
+        local = (
+            trimmed[: -len(_PHONE_JID_SUFFIX)] if trimmed.endswith(_PHONE_JID_SUFFIX) else trimmed
+        )
+        # Any residual "@" means a non-phone scheme (@lid, @g.us, future ones).
+        if "@" in local:
+            continue
+
+        digits = _phone_digits(local)
+        if digits:
+            phones.add(digits)
+
+    return _Whitelist(frozenset(ids), frozenset(phones), size)
 
 
 def _display_name(request: ChatRequest | SaveMessageRequest) -> str | None:
@@ -68,18 +125,45 @@ def _display_name(request: ChatRequest | SaveMessageRequest) -> str | None:
     return request.sender_name
 
 
-def _is_whitelisted(whatsapp_jid: str) -> bool:
-    """Check if a JID is whitelisted. Returns True if whitelist is empty (disabled).
+def _is_whitelisted(whatsapp_jid: str, phone: str | None = None) -> bool:
+    """Check if a conversation is whitelisted. True if the whitelist is empty.
 
     Reads the (overridable) whitelist via runtime_config so /admin changes take
     effect without a restart.
+
+    `whatsapp_jid` is the CONVERSATION's jid and `phone` its E.164 number if the
+    client could resolve one — never a group participant's. A group has no phone
+    of its own, so a group is matchable only by its "…@g.us" id; a participant's
+    whitelisted phone must never admit the whole group.
+
+    The phone clause is what makes a bare-phone entry work at all for a
+    LID-addressed WhatsApp chat, whose jid digits are an anonymized account id
+    rather than a phone number.
     """
     raw = runtime_config.get("whitelist_phones")
-    whitelist = _parse_whitelist(raw) if raw else frozenset()
-    if not whitelist:
+    whitelist = _parse_whitelist(raw) if raw else None
+    if whitelist is None or whitelist.size == 0:
         return True
-    phone = whatsapp_jid.split("@")[0]
-    return phone in whitelist or whatsapp_jid in whitelist
+
+    jid = _DEVICE_SUFFIX.sub("@", whatsapp_jid)
+    if whatsapp_jid in whitelist.ids or jid in whitelist.ids:
+        return True
+
+    # Legacy local-part match: what makes a bare "120363…" still admit a group
+    # and a bare LID still admit its chat on existing installs.
+    local, sep, _ = jid.partition("@")
+    if sep and local and (local in whitelist.phones or local in whitelist.ids):
+        return True
+
+    # A group is never admitted by a phone. Callers pass None for groups anyway,
+    # but enforcing it here makes the rule structural rather than a convention
+    # every call site has to remember.
+    if phone and not jid.endswith(_GROUP_JID_SUFFIX):
+        digits = _phone_digits(phone)
+        if digits and digits in whitelist.phones:
+            return True
+
+    return False
 
 
 async def get_stream_job_status(redis, job_id: str) -> str:
@@ -127,7 +211,7 @@ async def save_message_only(request: SaveMessageRequest, db: Session = Depends(g
     """
     logger.info(f"Saving message from {request.whatsapp_jid} (no response)")
 
-    if not _is_whitelisted(request.whatsapp_jid):
+    if not _is_whitelisted(request.whatsapp_jid, request.phone):
         logger.warning(f"Blocked non-whitelisted JID: {request.whatsapp_jid}")
         raise HTTPException(status_code=403, detail="Not authorized")
 
@@ -221,7 +305,7 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
         f"Received request from {chat_request.whatsapp_jid}: {chat_request.message[:50]}... (has_image={has_image})"
     )
 
-    if not _is_whitelisted(chat_request.whatsapp_jid):
+    if not _is_whitelisted(chat_request.whatsapp_jid, chat_request.phone):
         logger.warning(f"Blocked non-whitelisted JID: {chat_request.whatsapp_jid}")
         raise HTTPException(status_code=403, detail="Not authorized")
 
@@ -559,7 +643,7 @@ async def chat(request: Request, chat_request: ChatRequest, db: Session = Depend
     """
     logger.info(f"Received chat request from {chat_request.whatsapp_jid}")
 
-    if not _is_whitelisted(chat_request.whatsapp_jid):
+    if not _is_whitelisted(chat_request.whatsapp_jid, chat_request.phone):
         logger.warning(f"Blocked non-whitelisted JID: {chat_request.whatsapp_jid}")
         raise HTTPException(status_code=403, detail="Not authorized")
 

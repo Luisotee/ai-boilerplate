@@ -21,8 +21,10 @@ from tests.helpers.factories import make_conversation_message, make_user
 
 
 # Patch the whitelist check so tests are not affected by env-level WHITELIST_PHONES.
-# The _is_whitelisted function reads a module-level set from config.py which may be
-# populated by the root .env file; patching it to always return True isolates tests.
+# _is_whitelisted reads the whitelist at request time via
+# runtime_config.get("whitelist_phones"), which falls back to the root .env value;
+# patching it to always return True isolates tests. TestWhitelistEnforcement below
+# deliberately does NOT patch it, and exercises the real matcher instead.
 def _patch_whitelist():
     """Return a fresh patch for the whitelist check on each use."""
     return patch("ai_api.routes.chat._is_whitelisted", return_value=True)
@@ -710,3 +712,78 @@ class TestEnqueueRegularMessage:
                 assert data["message"] == "Job queued successfully"
             finally:
                 _cleanup_overrides()
+
+
+# ---------------------------------------------------------------------------
+# Whitelist — exercised for real (no _is_whitelisted patch)
+# ---------------------------------------------------------------------------
+
+
+class TestWhitelistEnforcement:
+    """End-to-end check of the real matcher on the route.
+
+    Under Baileys v7 the chat is LID-addressed, so `whatsapp_jid` is an
+    anonymized `@lid` whose digits are not a phone. A bare-phone whitelist entry
+    can only admit it via the `phone` field the client already sends.
+    """
+
+    PHONE = "4915755945319"
+    LID_JID = "109994229891095@lid"
+
+    @staticmethod
+    def _patch_runtime_whitelist(value: str):
+        """Route only whitelist_phones through `value`; other keys stay real."""
+        from ai_api import runtime_config as rc_module
+        from ai_api.routes.chat import _parse_whitelist
+
+        _parse_whitelist.cache_clear()
+        real_get = rc_module.runtime_config.get
+
+        def fake_get(key, *args, **kwargs):
+            if key == "whitelist_phones":
+                return value
+            return real_get(key, *args, **kwargs)
+
+        return patch("ai_api.routes.chat.runtime_config.get", side_effect=fake_get)
+
+    async def _post(self, body):
+        mock_db = _make_mock_db()
+        mock_user = make_user(whatsapp_jid=self.LID_JID)
+        with patch("ai_api.routes.chat.get_or_create_user", return_value=mock_user):
+            app = _get_app_with_db_override(mock_db)
+            try:
+                transport = ASGITransport(app=app)
+                async with AsyncClient(transport=transport, base_url="http://test") as client:
+                    return await client.post("/chat/enqueue", json=body, headers=AUTH_HEADERS)
+            finally:
+                _cleanup_overrides()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_bare_phone_admits_a_lid_chat(self, _cleanup, _redis, _init_db):
+        with self._patch_runtime_whitelist(self.PHONE):
+            response = await self._post(
+                {
+                    "whatsapp_jid": self.LID_JID,
+                    "message": "/help",
+                    "conversation_type": "private",
+                    "phone": f"+{self.PHONE}",
+                }
+            )
+        assert response.status_code == 200
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_same_chat_without_phone_is_blocked(self, _cleanup, _redis, _init_db):
+        # Fail closed when the LID<->PN mapping has not resolved yet.
+        with self._patch_runtime_whitelist(self.PHONE):
+            response = await self._post(
+                {
+                    "whatsapp_jid": self.LID_JID,
+                    "message": "/help",
+                    "conversation_type": "private",
+                }
+            )
+        assert response.status_code == 403

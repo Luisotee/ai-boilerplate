@@ -55,7 +55,9 @@ REGISTRY: tuple[SettingSpec, ...] = (
         "str",
         True,
         "access",
-        "Comma-separated allowed phone numbers / group JIDs (empty = all allowed).",
+        "Comma-separated allowed entries, each matched as either a phone number "
+        "(4915755945319, +49 157 5594 5319, 4915755945319@s.whatsapp.net) or a "
+        "verbatim chat id (120363...@g.us, ...@lid, tg:123). Empty = all allowed.",
     ),
     # --- Hot: conversation behaviour ---
     SettingSpec(

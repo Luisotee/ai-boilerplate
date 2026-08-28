@@ -40,7 +40,9 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     # User Whitelist
-    whitelist_phones: str = ""  # Comma-separated phone numbers/group JIDs (empty = all allowed)
+    # Comma-separated entries, each matched as either a phone number or a
+    # verbatim chat id (group JID, @lid, tg:<chat_id>). Empty = all allowed.
+    whitelist_phones: str = ""
 
     # CORS
     cors_origins: str = ""  # Comma-separated allowed origins
