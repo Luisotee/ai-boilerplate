@@ -519,7 +519,7 @@ async def get_job_status(request: Request, job_id: str):
     """
     try:
         async with get_redis_client() as redis_client:
-            # Infer status from Redis data (no arq)
+            # Infer status from Redis data (job metadata + chunks)
             status = await get_stream_job_status(redis_client, job_id)
 
             # Get chunks

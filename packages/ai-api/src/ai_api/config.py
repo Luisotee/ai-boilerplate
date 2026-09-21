@@ -69,9 +69,8 @@ class Settings(BaseSettings):
     redis_password: str | None = None
 
     # Queue
-    arq_max_jobs: int = 50
-    arq_job_timeout: int = 120
-    arq_poll_delay: float = 0.1
+    # TTL (seconds) of job metadata in Redis. Keeps its legacy ARQ_KEEP_RESULT
+    # env name from the retired arq worker so existing overrides still apply.
     arq_keep_result: int = 3600
     queue_chunk_ttl: int = 3600
     queue_per_user_max_jobs: int = 1

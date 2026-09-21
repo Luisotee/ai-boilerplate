@@ -1,8 +1,5 @@
 """
-Core chat processing logic extracted from arq worker.
-
-This processor can be called directly without arq job context,
-making it compatible with Redis Streams.
+Core chat processing logic, called by the Redis Streams consumer.
 """
 
 import httpx
@@ -43,7 +40,7 @@ async def process_chat_job_direct(
     client_id: str | None = None,
 ) -> dict:
     """
-    Process a chat message asynchronously without arq context.
+    Process a chat message asynchronously (one Redis Streams job).
 
     This function:
     1. Retrieves conversation history from PostgreSQL
