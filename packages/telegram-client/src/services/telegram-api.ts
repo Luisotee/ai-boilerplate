@@ -281,4 +281,31 @@ export async function sendContact(chatId: number, contact: ContactDetails): Prom
 }
 
 // Exported for unit tests only.
+/**
+ * Is `userId` currently in `chatId`?
+ *
+ * This is the one membership question the Telegram Bot API *can* answer —
+ * enumerating a chat's members is impossible, so shared-group discovery is
+ * derived from stored message authorship, which never expires. Checking the
+ * specific pair right before a relay send closes that gap.
+ *
+ * `restricted` counts only while `is_member` is true: a restricted user who has
+ * since left keeps the `restricted` status with `is_member: false`. `left` and
+ * `kicked` are never members. Throws on a lookup error — the caller decides how
+ * to fail (the AI API fails closed).
+ */
+export async function isChatMember(chatId: number, userId: number): Promise<boolean> {
+  const member = await bot.api.getChatMember(chatId, userId);
+  switch (member.status) {
+    case 'creator':
+    case 'administrator':
+    case 'member':
+      return true;
+    case 'restricted':
+      return member.is_member;
+    default:
+      return false;
+  }
+}
+
 export const _internals = { substituteReaction, REACTION_MAP };

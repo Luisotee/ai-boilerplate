@@ -90,6 +90,13 @@ class Settings(BaseSettings):
     # (get_chat_history). Overridable at runtime via /admin.
     bot_name: str = "Assistant"
 
+    # Shared-group tools (get_group_context / send_group_message): let a user,
+    # in a PRIVATE chat, read and post into groups they share with the bot.
+    # Off by default: it moves group transcripts into private-chat model
+    # context (and so to the LLM provider in a new context) and lets the bot
+    # post into groups on a member's behalf. Overridable at runtime via /admin.
+    shared_group_tools_enabled: bool = False
+
     # Token Management
     max_context_tokens: int = 50000
     min_recent_messages: int = 5

@@ -40,6 +40,7 @@ A production-ready AI agent system that brings conversational AI to WhatsApp wit
 
 ### WhatsApp Integration
 - Group chat support with sender attribution and @mention handling
+- Optional shared-group tools (`SHARED_GROUP_TOOLS_ENABLED`, off by default): in a private chat, read or search a group you share with the bot, or have it post a message there on your behalf (always attributed, confirmed first; Baileys + Telegram)
 - Message reactions (status indicators)
 - Media handling: images, audio, video, documents
 - Location sharing and contact cards (vCard)
@@ -266,6 +267,7 @@ pnpm format          # Format all code
 | `REDIS_URL` | Redis connection string |
 | `AI_API_URL` | AI API endpoint for WhatsApp client |
 | `WHITELIST_PHONES` | Comma-separated phones / chat ids allowed to use the bot (empty = everyone) |
+| `SHARED_GROUP_TOOLS_ENABLED` | `false` (default). When `true`, users can, in a private chat, read/search groups they share with the bot and ask it to post into one (Baileys + Telegram). Group transcripts then reach the LLM provider inside private conversations — see CLAUDE.md "Shared-group tools". Hot via `PATCH /admin/settings` |
 | `GROUP_GATING` | How a group gets in scope when the whitelist is set: `jid` (default — the group's own id must be listed) or `membership` (Baileys: any group with a whitelisted member; Telegram: any group; the bot saves all messages there but replies only to whitelisted senders). Read by the AI API and the Baileys/Telegram clients |
 | `LOGFIRE_TOKEN` | Pydantic Logfire write token for LLM token/cost tracking (optional; empty disables it) |
 | `LOGFIRE_ENVIRONMENT` | Environment label shown in the Logfire UI (default `development`) |

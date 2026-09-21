@@ -497,3 +497,57 @@ class TestLogoutWhatsapp:
 
         with pytest.raises(WhatsAppNotConnectedError):
             await whatsapp_client.logout_whatsapp()
+
+
+# ---------------------------------------------------------------------------
+# get_shared_groups / is_group_member (shared-group tools)
+# ---------------------------------------------------------------------------
+
+
+def _json_response(status: int, body: dict) -> MagicMock:
+    resp = MagicMock()
+    resp.status_code = status
+    resp.json.return_value = body
+    resp.text = ""
+    return resp
+
+
+class TestGetSharedGroups:
+    async def test_posts_only_the_supplied_identifiers(self, whatsapp_client, mock_http_client):
+        mock_http_client.post.return_value = _json_response(
+            200, {"groups": [{"groupJid": "1@g.us", "subject": "Book Club"}]}
+        )
+        groups = await whatsapp_client.get_shared_groups(jid="5511@s.whatsapp.net", phone="+5511")
+
+        assert [(g.group_jid, g.subject) for g in groups] == [("1@g.us", "Book Club")]
+        args, kwargs = mock_http_client.post.call_args
+        assert args[0] == "http://localhost:3001/whatsapp/shared-groups"
+        assert kwargs["json"] == {"jid": "5511@s.whatsapp.net", "phone": "+5511"}
+        assert kwargs["headers"] == {"X-API-Key": "test-api-key-123"}
+
+    async def test_503_raises_not_connected(self, whatsapp_client, mock_http_client):
+        mock_http_client.post.return_value = _json_response(503, {"error": "x"})
+        with pytest.raises(WhatsAppNotConnectedError):
+            await whatsapp_client.get_shared_groups(jid="5511@s.whatsapp.net")
+
+    async def test_500_raises_instead_of_returning_empty(self, whatsapp_client, mock_http_client):
+        mock_http_client.post.return_value = _json_response(500, {"error": "boom"})
+        with pytest.raises(WhatsAppClientError):
+            await whatsapp_client.get_shared_groups(jid="5511@s.whatsapp.net")
+
+
+class TestIsGroupMember:
+    async def test_true_only_for_an_explicit_true(self, whatsapp_client, mock_http_client):
+        mock_http_client.post.return_value = _json_response(200, {"is_member": True})
+        assert await whatsapp_client.is_group_member("tg:-1001", "tg:5") is True
+        kwargs = mock_http_client.post.call_args.kwargs
+        assert kwargs["json"] == {"phoneNumber": "tg:-1001", "userJid": "tg:5"}
+
+        for body in ({"is_member": False}, {}, {"is_member": "yes"}):
+            mock_http_client.post.return_value = _json_response(200, body)
+            assert await whatsapp_client.is_group_member("tg:-1001", "tg:5") is False
+
+    async def test_error_raises(self, whatsapp_client, mock_http_client):
+        mock_http_client.post.return_value = _json_response(500, {"error": "boom"})
+        with pytest.raises(WhatsAppClientError):
+            await whatsapp_client.is_group_member("tg:-1001", "tg:5")

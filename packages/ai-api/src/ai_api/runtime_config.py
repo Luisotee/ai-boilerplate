@@ -93,6 +93,16 @@ REGISTRY: tuple[SettingSpec, ...] = (
         "Label for the bot's own messages in transcripts the agent reads back (get_chat_history).",
     ),
     SettingSpec(
+        "shared_group_tools_enabled",
+        "bool",
+        True,
+        "conversation",
+        "Let users, in a private chat, read (get_group_context) and post into "
+        "(send_group_message) groups they share with the bot. Sends group "
+        "transcripts to the LLM provider in private-chat context. Baileys and "
+        "Telegram only.",
+    ),
+    SettingSpec(
         "core_memory_max_length",
         "int",
         True,

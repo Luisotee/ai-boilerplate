@@ -23,6 +23,8 @@ interface MessageOptions {
   conversationType: 'private' | 'group';
   senderJid?: string;
   senderName?: string;
+  /** The conversation's display name — the group's title (never a participant's). */
+  profileName?: string;
   saveOnly?: boolean;
   messageId?: string;
   image?: ImagePayload;
@@ -64,7 +66,16 @@ export async function sendMessageToAI(
   message: string,
   options: MessageOptions
 ): Promise<string | null> {
-  const { conversationType, senderJid, senderName, saveOnly, messageId, image, document } = options;
+  const {
+    conversationType,
+    senderJid,
+    senderName,
+    profileName,
+    saveOnly,
+    messageId,
+    image,
+    document,
+  } = options;
 
   if (saveOnly) {
     logger.info({ jid, saveOnly, conversationType }, 'Saving message only');
@@ -79,6 +90,7 @@ export async function sendMessageToAI(
           message,
           sender_jid: senderJid,
           sender_name: senderName,
+          profile_name: profileName,
           conversation_type: conversationType,
           whatsapp_message_id: messageId,
         }),
@@ -102,6 +114,7 @@ export async function sendMessageToAI(
     message,
     sender_jid: senderJid,
     sender_name: senderName,
+    profile_name: profileName,
     conversation_type: conversationType,
     whatsapp_message_id: messageId,
     client_id: 'telegram',

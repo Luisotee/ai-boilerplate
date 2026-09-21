@@ -21,6 +21,7 @@ import { registerConnectionRoutes } from './routes/connection.js';
 import { registerMessagingRoutes } from './routes/messaging.js';
 import { registerMediaRoutes } from './routes/media.js';
 import { registerOperationsRoutes } from './routes/operations.js';
+import { registerGroupsRoutes } from './routes/groups.js';
 
 /**
  * Transform function that handles both Zod and plain JSON Schema.
@@ -147,6 +148,7 @@ async function start() {
         { name: 'Messaging', description: 'Text messaging, reactions, typing' },
         { name: 'Media', description: 'Images, videos, documents, audio' },
         { name: 'Operations', description: 'Edit, delete, forward messages' },
+        { name: 'Groups', description: 'Groups shared by the bot and a user' },
       ],
       components: {
         securitySchemes: {
@@ -182,6 +184,7 @@ async function start() {
   await registerMessagingRoutes(app);
   await registerMediaRoutes(app);
   await registerOperationsRoutes(app);
+  await registerGroupsRoutes(app);
 
   // Sentry Fastify error handler — must be registered after all routes
   if (process.env.SENTRY_DSN_NODE) {

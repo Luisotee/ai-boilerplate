@@ -659,6 +659,7 @@ async def chat(request: Request, chat_request: ChatRequest, db: Session = Depend
                 http_client=http_client,
                 whatsapp_client=whatsapp_client,
                 current_message_id=chat_request.whatsapp_message_id,
+                client_id=chat_request.client_id,
             )
 
             # Get AI response (using formatted content) - consume stream into complete response

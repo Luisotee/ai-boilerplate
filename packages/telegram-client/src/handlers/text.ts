@@ -80,6 +80,10 @@ export async function handleTextMessage(
         ctx.from.username ||
         'Unknown'
       : 'Unknown');
+  // The group's title names the conversation (and is how the shared-group
+  // tools find it by name). A private chat is named from sender_name upstream.
+  const profileName =
+    conversationType === 'group' ? (ctx.chat as { title?: string })?.title || undefined : undefined;
 
   if (options.saveOnly) {
     logger.debug({ jid, text: text.slice(0, 50) }, 'Saving group message to history');
@@ -88,6 +92,7 @@ export async function handleTextMessage(
         conversationType,
         senderJid: options.senderJid,
         senderName,
+        profileName,
         messageId: String(messageId),
         saveOnly: true,
       });
@@ -117,6 +122,7 @@ export async function handleTextMessage(
       conversationType,
       senderJid: options.senderJid,
       senderName,
+      profileName,
       messageId: String(messageId),
       isGroupAdmin: options.isGroupAdmin,
       image: options.image,
