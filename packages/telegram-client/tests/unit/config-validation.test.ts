@@ -12,13 +12,16 @@ import { validateRequiredEnv } from '../../src/config-validation.js';
 
 type ConfigShape = Parameters<typeof validateRequiredEnv>[0];
 
-function makeConfig(overrides: {
-  telegramApiKey?: string;
-  aiApiKey?: string;
-  botToken?: string;
-  publicWebhookUrl?: string;
-  webhookSecret?: string;
-} = {}): ConfigShape {
+function makeConfig(
+  overrides: {
+    telegramApiKey?: string;
+    aiApiKey?: string;
+    botToken?: string;
+    publicWebhookUrl?: string;
+    webhookSecret?: string;
+    mode?: string;
+  } = {}
+): ConfigShape {
   return {
     telegramApiKey: overrides.telegramApiKey ?? 'k',
     aiApiKey: overrides.aiApiKey ?? 'k',
@@ -27,6 +30,7 @@ function makeConfig(overrides: {
       publicWebhookUrl: overrides.publicWebhookUrl ?? '',
       webhookSecret: overrides.webhookSecret ?? '',
       dropPendingUpdates: true,
+      mode: overrides.mode ?? 'webhook',
     },
     // The validator only inspects the fields above; cast for the rest.
   } as unknown as ConfigShape;
@@ -71,5 +75,25 @@ describe('validateRequiredEnv', () => {
     expect(() =>
       validateRequiredEnv(makeConfig({ publicWebhookUrl: '', webhookSecret: '' }))
     ).not.toThrow();
+  });
+
+  it('throws on an unknown TELEGRAM_MODE', () => {
+    expect(() => validateRequiredEnv(makeConfig({ mode: 'longpoll' }))).toThrow(/TELEGRAM_MODE/);
+  });
+
+  it('polling mode needs no webhook secret, even with a public URL left over', () => {
+    expect(() =>
+      validateRequiredEnv(
+        makeConfig({ mode: 'polling', publicWebhookUrl: 'https://example.com/webhook' })
+      )
+    ).not.toThrow();
+  });
+
+  it('webhook mode still requires the secret when a public URL is set', () => {
+    expect(() =>
+      validateRequiredEnv(
+        makeConfig({ mode: 'webhook', publicWebhookUrl: 'https://example.com/webhook' })
+      )
+    ).toThrow(/TELEGRAM_WEBHOOK_SECRET/);
   });
 });

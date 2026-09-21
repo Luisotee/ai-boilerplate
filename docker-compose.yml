@@ -345,8 +345,16 @@ services:
     environment:
       AI_API_URL: http://api:8000
       TELEGRAM_HOST: 0.0.0.0
+    # TELEGRAM_MODE=webhook (default): Telegram must reach /webhook through a
+    # public HTTPS URL (reverse proxy / tunnel to this port).
+    # TELEGRAM_MODE=polling: no inbound traffic from Telegram at all — the port
+    # only serves the AI API (over aiagent-network), /health and /docs.
     ports:
       - "3003:3003"
+    # Polling mode drains in-flight replies on SIGTERM (up to
+    # TELEGRAM_SHUTDOWN_DRAIN_MS, default 130s) — Docker's default 10s grace
+    # period would SIGKILL them mid-reply.
+    stop_grace_period: 140s
     depends_on:
       api:
         condition: service_healthy

@@ -33,6 +33,14 @@ if (existsSync(localEnvPath)) {
 
 const whitelistPhones = parseWhitelist(process.env.WHITELIST_PHONES || '');
 
+/**
+ * TELEGRAM_MODE: how updates arrive. `webhook` (default) — Telegram POSTs to
+ * /webhook, which needs a public HTTPS URL. `polling` — long polling via
+ * @grammyjs/runner, no public URL or tunnel needed. Anything else is kept as-is
+ * so validateRequiredEnv can refuse to start with a clear message.
+ */
+const telegramMode = (process.env.TELEGRAM_MODE || 'webhook').trim().toLowerCase();
+
 // GROUP_GATING=jid|membership — see utils/gating.ts. An unknown value falls back
 // to the stricter `jid` rather than failing startup.
 const groupGating = parseGroupGating(process.env.GROUP_GATING);
@@ -86,6 +94,22 @@ export const config = {
     publicWebhookUrl: process.env.TELEGRAM_PUBLIC_WEBHOOK_URL || '',
     // If empty we'll skip setWebhook on boot — useful for tests / local polling via ngrok etc.
     dropPendingUpdates: process.env.TELEGRAM_DROP_PENDING_UPDATES !== 'false',
+    mode: telegramMode,
+    // --- polling mode only ---
+    // getUpdates long-poll timeout (seconds).
+    pollTimeoutSeconds: parseNonNegativeInt('TELEGRAM_POLL_TIMEOUT_SECONDS', 30),
+    // How long the runner keeps retrying a failing getUpdates before giving up
+    // (the process then exits and Docker restarts it). The runner's own default
+    // is 15 HOURS of backoff — far too long to sit silently deaf.
+    maxPollRetryMs: parseNonNegativeInt('TELEGRAM_POLL_MAX_RETRY_MS', 5 * 60_000),
+    // Max updates processed concurrently (per-chat order is kept by sequentialize).
+    concurrency: parseNonNegativeInt('TELEGRAM_POLL_CONCURRENCY', 50) || 50,
+    // How long shutdown waits for in-flight updates. Just above the AI-API
+    // polling ceiling, so a reply waiting on the model gets to finish.
+    shutdownDrainMs: parseNonNegativeInt(
+      'TELEGRAM_SHUTDOWN_DRAIN_MS',
+      parseInt(process.env.POLL_MAX_DURATION_MS || '120000', 10) + 10_000
+    ),
   },
   messageSplit: {
     // Telegram per-chat limit is ~1 msg/sec, so enforce a higher base delay than Cloud.

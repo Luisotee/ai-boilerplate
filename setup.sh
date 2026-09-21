@@ -156,7 +156,7 @@ if [ "$SKIP_ENV" = false ]; then
     WHATSAPP_API_KEY DATABASE_URL GROQ_API_KEY LLAMA_CLOUD_API_KEY
     META_PHONE_NUMBER_ID META_ACCESS_TOKEN META_APP_SECRET META_WEBHOOK_VERIFY_TOKEN
     STT_PROVIDER WHISPER_MODEL WHISPER_TIMEOUT_SECONDS INSTALL_DOCLING
-    TELEGRAM_BOT_TOKEN TELEGRAM_WEBHOOK_SECRET
+    TELEGRAM_BOT_TOKEN TELEGRAM_WEBHOOK_SECRET TELEGRAM_MODE
     LOGFIRE_TOKEN LOGFIRE_ENVIRONMENT
   )
   MISSING_KEYS=()
@@ -307,13 +307,25 @@ if [ "$SKIP_ENV" = false ]; then
     echo
     TG_TOKEN=$(sanitize "$TG_TOKEN")
     DEFAULT_TG_SECRET=$(generate_hex_key)
-    read -rp "  TELEGRAM_WEBHOOK_SECRET (Enter to auto-generate): " TG_SECRET
-    TG_SECRET=$(sanitize "${TG_SECRET:-$DEFAULT_TG_SECRET}")
-    read -rp "  TELEGRAM_PUBLIC_WEBHOOK_URL (public https URL ending in /webhook, leave empty to skip setWebhook): " TG_URL
-    TG_URL=$(sanitize "$TG_URL")
+    echo -e "  ${YELLOW}Delivery mode: 'polling' needs no public URL (good for local/dev or a host${NC}"
+    echo -e "  ${YELLOW}behind NAT); 'webhook' needs a public HTTPS URL pointing at /webhook.${NC}"
+    read -rp "  TELEGRAM_MODE [webhook/polling] (Enter for webhook): " TG_MODE
+    TG_MODE=$(sanitize "${TG_MODE:-webhook}")
+    if [ "$TG_MODE" != "polling" ]; then
+      TG_MODE=webhook
+    fi
+    TG_SECRET="$DEFAULT_TG_SECRET"
+    TG_URL=""
+    if [ "$TG_MODE" = "webhook" ]; then
+      read -rp "  TELEGRAM_WEBHOOK_SECRET (Enter to auto-generate): " TG_SECRET
+      TG_SECRET=$(sanitize "${TG_SECRET:-$DEFAULT_TG_SECRET}")
+      read -rp "  TELEGRAM_PUBLIC_WEBHOOK_URL (public https URL ending in /webhook, leave empty to skip setWebhook): " TG_URL
+      TG_URL=$(sanitize "$TG_URL")
+    fi
 
     if [ -n "$TG_TOKEN" ]; then
       sed -i "s|^TELEGRAM_BOT_TOKEN=.*|TELEGRAM_BOT_TOKEN=$(escape_sed "$TG_TOKEN")|" "$ENV_FILE"
+      sed -i "s|^TELEGRAM_MODE=.*|TELEGRAM_MODE=$(escape_sed "$TG_MODE")|" "$ENV_FILE"
       sed -i "s|^TELEGRAM_WEBHOOK_SECRET=.*|TELEGRAM_WEBHOOK_SECRET=$(escape_sed "$TG_SECRET")|" "$ENV_FILE"
       if [ -n "$TG_URL" ]; then
         sed -i "s|^TELEGRAM_PUBLIC_WEBHOOK_URL=.*|TELEGRAM_PUBLIC_WEBHOOK_URL=$(escape_sed "$TG_URL")|" "$ENV_FILE"
