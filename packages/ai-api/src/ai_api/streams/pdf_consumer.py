@@ -309,6 +309,12 @@ async def run_pdf_consumer(redis: Redis) -> None:
             except Exception:
                 logger.error("[PDF] Consumer loop error", exc_info=True)
                 await asyncio.sleep(5)
+                # Redis may have been down at startup or flushed since (NOGROUP):
+                # make sure the stream and group exist before the next read.
+                try:
+                    await ensure_pdf_consumer_group(redis)
+                except Exception:
+                    logger.warning("[PDF] Could not (re)create consumer group", exc_info=True)
     finally:
         for task in list(in_flight):
             task.cancel()

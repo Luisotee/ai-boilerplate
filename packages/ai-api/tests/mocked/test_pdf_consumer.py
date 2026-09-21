@@ -493,3 +493,44 @@ class TestHelpers:
         assert doc.error_message == "boom"
         session.commit.assert_called_once()
         session.close.assert_called_once()
+
+
+class TestConsumerGroupRecovery:
+    async def test_recreates_group_after_nogroup_error(self, settings_override, monkeypatch):
+        """Redis flushed (or down at startup): the loop recreates the group and resumes."""
+        client = fakeredis.FakeAsyncRedis()  # no group created yet
+        monkeypatch.setattr(pdf_consumer.asyncio, "sleep", AsyncMock())
+
+        async def _fast_read(r, count=1, block=5000):
+            return await read_pdf_stream_messages(r, count=count, block=10)
+
+        monkeypatch.setattr(pdf_consumer, "read_pdf_stream_messages", _fast_read)
+        # Startup creation "fails" (as if Redis were down), later calls work.
+        real_ensure = pdf_consumer.ensure_pdf_consumer_group
+        calls = {"n": 0}
+
+        async def _flaky_ensure(r):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return  # logged-and-swallowed failure at startup
+            await real_ensure(r)
+
+        monkeypatch.setattr(pdf_consumer, "ensure_pdf_consumer_group", _flaky_ensure)
+        done = asyncio.Event()
+
+        async def _process(**_kwargs):
+            done.set()
+            return "completed"
+
+        monkeypatch.setattr(pdf_consumer, "process_pdf_document", _process)
+
+        task = asyncio.create_task(pdf_consumer.run_pdf_consumer(client))
+        try:
+            await asyncio.sleep(0.05)
+            await enqueue_pdf_processing(client, "doc-1", "/data/doc-1.pdf")
+            await asyncio.wait_for(done.wait(), timeout=3)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await client.aclose()
+        assert calls["n"] >= 2
