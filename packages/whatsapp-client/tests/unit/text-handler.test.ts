@@ -310,3 +310,44 @@ describe("handleTextMessage — profileName (the conversation's display name)", 
     expect(optsOf(0).profileName).toBeUndefined();
   });
 });
+
+describe('handleTextMessage — senderJid (group participant as a phone JID)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSendMessageToAI.mockResolvedValue('ok');
+  });
+
+  const optsOf = (call: number) => mockSendMessageToAI.mock.calls[call][2];
+
+  it('sends a LID participant as its phone JID via participantAlt', async () => {
+    const msg = makeGroupTextMsg('hello', undefined, '109994229891095@lid');
+    (msg.key as Record<string, unknown>).participantAlt = '5511777777777:0@s.whatsapp.net';
+
+    await handleTextMessage(makeMockSocket() as never, msg as never, 'hello');
+
+    expect(optsOf(0).senderJid).toBe('5511777777777@s.whatsapp.net');
+  });
+
+  it('uses the phone JID on the saveOnly path too', async () => {
+    const msg = makeGroupTextMsg('chatter', undefined, '5511888888888:4@s.whatsapp.net');
+
+    await handleTextMessage(
+      makeMockSocket() as never,
+      msg as never,
+      'chatter',
+      undefined,
+      undefined,
+      {
+        saveOnly: true,
+      }
+    );
+
+    expect(optsOf(0).senderJid).toBe('5511888888888@s.whatsapp.net');
+  });
+
+  it('sends no senderJid for a private chat', async () => {
+    await handleTextMessage(makeMockSocket() as never, makeTextMsg('hi') as never, 'hi');
+
+    expect(optsOf(0).senderJid).toBeUndefined();
+  });
+});

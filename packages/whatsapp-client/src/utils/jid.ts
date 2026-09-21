@@ -118,6 +118,29 @@ export async function resolveSenderPhone(
 }
 
 /**
+ * Resolve a group participant's identity as a PHONE JID (`<digits>@s.whatsapp.net`)
+ * for the `sender_jid` wire field.
+ *
+ * Under Baileys v7 a group participant is usually LID-addressed
+ * (`key.participant` = `…@lid`), so sending it raw would store an anonymized id
+ * that changes with addressing mode and never lines up with the same human's
+ * phone-keyed rows. Reuses {@link resolveSenderPhone}'s cost-ordered chain
+ * (direct PN → `key.participantAlt` → LID↔PN mapping store), then falls back to
+ * the device-stripped raw participant when no phone is knowable yet — a LID is
+ * still better than dropping the sender entirely. Returns undefined when the
+ * message has no participant (private chats).
+ */
+export async function resolveParticipantJid(
+  sock: WASocket,
+  participant: string | null | undefined,
+  participantAlt: string | null | undefined
+): Promise<string | undefined> {
+  if (!participant) return undefined;
+  const phone = await resolveSenderPhone(sock, participant, participantAlt);
+  return phone ? `${phone.slice(1)}@s.whatsapp.net` : stripDeviceSuffix(participant);
+}
+
+/**
  * Check if string is already a JID
  * JIDs contain @ symbol (e.g., 1234567890@s.whatsapp.net, 123456-789@g.us)
  */

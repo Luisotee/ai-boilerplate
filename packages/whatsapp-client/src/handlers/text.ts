@@ -2,7 +2,7 @@ import type { WASocket, WAMessage } from '@whiskeysockets/baileys';
 import { logger } from '../logger.js';
 import { getUserPreferences, sendMessageToAI, textToSpeech } from '../api-client.js';
 import { config } from '../config.js';
-import { stripDeviceSuffix, isGroupChat } from '../utils/jid.js';
+import { stripDeviceSuffix, isGroupChat, resolveParticipantJid } from '../utils/jid.js';
 import { getPushName, getSenderName } from '../utils/message.js';
 import { getGroupSubject } from '../services/group-cache.js';
 import { sendFailureReaction } from '../utils/reactions.js';
@@ -52,6 +52,13 @@ export async function handleTextMessage(
   const isGroupAdmin = options?.isGroupAdmin;
   const phone = options?.phone;
   const whatsappLid = options?.whatsappLid;
+  // Group participant as a phone JID, so the same human is recorded under one
+  // stable identity regardless of LID-vs-PN addressing. Private chats have no
+  // participant.
+  const senderJid =
+    conversationType === 'group'
+      ? await resolveParticipantJid(sock, msg.key.participant, msg.key.participantAlt)
+      : undefined;
 
   // Save-only mode: persist message to history without generating a response
   if (saveOnly) {
@@ -59,7 +66,7 @@ export async function handleTextMessage(
     try {
       await sendMessageToAI(whatsappJid, text, {
         conversationType,
-        senderJid: msg.key.participant ?? undefined,
+        senderJid,
         senderName: getSenderName(msg),
         profileName,
         messageId: msg.key.id ?? undefined,
@@ -84,7 +91,7 @@ export async function handleTextMessage(
   try {
     const response = await sendMessageToAI(whatsappJid, text, {
       conversationType,
-      senderJid: msg.key.participant ?? undefined,
+      senderJid,
       senderName: getSenderName(msg),
       profileName,
       messageId: msg.key.id ?? undefined,
