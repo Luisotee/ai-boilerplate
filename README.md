@@ -175,7 +175,7 @@ Starting the profile also launches a one-shot `whisper-init` sidecar that pulls 
 docker compose up -d postgres redis     # just infra in containers
 pnpm dev:server                          # Terminal 1: AI API
 pnpm dev:whatsapp                        # Terminal 2: WhatsApp client (scan QR)
-pnpm dev:queue                           # Terminal 3: background worker
+pnpm dev:queue                           # Terminal 3: stream worker (chat replies + PDF parsing)
 ```
 
 ### Verify

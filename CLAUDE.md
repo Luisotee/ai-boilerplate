@@ -85,7 +85,7 @@ pnpm dev:server                         # Start AI API (port 8000)
 pnpm dev:whatsapp                       # Start Baileys WhatsApp client (port 3001)
 pnpm dev:cloud                          # Start Cloud API WhatsApp client (port 3002)
 pnpm dev:telegram                       # Start Telegram client (port 3003)
-pnpm dev:queue                          # Start background stream worker
+pnpm dev:queue                          # Start the stream worker (chat consumer + PDF consumer; required for replies AND PDF processing)
 pnpm install:all                        # Install Node + Python dependencies
 
 # Linting & Formatting
