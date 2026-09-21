@@ -1,1 +1,1 @@
-from . import memory, search, settings, utility, web, whatsapp  # noqa: F401
+from . import history, memory, search, settings, utility, web, whatsapp  # noqa: F401

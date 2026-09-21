@@ -342,6 +342,44 @@ def get_conversation_history(db, whatsapp_jid: str, conversation_type: str, limi
     return list(reversed(messages))
 
 
+# Hard cap on get_conversation_messages, whatever the caller asks for: the result
+# is rendered into a tool reply that lands in the model's context window.
+MAX_FLAT_MESSAGES = 200
+
+
+def get_conversation_messages(
+    db,
+    user_id: str,
+    *,
+    limit: int | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+):
+    """On-demand chronological retrieval: a flat last-N count and/or a time window.
+
+    Distinct from get_conversation_history (the config-limited auto-injection
+    path that runs on every message): this one is driven by agent tools
+    (`get_chat_history`). Keyed by the conversation's `users.id` — the row the
+    current run already resolved — so it never creates a user as a side effect.
+
+    `since`/`until` compare against the naive-UTC `timestamp` column: pass naive
+    UTC datetimes (e.g. ``datetime.now(UTC).replace(tzinfo=None) - timedelta(...)``).
+    Returns messages oldest-to-newest, capped at MAX_FLAT_MESSAGES.
+    """
+    query = db.query(ConversationMessage).filter(ConversationMessage.user_id == user_id)
+    if since is not None:
+        query = query.filter(ConversationMessage.timestamp >= since)
+    if until is not None:
+        query = query.filter(ConversationMessage.timestamp <= until)
+
+    # Clamp to [1, MAX_FLAT_MESSAGES]: a falsy/None limit means "no explicit cap"
+    # (use the safety cap); a negative limit would make Postgres reject the query.
+    effective_limit = max(1, min(limit or MAX_FLAT_MESSAGES, MAX_FLAT_MESSAGES))
+    messages = query.order_by(ConversationMessage.timestamp.desc()).limit(effective_limit).all()
+
+    return list(reversed(messages))
+
+
 def save_message(
     db,
     whatsapp_jid: str,

@@ -1,13 +1,17 @@
 """
 Unit tests for ai_api.database — pure functions phone_from_jid, is_telegram_jid,
-_clean_profile_name, plus the set_setting_overrides_batch contract.
+_clean_profile_name, plus the set_setting_overrides_batch contract and the
+get_conversation_messages query helper (DB session mocked).
 """
 
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
 from ai_api.database import (
+    MAX_FLAT_MESSAGES,
     RuntimeSetting,
     _clean_profile_name,
+    get_conversation_messages,
     get_or_create_user,
     is_telegram_jid,
     phone_from_jid,
@@ -220,3 +224,60 @@ class TestGetOrCreateUserAppliesSanitizer:
 
         assert existing.name == "Ana Paula"
         assert db.commit.called
+
+
+class TestGetConversationMessages:
+    def _mock_db(self, messages):
+        db = MagicMock()
+        query = MagicMock()
+        db.query.return_value = query
+        query.filter.return_value = query
+        query.order_by.return_value = query
+        query.limit.return_value = query
+        query.all.return_value = messages
+        return db, query
+
+    def test_default_limit_is_the_safety_cap(self):
+        db, query = self._mock_db([])
+        get_conversation_messages(db, "user-1")
+        query.limit.assert_called_once_with(MAX_FLAT_MESSAGES)
+
+    def test_requested_limit_is_capped(self):
+        db, query = self._mock_db([])
+        get_conversation_messages(db, "user-1", limit=9999)
+        query.limit.assert_called_once_with(MAX_FLAT_MESSAGES)
+
+    def test_negative_limit_is_clamped_to_one(self):
+        # A negative LIMIT would make Postgres reject the query — clamp to >= 1.
+        db, query = self._mock_db([])
+        get_conversation_messages(db, "user-1", limit=-5)
+        query.limit.assert_called_once_with(1)
+
+    def test_zero_limit_falls_back_to_cap(self):
+        # limit=0 is falsy → treated as "no explicit cap" (the safety cap).
+        db, query = self._mock_db([])
+        get_conversation_messages(db, "user-1", limit=0)
+        query.limit.assert_called_once_with(MAX_FLAT_MESSAGES)
+
+    def test_no_time_filters_means_single_user_filter(self):
+        db, query = self._mock_db([])
+        get_conversation_messages(db, "user-1", limit=10)
+        assert query.filter.call_count == 1  # only the user_id filter
+        query.limit.assert_called_once_with(10)
+
+    def test_never_creates_a_user(self):
+        # Keyed by users.id: a read tool must not insert rows as a side effect.
+        db, _query = self._mock_db([])
+        get_conversation_messages(db, "user-1")
+        db.add.assert_not_called()
+        db.commit.assert_not_called()
+
+    def test_since_and_until_add_filters_and_return_chronological(self):
+        older, newer = MagicMock(), MagicMock()
+        db, query = self._mock_db([newer, older])  # query yields newest-first
+        now = datetime.now(UTC).replace(tzinfo=None)
+        result = get_conversation_messages(db, "user-1", since=now - timedelta(hours=1), until=now)
+        # user_id + since + until => 3 filters
+        assert query.filter.call_count == 3
+        # reversed to oldest-first
+        assert result == [older, newer]

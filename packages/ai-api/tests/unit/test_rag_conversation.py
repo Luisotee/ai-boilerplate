@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 from ai_api.rag.conversation import (
     format_conversation_message,
     format_conversation_results,
+    format_transcript,
     merge_and_deduplicate_messages,
 )
 
@@ -279,3 +280,56 @@ class TestMergeAndDeduplicateMessages:
         m2 = _make_message(id=uid, timestamp=datetime(2025, 1, 1, 10, 0))
         result = merge_and_deduplicate_messages([m1], [m2])
         assert len(result) == 1
+
+
+def _transcript_msg(role, content, sender_name=None, timestamp=None):
+    m = MagicMock()
+    m.role = role
+    m.content = content
+    m.sender_name = sender_name
+    m.timestamp = timestamp
+    return m
+
+
+class TestFormatTranscript:
+    def test_assistant_uses_the_given_label(self):
+        out = format_transcript([_transcript_msg("assistant", "Hello")], assistant_label="Bot")
+        assert out == "Bot: Hello"
+
+    def test_group_user_no_double_prefix(self):
+        # Group content is already stored as "Name: text".
+        out = format_transcript(
+            [_transcript_msg("user", "Alice: hi", sender_name="Alice")], assistant_label="Bot"
+        )
+        assert out == "Alice: hi"
+
+    def test_group_user_prefix_added_when_missing(self):
+        out = format_transcript(
+            [_transcript_msg("user", "all good?", sender_name="Bob")], assistant_label="Bot"
+        )
+        assert out == "Bob: all good?"
+
+    def test_private_user_default_label(self):
+        out = format_transcript(
+            [_transcript_msg("user", "morning")], assistant_label="Bot", default_user_label="User"
+        )
+        assert out == "User: morning"
+
+    def test_private_user_bare_without_label(self):
+        out = format_transcript([_transcript_msg("user", "morning")], assistant_label="Bot")
+        assert out == "morning"
+
+    def test_timestamps_prefixed_when_requested(self):
+        out = format_transcript(
+            [_transcript_msg("assistant", "hi", timestamp=datetime(2026, 6, 5, 14, 30))],
+            assistant_label="Bot",
+            with_timestamps=True,
+        )
+        assert out == "[2026-06-05 14:30] Bot: hi"
+
+    def test_lines_are_joined_in_order(self):
+        out = format_transcript(
+            [_transcript_msg("user", "a", sender_name="Ann"), _transcript_msg("assistant", "b")],
+            assistant_label="Bot",
+        )
+        assert out == "Ann: a\nBot: b"
