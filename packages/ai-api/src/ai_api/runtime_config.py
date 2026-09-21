@@ -240,6 +240,29 @@ REGISTRY: tuple[SettingSpec, ...] = (
         "PostgreSQL connection string (applied at startup).",
         secret=True,
     ),
+    SettingSpec(
+        "kb_max_concurrent_processing",
+        "int",
+        False,
+        "knowledge_base",
+        "PDFs parsed at once per stream worker (read when the worker starts). "
+        "Keep low with Docling: each parse can take 1-2 GB of RAM.",
+    ),
+    SettingSpec(
+        "kb_max_pdf_retries",
+        "int",
+        False,
+        "knowledge_base",
+        "Retries for a PDF job after a timeout/network/429/5xx failure or a worker "
+        "crash mid-parse (applied at startup).",
+    ),
+    SettingSpec(
+        "kb_retry_base_delay_seconds",
+        "int",
+        False,
+        "knowledge_base",
+        "Base PDF retry backoff: base * 4**attempt seconds (applied at startup).",
+    ),
     SettingSpec("redis_host", "str", False, "infra", "Redis host (applied at startup)."),
     SettingSpec("redis_port", "int", False, "infra", "Redis port (applied at startup)."),
     SettingSpec(

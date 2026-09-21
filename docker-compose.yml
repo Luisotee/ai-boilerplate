@@ -162,6 +162,10 @@ services:
         condition: service_healthy
     networks:
       - aiagent-network
+    # The worker runs the agent AND parses every PDF (stream:pdf_processing).
+    # With INSTALL_DOCLING=true a single Docling parse can take 1-2 GB, so either
+    # keep KB_MAX_CONCURRENT_PROCESSING at 1-2 or raise this limit. An OOM kill
+    # mid-parse is recovered (the job is reclaimed and retried, then dead-lettered).
     deploy:
       resources:
         limits:

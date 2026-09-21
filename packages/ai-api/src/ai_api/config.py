@@ -96,6 +96,17 @@ class Settings(BaseSettings):
     kb_similarity_threshold: float = 0.7
     kb_max_chunk_tokens: int = 512
 
+    # PDF Processing Queue (stream:pdf_processing, consumed by the stream worker)
+    # Max PDFs parsed at once PER WORKER PROCESS. Each Docling parse can take
+    # 1-2 GB of RAM, so keep this low on small hosts (the worker container is
+    # capped at 2G by default). LlamaParse runs in the cloud and is cheap locally.
+    kb_max_concurrent_processing: int = Field(2, ge=1)
+    # Retries after a retriable failure (timeouts, network, HTTP 429/5xx), and
+    # re-deliveries of a job whose worker died mid-parse. 0 disables retrying.
+    kb_max_pdf_retries: int = Field(3, ge=0)
+    # Exponential backoff base: delay = base * 4**attempt (30s, 120s, 480s).
+    kb_retry_base_delay_seconds: int = Field(30, ge=0)
+
     # PDF Processing Timeouts
     # Outer wrapper for the entire pipeline. Must be > llamaparse_timeout_seconds
     # so the inner parser timeout produces its user-friendly error first.

@@ -623,3 +623,179 @@ class TestProcessPdfDocumentIntegration:
 
         assert fake_doc.status == "failed"
         assert "timeout" in (fake_doc.error_message or "").lower()
+
+
+class TestProcessPdfDocumentRetrySupport:
+    """Behaviour the PDF stream consumer relies on."""
+
+    @pytest.fixture
+    def fake_doc(self):
+        doc = MagicMock()
+        doc.original_filename = "test.pdf"
+        doc.doc_metadata = None
+        return doc
+
+    @pytest.mark.asyncio
+    async def test_returns_completed_and_clears_previous_chunks(
+        self, monkeypatch, tmp_path, fake_doc
+    ):
+        pdf = tmp_path / "x.pdf"
+        pdf.write_bytes(b"%PDF-stub")
+        session = _build_session_mock(fake_doc)
+        monkeypatch.setattr(processing, "SessionLocal", lambda: session)
+        monkeypatch.setattr(
+            processing,
+            "_parse_pdf",
+            AsyncMock(return_value=([(1, "hello world")], {"parser": "llamaparse"})),
+        )
+        embedder = MagicMock()
+        embedder.generate = AsyncMock(return_value=[0.1] * 8)
+        monkeypatch.setattr(processing, "create_embedding_service", lambda _key: embedder)
+
+        status = await process_pdf_document("doc-id", str(pdf), raise_on_failure=True)
+
+        assert status == "completed"
+        session.query.return_value.filter_by.return_value.delete.assert_called_once_with(
+            synchronize_session=False
+        )
+
+    @pytest.mark.asyncio
+    async def test_raise_on_failure_reraises_after_recording(self, monkeypatch, tmp_path, fake_doc):
+        pdf = tmp_path / "x.pdf"
+        pdf.write_bytes(b"%PDF-stub")
+        session = _build_session_mock(fake_doc, chunks_after=0)
+        monkeypatch.setattr(processing, "SessionLocal", lambda: session)
+        monkeypatch.setattr(
+            processing, "_parse_pdf", AsyncMock(side_effect=httpx.ConnectError("down"))
+        )
+
+        with pytest.raises(httpx.ConnectError):
+            await process_pdf_document("doc-id", str(pdf), raise_on_failure=True)
+        assert fake_doc.status == "failed"
+        assert fake_doc.error_message == "down"
+
+    @pytest.mark.asyncio
+    async def test_default_swallows_and_returns_failed(self, monkeypatch, tmp_path, fake_doc):
+        pdf = tmp_path / "x.pdf"
+        pdf.write_bytes(b"%PDF-stub")
+        session = _build_session_mock(fake_doc, chunks_after=0)
+        monkeypatch.setattr(processing, "SessionLocal", lambda: session)
+        monkeypatch.setattr(processing, "_parse_pdf", AsyncMock(side_effect=ValueError("bad")))
+
+        assert await process_pdf_document("doc-id", str(pdf)) == "failed"
+
+    @pytest.mark.asyncio
+    async def test_outer_timeout_reraises_when_asked(self, monkeypatch, tmp_path, fake_doc):
+        pdf = tmp_path / "x.pdf"
+        pdf.write_bytes(b"%PDF-stub")
+        session = _build_session_mock(fake_doc, chunks_after=0)
+        monkeypatch.setattr(processing, "SessionLocal", lambda: session)
+        monkeypatch.setattr(settings, "kb_processing_timeout_seconds", 0.05)
+
+        async def _slow_parse(_path: str):
+            await asyncio.sleep(1)
+
+        monkeypatch.setattr(processing, "_parse_pdf", _slow_parse)
+
+        with pytest.raises(TimeoutError):
+            await process_pdf_document("doc-id", str(pdf), raise_on_failure=True)
+        assert fake_doc.status == "failed"
+
+    @pytest.mark.asyncio
+    async def test_missing_document_returns_none(self, monkeypatch, tmp_path):
+        pdf = tmp_path / "x.pdf"
+        pdf.write_bytes(b"%PDF-stub")
+        session = _build_session_mock(None)
+        monkeypatch.setattr(processing, "SessionLocal", lambda: session)
+        assert await process_pdf_document("doc-id", str(pdf), raise_on_failure=True) is None
+
+    @pytest.mark.asyncio
+    async def test_skipped_chunks_metadata_is_a_new_dict(self, monkeypatch, tmp_path, fake_doc):
+        """In-place JSON mutation is not persisted by SQLAlchemy; a new dict is."""
+        pdf = tmp_path / "x.pdf"
+        pdf.write_bytes(b"%PDF-stub")
+        session = _build_session_mock(fake_doc, chunks_after=1)
+        monkeypatch.setattr(processing, "SessionLocal", lambda: session)
+        monkeypatch.setattr(
+            processing,
+            "_parse_pdf",
+            AsyncMock(return_value=([(1, "alpha"), (2, "beta")], {"parser": "llamaparse"})),
+        )
+        embedder = MagicMock()
+        embedder.generate = AsyncMock(side_effect=[[0.1] * 8, None])
+        monkeypatch.setattr(processing, "create_embedding_service", lambda _key: embedder)
+
+        await process_pdf_document("doc-id", str(pdf))
+
+        # page_count metadata set first, then REPLACED (not mutated) with errors added
+        assert fake_doc.doc_metadata["parser"] == "llamaparse"
+        assert fake_doc.doc_metadata["processing_errors"]["chunks_skipped"] == 1
+
+
+class TestIsRetriableError:
+    def _status_error(self, cls, status: int):
+        request = httpx.Request("POST", "https://api.example/parse")
+        response = httpx.Response(status, request=request)
+        if cls is httpx.HTTPStatusError:
+            return httpx.HTTPStatusError("err", request=request, response=response)
+        return cls("err", response=response, body=None)
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            TimeoutError(),
+            TimeoutError(),
+            httpx.ConnectError("refused"),
+            httpx.ReadTimeout("slow"),
+            ConnectionResetError(),
+        ],
+    )
+    def test_transient_errors_are_retriable(self, error):
+        assert processing.is_retriable_error(error) is True
+
+    @pytest.mark.parametrize("status", [408, 429, 500, 502, 503, 504])
+    def test_retriable_http_statuses(self, status):
+        from llama_cloud import APIStatusError
+
+        assert processing.is_retriable_error(self._status_error(httpx.HTTPStatusError, status))
+        assert processing.is_retriable_error(self._status_error(APIStatusError, status))
+
+    @pytest.mark.parametrize("status", [400, 401, 403, 404, 422])
+    def test_client_errors_are_not_retriable(self, status):
+        from llama_cloud import APIStatusError
+
+        assert not processing.is_retriable_error(self._status_error(httpx.HTTPStatusError, status))
+        assert not processing.is_retriable_error(self._status_error(APIStatusError, status))
+
+    def test_llama_connection_error_is_retriable(self):
+        from llama_cloud import APIConnectionError
+
+        request = httpx.Request("POST", "https://api.example/parse")
+        assert processing.is_retriable_error(APIConnectionError(request=request))
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            ValueError("LLAMA_CLOUD_API_KEY not configured"),
+            FileNotFoundError("gone.pdf"),
+            RuntimeError("Docling is not installed"),
+            TypeError("SDK signature drift"),
+        ],
+    )
+    def test_permanent_errors_are_not_retriable(self, error):
+        assert processing.is_retriable_error(error) is False
+
+    def test_wrapped_timeout_is_retriable(self):
+        """The pipeline turns parser timeouts into a friendlier ValueError."""
+        try:
+            try:
+                raise TimeoutError()
+            except TimeoutError:
+                raise ValueError("PDF parsing timeout.")
+        except ValueError as wrapped:
+            assert processing.is_retriable_error(wrapped) is True
+
+    def test_explicit_cause_is_followed(self):
+        err = RuntimeError("docling failed")
+        err.__cause__ = httpx.ConnectError("llamaparse down")
+        assert processing.is_retriable_error(err) is True

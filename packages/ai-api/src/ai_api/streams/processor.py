@@ -10,10 +10,10 @@ from ..config import get_whatsapp_api_key, get_whatsapp_client_url, settings
 from ..database import SessionLocal, get_conversation_history, save_message
 from ..embeddings import create_embedding_service
 from ..logger import logger
-from ..processing import process_pdf_document
 from ..queue.connection import get_redis_client
 from ..queue.utils import delete_job_image, get_job_image, save_job_chunk, set_job_metadata
 from ..whatsapp import WhatsAppClient, create_whatsapp_client
+from .manager import enqueue_pdf_processing
 
 #: Reply delivered when the model chain fails. English, like every user-facing
 #: string in this template. Deliberately NOT saved to conversation history.
@@ -112,11 +112,13 @@ async def process_chat_job_direct(
             )
             logger.info(f"[Job {job_id}] WhatsApp client initialized")
 
-            # Step 2.6: Process document if present
+            # Step 2.6: Hand an attached PDF to the PDF stream. Parsing happens in
+            # the PDF consumer (streams/pdf_consumer.py), not inline: a Docling
+            # parse can take minutes and would block this user's whole stream.
+            # The user sees ⏳ now and ✅/❌ on the same message once it's done.
             if has_document and document_id and document_path:
-                logger.info(f"[Job {job_id}] Processing document {document_id}")
+                logger.info(f"[Job {job_id}] Enqueuing document {document_id} for processing")
 
-                # Send processing reaction
                 if whatsapp_message_id:
                     try:
                         await whatsapp_client.send_reaction(whatsapp_jid, whatsapp_message_id, "⏳")
@@ -124,41 +126,30 @@ async def process_chat_job_direct(
                     except Exception as e:
                         logger.warning(f"[Job {job_id}] Failed to send processing reaction: {e}")
 
-                # Process the PDF document
                 try:
-                    await process_pdf_document(
+                    await enqueue_pdf_processing(
+                        redis=redis,
                         document_id=document_id,
                         file_path=document_path,
                         whatsapp_jid=whatsapp_jid,
+                        job_id=job_id,
+                        whatsapp_message_id=whatsapp_message_id,
+                        client_id=client_id,
                     )
-                    logger.info(f"[Job {job_id}] Document processing completed")
-
-                    # Send success reaction
-                    if whatsapp_message_id:
-                        try:
-                            await whatsapp_client.send_reaction(
-                                whatsapp_jid, whatsapp_message_id, "✅"
-                            )
-                            logger.info(f"[Job {job_id}] Sent success reaction ✅")
-                        except Exception as e:
-                            logger.warning(f"[Job {job_id}] Failed to send success reaction: {e}")
-
+                    logger.info(f"[Job {job_id}] Document enqueued for processing")
                 except Exception as e:
-                    logger.error(f"[Job {job_id}] Document processing failed: {e}")
+                    logger.error(f"[Job {job_id}] Failed to enqueue document: {e}", exc_info=True)
 
-                    # Send failure reaction
                     if whatsapp_message_id:
                         try:
                             await whatsapp_client.send_reaction(
                                 whatsapp_jid, whatsapp_message_id, "❌"
                             )
-                            logger.info(f"[Job {job_id}] Sent failure reaction ❌")
                         except Exception as reaction_error:
                             logger.warning(
                                 f"[Job {job_id}] Failed to send failure reaction: {reaction_error}"
                             )
 
-                    # Continue to send error response to user
                     full_response = f"Sorry, I couldn't process your document '{document_filename}'. Please try uploading it again."
 
                     # Save response and return early
@@ -174,18 +165,25 @@ async def process_chat_job_direct(
                             "conversation_type": conversation_type,
                             "total_chunks": 1,
                             "user_message_id": user_message_id,
-                            "error": str(e),
+                            "error": "document_enqueue_failed",
                         },
                     )
 
                     return {
                         "success": False,
                         "job_id": job_id,
-                        "error": str(e),
+                        "error": "document_enqueue_failed",
                     }
 
-                # Update message to indicate document was processed
-                message = f"I have uploaded a document called '{document_filename}'. Please analyze it and let me know what it contains."
+                # The document is parsed asynchronously, so the agent cannot read
+                # it yet: say so, instead of asking it to analyze content it can't
+                # see (which invites a made-up summary).
+                message = (
+                    f"I have uploaded a document called '{document_filename}'. It is being "
+                    "processed in the background and is not searchable yet. Acknowledge it "
+                    "briefly: I'll see a ✅ reaction on my message when it's ready (❌ if it "
+                    "fails), and then I can ask questions about it."
+                )
 
             # Step 3: Prepare agent dependencies
             agent_deps = AgentDeps(

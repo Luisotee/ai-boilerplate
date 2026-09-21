@@ -1,6 +1,7 @@
 import uuid
+from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 from starlette.requests import Request
 
@@ -9,10 +10,28 @@ from ..database import get_db
 from ..deps import UPLOAD_DIR, limiter
 from ..kb_models import KnowledgeBaseDocument
 from ..logger import logger
-from ..processing import process_pdf_document
+from ..queue.connection import get_redis_client
 from ..schemas import BatchUploadResponse, FileUploadResult, UploadPDFResponse
+from ..streams.manager import enqueue_pdf_processing
 
 router = APIRouter()
+
+
+def _discard_upload(db: Session, document: KnowledgeBaseDocument, file_path: Path) -> None:
+    """Remove a just-created document row and its file (enqueue failed)."""
+    try:
+        db.delete(document)
+        db.commit()
+    except Exception:
+        logger.error(f"Failed to delete unqueued document {document.id}", exc_info=True)
+        db.rollback()
+        return
+    # File only after the row is gone (an orphan file is harmless, a row
+    # pointing at a missing file is not).
+    try:
+        file_path.unlink(missing_ok=True)
+    except OSError:
+        logger.warning(f"Failed to delete unqueued upload {file_path}", exc_info=True)
 
 
 @router.post("/knowledge-base/upload", response_model=UploadPDFResponse, tags=["Knowledge Base"])
@@ -20,14 +39,14 @@ router = APIRouter()
 async def upload_pdf(
     request: Request,
     file: UploadFile = File(...),
-    background_tasks: BackgroundTasks = BackgroundTasks(),
     db: Session = Depends(get_db),
 ):
     """
     Upload a PDF document to the knowledge base
 
-    The PDF will be parsed with Docling, chunked semantically, and indexed for retrieval.
-    Processing happens in the background.
+    The PDF is queued on the `stream:pdf_processing` Redis Stream and parsed by the
+    stream worker (LlamaParse or Docling, per `PDF_PARSER`), chunked, and indexed
+    for retrieval. Poll `/knowledge-base/status/{document_id}` for progress.
 
     **Request:**
     - `file`: PDF file (multipart/form-data)
@@ -35,7 +54,7 @@ async def upload_pdf(
     **Response:**
     - `document_id`: UUID for tracking processing status
     - `filename`: Original filename
-    - `status`: Initial status ('pending')
+    - `status`: Initial status ('queued')
     - `message`: Human-readable status message
     """
     logger.info(f"Received PDF upload: {file.filename}")
@@ -93,7 +112,7 @@ async def upload_pdf(
             original_filename=file.filename,
             file_size_bytes=file_size,
             mime_type=file.content_type or "application/pdf",
-            status="pending",
+            status="queued",
         )
         db.add(document)
         db.commit()
@@ -108,18 +127,26 @@ async def upload_pdf(
             file_path.unlink()
         raise HTTPException(status_code=500, detail="Failed to create database record")
 
-    # Schedule background processing
-    background_tasks.add_task(
-        process_pdf_document, document_id=str(doc_id), file_path=str(file_path)
-    )
+    # Enqueue for the stream worker's PDF consumer
+    try:
+        async with get_redis_client() as redis_client:
+            await enqueue_pdf_processing(
+                redis_client, document_id=str(doc_id), file_path=str(file_path)
+            )
+    except Exception:
+        logger.error(f"Failed to enqueue PDF processing for {doc_id}", exc_info=True)
+        # Nothing would ever pick the document up: undo the upload so the client
+        # can simply retry (and a retry isn't blocked as a duplicate).
+        _discard_upload(db, document, file_path)
+        raise HTTPException(status_code=503, detail="Document queue unavailable. Please try again.")
 
-    logger.info(f"Scheduled background processing for document {doc_id}")
+    logger.info(f"Enqueued PDF processing for document {doc_id}")
 
     return UploadPDFResponse(
         document_id=str(doc_id),
         filename=file.filename,
-        status="pending",
-        message="PDF uploaded successfully. Processing in background.",
+        status="queued",
+        message="PDF uploaded successfully. Queued for processing.",
     )
 
 
@@ -132,15 +159,14 @@ async def upload_pdf(
 async def upload_pdf_batch(
     request: Request,
     files: list[UploadFile] = File(...),
-    background_tasks: BackgroundTasks = BackgroundTasks(),
     db: Session = Depends(get_db),
 ):
     """
     Upload multiple PDF documents to the knowledge base in a single request
 
-    Each file is validated independently. Valid files are saved and processed,
-    while invalid files are rejected with error details. Processing happens in
-    the background for all accepted files.
+    Each file is validated independently. Valid files are saved and queued on the
+    `stream:pdf_processing` Redis Stream for the stream worker, while invalid
+    files are rejected with error details.
 
     **Request:**
     - `files`: Multiple PDF files (multipart/form-data)
@@ -277,7 +303,7 @@ async def upload_pdf_batch(
                 original_filename=filename,
                 file_size_bytes=file_size,
                 mime_type=file.content_type or "application/pdf",
-                status="pending",
+                status="queued",
             )
             db.add(document)
             db.commit()
@@ -285,12 +311,26 @@ async def upload_pdf_batch(
 
             logger.info(f"Created database record for document {doc_id}")
 
-            # Schedule background processing
-            background_tasks.add_task(
-                process_pdf_document, document_id=str(doc_id), file_path=str(file_path)
-            )
+            # Enqueue for the stream worker's PDF consumer
+            try:
+                async with get_redis_client() as redis_client:
+                    await enqueue_pdf_processing(
+                        redis_client, document_id=str(doc_id), file_path=str(file_path)
+                    )
+            except Exception:
+                logger.error(f"Failed to enqueue PDF processing for {doc_id}", exc_info=True)
+                _discard_upload(db, document, file_path)
+                results.append(
+                    FileUploadResult(
+                        filename=filename,
+                        status="rejected",
+                        error="Document queue unavailable. Please try again.",
+                    )
+                )
+                rejected_count += 1
+                continue
 
-            logger.info(f"Scheduled processing for {filename} ({doc_id})")
+            logger.info(f"Enqueued processing for {filename} ({doc_id})")
 
             # Add to accepted results
             results.append(
@@ -357,7 +397,7 @@ async def get_document_status(document_id: str, db: Session = Depends(get_db)):
     **Response:**
     - `id`: Document UUID
     - `original_filename`: Original filename
-    - `status`: Current status (pending, processing, completed, failed)
+    - `status`: Current status (queued, processing, completed, partial, failed)
     - `chunk_count`: Number of chunks created (0 if not completed)
     - `error_message`: Error details if status is 'failed'
     - `upload_date`: When document was uploaded
@@ -403,7 +443,7 @@ async def list_documents(
     Returns a paginated list of documents with optional status filtering.
 
     **Query Parameters:**
-    - `status`: Optional filter by status (pending, processing, completed, failed)
+    - `status`: Optional filter by status (queued, pending, processing, completed, partial, failed)
     - `limit`: Maximum number of documents to return (default: 50, max: 100)
     - `offset`: Number of documents to skip for pagination (default: 0)
 
@@ -425,7 +465,7 @@ async def list_documents(
 
         # Apply status filter if provided
         if status:
-            valid_statuses = ["pending", "processing", "completed", "partial", "failed"]
+            valid_statuses = ["queued", "pending", "processing", "completed", "partial", "failed"]
             if status not in valid_statuses:
                 raise HTTPException(
                     status_code=400,

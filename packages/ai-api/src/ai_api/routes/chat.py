@@ -460,7 +460,7 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
                     original_filename=chat_request.document_filename,
                     file_size_bytes=file_size,
                     mime_type=chat_request.document_mimetype,
-                    status="pending",
+                    status="queued",
                     whatsapp_jid=chat_request.whatsapp_jid,
                     expires_at=expires_at,
                     is_conversation_scoped=True,

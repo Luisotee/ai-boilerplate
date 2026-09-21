@@ -24,7 +24,9 @@ class KnowledgeBaseDocument(Base):
     to document chunks.
 
     Status values:
-    - 'pending': Upload received, queued for processing
+    - 'queued': Upload received, waiting on the PDF stream (also while a retry is
+      scheduled). Rows created before the PDF stream existed may say 'pending'
+    - 'pending': Legacy name for 'queued'
     - 'processing': Currently being parsed and chunked
     - 'completed': Successfully processed, all chunks generated
     - 'partial': Partially processed, some chunks created before failure
@@ -41,8 +43,8 @@ class KnowledgeBaseDocument(Base):
     upload_date = Column(DateTime, default=datetime.utcnow, nullable=False)
     processed_date = Column(DateTime, nullable=True)
     status = Column(
-        String, nullable=False, default="pending"
-    )  # 'pending', 'processing', 'completed', 'failed'
+        String, nullable=False, default="queued"
+    )  # 'queued', 'processing', 'completed', 'partial', 'failed' (legacy: 'pending')
     error_message = Column(Text, nullable=True)
     doc_metadata = Column(JSON, nullable=True)  # Document-level metadata (author, title, etc.)
     chunk_count = Column(Integer, default=0)

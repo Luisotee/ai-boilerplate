@@ -310,19 +310,36 @@ async def process_pdf_document(
     document_id: str,
     file_path: str,
     whatsapp_jid: str | None = None,
-):
+    *,
+    raise_on_failure: bool = False,
+) -> str | None:
     """
-    Background task to process an uploaded PDF document with timeout constraints.
+    Process an uploaded PDF document with timeout constraints.
+
+    Called by the PDF stream consumer (`streams/pdf_consumer.py`) in the worker.
 
     Applies multi-level timeouts:
-    - Overall processing timeout (300s default)
-    - Parser timeout (300s for LlamaParse, 180s for Docling)
-    - Per-embedding timeout (10s default)
-    - Batch embedding timeout (240s default)
+    - Overall processing timeout (KB_PROCESSING_TIMEOUT_SECONDS)
+    - Parser timeout (LLAMAPARSE_TIMEOUT_SECONDS / KB_PARSE_TIMEOUT_SECONDS)
+    - Per-embedding timeout (KB_EMBEDDING_TIMEOUT_SECONDS)
+    - Batch embedding timeout (KB_EMBEDDING_BATCH_TIMEOUT_SECONDS)
+
+    Failures are always recorded on the document row (status + error_message).
+    With ``raise_on_failure=True`` the exception is re-raised afterwards so the
+    caller can decide whether to retry (see ``is_retriable_error``).
+
+    Re-running it for the same document is safe: chunks left by an earlier
+    attempt are deleted before the new ones are stored.
+
+    Returns:
+        The document's final status (``completed`` / ``partial`` / ``failed``),
+        or None when the document row no longer exists.
     """
     try:
-        await asyncio.wait_for(
-            _process_pdf_document_impl(document_id, file_path, whatsapp_jid),
+        return await asyncio.wait_for(
+            _process_pdf_document_impl(
+                document_id, file_path, whatsapp_jid, raise_on_failure=raise_on_failure
+            ),
             timeout=settings.kb_processing_timeout_seconds,
         )
     except TimeoutError:
@@ -343,13 +360,18 @@ async def process_pdf_document(
             logger.error(f"Failed to update document status after timeout: {update_error}")
         finally:
             db.close()
+        if raise_on_failure:
+            raise
+        return "failed"
 
 
 async def _process_pdf_document_impl(
     document_id: str,
     file_path: str,
     whatsapp_jid: str | None = None,
-):
+    *,
+    raise_on_failure: bool = False,
+) -> str | None:
     """Internal implementation of PDF processing with individual timeouts."""
     db = SessionLocal()
     encoder = tiktoken.get_encoding("cl100k_base")
@@ -360,8 +382,13 @@ async def _process_pdf_document_impl(
         document = db.query(KnowledgeBaseDocument).filter_by(id=document_id).first()
         if not document:
             logger.error(f"Document {document_id} not found in database")
-            return
+            return None
 
+        # A retry (or a job reclaimed from a crashed worker) may find chunks
+        # stored by an earlier attempt — drop them so they aren't duplicated.
+        db.query(KnowledgeBaseChunk).filter_by(document_id=document_id).delete(
+            synchronize_session=False
+        )
         document.status = "processing"
         db.commit()
         logger.info(f"Document status updated to 'processing': {document.original_filename}")
@@ -451,24 +478,27 @@ async def _process_pdf_document_impl(
         document.chunk_count = stored_count
 
         if failure_metadata["chunks_skipped"] > 0:
-            if document.doc_metadata is None:
-                document.doc_metadata = {}
-            document.doc_metadata["processing_errors"] = {
-                "total_chunks_parsed": failure_metadata["total_chunks_parsed"],
-                "chunks_stored": stored_count,
-                "chunks_skipped": failure_metadata["chunks_skipped"],
-                "skipped_chunk_indices": failure_metadata["skipped_chunk_indices"],
-                "failure_summary": {
-                    "embedding_timeout": sum(
-                        1
-                        for r in failure_metadata["failure_reasons"].values()
-                        if r == "embedding_timeout"
-                    ),
-                    "embedding_generation_failed": sum(
-                        1
-                        for r in failure_metadata["failure_reasons"].values()
-                        if r == "embedding_generation_failed"
-                    ),
+            # Assign a NEW dict: an in-place mutation of a JSON column is invisible
+            # to SQLAlchemy's change tracking, so it was silently never persisted.
+            document.doc_metadata = {
+                **(document.doc_metadata or {}),
+                "processing_errors": {
+                    "total_chunks_parsed": failure_metadata["total_chunks_parsed"],
+                    "chunks_stored": stored_count,
+                    "chunks_skipped": failure_metadata["chunks_skipped"],
+                    "skipped_chunk_indices": failure_metadata["skipped_chunk_indices"],
+                    "failure_summary": {
+                        "embedding_timeout": sum(
+                            1
+                            for r in failure_metadata["failure_reasons"].values()
+                            if r == "embedding_timeout"
+                        ),
+                        "embedding_generation_failed": sum(
+                            1
+                            for r in failure_metadata["failure_reasons"].values()
+                            if r == "embedding_generation_failed"
+                        ),
+                    },
                 },
             }
 
@@ -478,10 +508,12 @@ async def _process_pdf_document_impl(
             f"✅ Processed document {document_id}: {document.original_filename} "
             f"({stored_count} chunks, status: {document.status})"
         )
+        return document.status
 
     except Exception as e:
         logger.error(f"❌ Error processing document {document_id}: {str(e)}", exc_info=True)
 
+        final_status = "failed"
         try:
             document = db.query(KnowledgeBaseDocument).filter_by(id=document_id).first()
             if document:
@@ -502,6 +534,7 @@ async def _process_pdf_document_impl(
                 document.processed_date = datetime.now(UTC)
                 db.commit()
 
+                final_status = document.status
                 logger.info(
                     f"Document {document_id} marked as {document.status} "
                     f"with {actual_chunk_count} chunks"
@@ -509,6 +542,10 @@ async def _process_pdf_document_impl(
         except Exception as update_error:
             logger.error(f"Failed to update document status: {str(update_error)}")
             db.rollback()
+
+        if raise_on_failure:
+            raise
+        return final_status
 
     finally:
         db.close()
@@ -588,3 +625,52 @@ async def _generate_and_store_embeddings(
     }
 
     return stored_count, failure_metadata
+
+
+# HTTP statuses worth retrying: rate limiting and upstream/server failures.
+_RETRIABLE_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+
+
+def _is_retriable_single(error: BaseException) -> bool:
+    if isinstance(error, (TimeoutError, asyncio.TimeoutError)):
+        return True
+    if isinstance(error, httpx.TransportError):  # connect/read/write errors + timeouts
+        return True
+    if isinstance(error, httpx.HTTPStatusError):
+        return error.response.status_code in _RETRIABLE_HTTP_STATUSES
+    if isinstance(error, ConnectionError):
+        return True
+    try:
+        from llama_cloud import APIConnectionError, APIStatusError
+    except ImportError:  # pragma: no cover - llama-cloud is a hard dependency
+        return False
+    if isinstance(error, APIConnectionError):  # includes APITimeoutError
+        return True
+    if isinstance(error, APIStatusError):
+        return error.status_code in _RETRIABLE_HTTP_STATUSES
+    return False
+
+
+def is_retriable_error(error: BaseException) -> bool:
+    """
+    Decide whether a failed PDF processing attempt is worth retrying.
+
+    Retriable: timeouts (parser, embeddings, overall), network/transport errors,
+    and HTTP 408/429/5xx from LlamaParse or other HTTP calls.
+    Not retriable: everything else — missing API key / parser, file not found,
+    empty parse result, programming errors — because a retry would fail the same
+    way.
+
+    Walks the exception chain (``__cause__`` / ``__context__``): the pipeline
+    wraps some timeouts in a friendlier ``ValueError`` (e.g. "PDF parsing
+    timeout"), and auto-mode re-raises a Docling error ``from`` the LlamaParse
+    error that triggered the fallback.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if _is_retriable_single(current):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
