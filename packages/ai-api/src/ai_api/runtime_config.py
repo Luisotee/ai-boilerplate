@@ -59,6 +59,17 @@ REGISTRY: tuple[SettingSpec, ...] = (
         "(4915755945319, +49 157 5594 5319, 4915755945319@s.whatsapp.net) or a "
         "verbatim chat id (120363...@g.us, ...@lid, tg:123). Empty = all allowed.",
     ),
+    SettingSpec(
+        "group_gating",
+        "str",
+        False,
+        "access",
+        "How a group gets in scope when the whitelist is set: 'jid' = the group's "
+        "own id must be listed; 'membership' = the chat client decides (Baileys: "
+        "the group has a whitelisted member; Telegram: any group) and only "
+        "whitelisted senders get replies. Shared with the TS clients; restart all.",
+        choices=("jid", "membership"),
+    ),
     # --- Hot: conversation behaviour ---
     SettingSpec(
         "history_limit_private",

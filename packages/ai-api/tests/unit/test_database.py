@@ -13,6 +13,7 @@ from ai_api.database import (
     _clean_profile_name,
     get_conversation_messages,
     get_or_create_user,
+    is_group_jid,
     is_telegram_jid,
     phone_from_jid,
     set_setting_overrides_batch,
@@ -95,6 +96,20 @@ class TestPhoneFromJid:
     def test_long_phone_number(self):
         jid = "00491761234567890@s.whatsapp.net"
         assert phone_from_jid(jid) == "+00491761234567890"
+
+
+class TestIsGroupJid:
+    def test_whatsapp_group(self):
+        assert is_group_jid("120363000000000000@g.us") is True
+
+    def test_telegram_group_is_negative_id(self):
+        assert is_group_jid("tg:-1001234567890") is True
+        assert is_group_jid("tg:-42") is True
+
+    def test_private_chats_are_not_groups(self):
+        assert is_group_jid("tg:42") is False
+        assert is_group_jid("15551234567@s.whatsapp.net") is False
+        assert is_group_jid("109994229891095@lid") is False
 
 
 class TestIsTelegramJid:

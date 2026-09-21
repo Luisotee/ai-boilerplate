@@ -265,6 +265,8 @@ pnpm format          # Format all code
 | `DATABASE_URL` | PostgreSQL connection string |
 | `REDIS_URL` | Redis connection string |
 | `AI_API_URL` | AI API endpoint for WhatsApp client |
+| `WHITELIST_PHONES` | Comma-separated phones / chat ids allowed to use the bot (empty = everyone) |
+| `GROUP_GATING` | How a group gets in scope when the whitelist is set: `jid` (default — the group's own id must be listed) or `membership` (Baileys: any group with a whitelisted member; Telegram: any group; the bot saves all messages there but replies only to whitelisted senders). Read by the AI API and the Baileys/Telegram clients |
 | `LOGFIRE_TOKEN` | Pydantic Logfire write token for LLM token/cost tracking (optional; empty disables it) |
 | `LOGFIRE_ENVIRONMENT` | Environment label shown in the Logfire UI (default `development`) |
 

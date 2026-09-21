@@ -54,6 +54,14 @@ class Settings(BaseSettings):
     # Comma-separated entries, each matched as either a phone number or a
     # verbatim chat id (group JID, @lid, tg:<chat_id>). Empty = all allowed.
     whitelist_phones: str = ""
+    # How a GROUP gets in scope when the whitelist is set (shared with the TS
+    # clients via the root .env):
+    #   jid        - the group's own chat id must be listed (historical behaviour)
+    #   membership - the chat client decides (Baileys: the group has a
+    #                whitelisted member; Telegram: any group), and replies only
+    #                to whitelisted senders. This API then admits every group
+    #                JID, because it cannot see group membership.
+    group_gating: Literal["jid", "membership"] = "jid"
 
     # CORS
     cors_origins: str = ""  # Comma-separated allowed origins

@@ -148,3 +148,143 @@ describe('whitelist gate placement in messages.upsert', () => {
     expect(sendFailureReaction).not.toHaveBeenCalled(); // nothing reacted into a blocked chat
   });
 });
+
+// ---------------------------------------------------------------------------
+// GROUP_GATING — the same gate, for group chats, in both modes.
+// ---------------------------------------------------------------------------
+
+const GROUP = '120363000000000001@g.us';
+const BOT_PN = '5511000000000@s.whatsapp.net';
+const MEMBER = `${PHONE}@s.whatsapp.net`; // whitelisted
+const STRANGER = '4915700000000@s.whatsapp.net'; // not whitelisted
+
+function makeGroupMsg(participant: string, mention: boolean) {
+  return {
+    key: { remoteJid: GROUP, participant, fromMe: false, id: 'G1' },
+    message: {
+      extendedTextMessage: {
+        text: mention ? '@bot hello' : 'hello all',
+        contextInfo: mention ? { mentionedJid: [BOT_PN] } : {},
+      },
+    },
+    pushName: 'Someone',
+  };
+}
+
+describe.each(['jid', 'membership'] as const)('GROUP_GATING=%s', (mode) => {
+  let userSpy: ReturnType<typeof vi.fn>;
+  let handlers: Map<string, (arg: unknown) => unknown>;
+  let handleTextMessage: ReturnType<typeof vi.fn>;
+  let groupMetadata: ReturnType<typeof vi.fn>;
+
+  async function boot(participants: string[]) {
+    vi.resetModules();
+    vi.clearAllMocks();
+    vi.stubEnv('WHITELIST_PHONES', PHONE);
+    vi.stubEnv('GROUP_GATING', mode);
+
+    handlers = new Map();
+    userSpy = vi.fn(() => ({ id: '5511000000000:42@s.whatsapp.net', lid: '123456789:42@lid' }));
+    groupMetadata = vi.fn().mockResolvedValue({
+      id: GROUP,
+      subject: 'Team',
+      participants: participants.map((id) => ({ id })),
+    });
+    const sock: Record<string, unknown> = {
+      ev: {
+        on: vi.fn((event: string, cb: (arg: unknown) => unknown) => handlers.set(event, cb)),
+      },
+      sendPresenceUpdate: vi.fn(),
+      groupMetadata,
+      signalRepository: { lidMapping: { getPNForLID: vi.fn().mockResolvedValue(null) } },
+    };
+    Object.defineProperty(sock, 'user', { get: userSpy, configurable: true });
+    makeWASocket.mockReturnValue(sock);
+
+    const { initializeWhatsApp } = await import('../../src/whatsapp.js');
+    await initializeWhatsApp();
+    const { config } = await import('../../src/config.js');
+    expect(config.groupGating).toBe(mode);
+    ({ handleTextMessage } = (await import('../../src/handlers/text.js')) as never);
+  }
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  async function drive(msg: unknown) {
+    await handlers.get('messages.upsert')!({ messages: [msg], type: 'notify' });
+  }
+
+  it('unlisted group with a whitelisted member: jid drops it; membership saves AND answers the member', async () => {
+    await boot([MEMBER, STRANGER]);
+    await drive(makeGroupMsg(MEMBER, true));
+
+    if (mode === 'jid') {
+      expect(handleTextMessage).not.toHaveBeenCalled();
+      expect(userSpy).not.toHaveBeenCalled(); // gate precedes the sock.user deref
+    } else {
+      expect(handleTextMessage).toHaveBeenCalledOnce();
+      expect(handleTextMessage.mock.calls[0][5]).not.toHaveProperty('saveOnly', true);
+      // Whitelisted sender: in scope without a metadata fetch.
+      expect(groupMetadata).not.toHaveBeenCalled();
+    }
+  });
+
+  it('PRIVACY: a non-whitelisted sender @mentioning the bot is saved, never answered (membership)', async () => {
+    await boot([MEMBER, STRANGER]);
+    await drive(makeGroupMsg(STRANGER, true));
+
+    if (mode === 'jid') {
+      expect(handleTextMessage).not.toHaveBeenCalled();
+    } else {
+      expect(handleTextMessage).toHaveBeenCalledOnce();
+      expect(handleTextMessage.mock.calls[0][5]).toMatchObject({ saveOnly: true });
+    }
+  });
+
+  it('a group with no whitelisted member is dropped before sock.user is touched', async () => {
+    await boot([STRANGER]);
+    await drive(makeGroupMsg(STRANGER, true));
+
+    expect(handleTextMessage).not.toHaveBeenCalled();
+    expect(userSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe.each(['jid', 'membership'] as const)('GROUP_GATING=%s with the group listed', (mode) => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('answers any member of an explicitly listed group', async () => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    vi.stubEnv('WHITELIST_PHONES', `${PHONE},${GROUP}`);
+    vi.stubEnv('GROUP_GATING', mode);
+    const handlers = new Map<string, (arg: unknown) => unknown>();
+    const sock: Record<string, unknown> = {
+      ev: {
+        on: vi.fn((event: string, cb: (arg: unknown) => unknown) => handlers.set(event, cb)),
+      },
+      sendPresenceUpdate: vi.fn(),
+      groupMetadata: vi.fn(),
+      user: { id: '5511000000000:42@s.whatsapp.net' },
+    };
+    makeWASocket.mockReturnValue(sock);
+    const { initializeWhatsApp } = await import('../../src/whatsapp.js');
+    await initializeWhatsApp();
+    const { handleTextMessage } = (await import('../../src/handlers/text.js')) as never as {
+      handleTextMessage: ReturnType<typeof vi.fn>;
+    };
+
+    await handlers.get('messages.upsert')!({
+      messages: [makeGroupMsg(STRANGER, true)],
+      type: 'notify',
+    });
+
+    expect(handleTextMessage).toHaveBeenCalledOnce();
+    expect(handleTextMessage.mock.calls[0][5]).not.toHaveProperty('saveOnly', true);
+    expect(sock.groupMetadata).not.toHaveBeenCalled();
+  });
+});

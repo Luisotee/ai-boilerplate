@@ -16,6 +16,7 @@ from ..database import (
     get_conversation_history,
     get_db,
     get_or_create_user,
+    is_group_jid,
     save_message,
 )
 from ..deps import UPLOAD_DIR, limiter
@@ -88,9 +89,18 @@ def _is_whitelisted(whatsapp_jid: str, phone: str | None = None) -> bool:
     The phone clause is what makes a bare-phone entry work at all for a
     LID-addressed WhatsApp chat, whose jid digits are an anonymized account id
     rather than a phone number.
+
+    GROUP_GATING=membership: every group JID (WhatsApp `@g.us` or Telegram
+    `tg:-…`) is admitted here, because group scope then depends on who is IN
+    the group — which only the chat client can see (Baileys checks the
+    participant list; Telegram cannot enumerate members at all). The client is
+    authoritative for groups in that mode; this layer still enforces 1:1 chats.
+    In the default `jid` mode groups are matched like any other chat id.
     """
     raw = runtime_config.get("whitelist_phones")
     if not raw:
+        return True
+    if settings.group_gating == "membership" and is_group_jid(whatsapp_jid):
         return True
     return is_whitelisted(_parse_whitelist(raw), whatsapp_jid, phone)
 
