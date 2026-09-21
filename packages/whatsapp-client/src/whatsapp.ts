@@ -26,7 +26,7 @@ import { extractDocumentData } from './handlers/document.js';
 import { sendFailureReaction } from './utils/reactions.js';
 import { stripDeviceSuffix, isGroupChat, isLid, resolveSenderPhone } from './utils/jid.js';
 import { isWhitelisted } from './utils/whitelist.js';
-import { shouldRespondInGroup } from './utils/message.js';
+import { isSenderGroupAdmin, shouldRespondInGroup } from './utils/message.js';
 
 const DEFAULT_IMAGE_PROMPT = 'Please describe and analyze this image';
 const DEFAULT_DOCUMENT_PROMPT = 'I have uploaded a document for you to analyze';
@@ -480,10 +480,7 @@ export async function initializeWhatsApp(): Promise<void> {
             try {
               const metadata = await sock.groupMetadata(whatsappJid);
               const senderJid = stripDeviceSuffix(msg.key.participant || '');
-              const participant = metadata.participants.find(
-                (p) => stripDeviceSuffix(p.id) === senderJid
-              );
-              isGroupAdmin = participant?.admin === 'admin' || participant?.admin === 'superadmin';
+              isGroupAdmin = isSenderGroupAdmin(metadata.participants, msg.key);
               logger.debug({ senderJid, isGroupAdmin }, 'Checked group admin status for command');
             } catch (error) {
               logger.warn({ error, whatsappJid }, 'Failed to check group admin status');

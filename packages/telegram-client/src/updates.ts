@@ -16,6 +16,7 @@ import { chatIdToJid, chatTypeToConversationType } from './utils/telegram-id.js'
 import { isAddressedToBot, stripBotMention } from './utils/mention.js';
 import { documentMarker, imageMarker } from './utils/group-media-marker.js';
 import { isWhitelisted } from './utils/whitelist.js';
+import { isSenderGroupAdmin, looksLikeCommand } from './services/group-admin.js';
 
 export function registerUpdateHandlers(): void {
   // ---------------- Text ----------------
@@ -28,10 +29,21 @@ export function registerUpdateHandlers(): void {
     const isGroup = conversationType === 'group';
     const addressed = !isGroup || isAddressed(ctx);
     const cleanText = addressed && isGroup ? stripBotMentionFromCtx(ctx, text) : text;
+    const saveOnly = isGroup && !addressed;
+
+    // The AI API gates group admin commands and fails closed (anything but an
+    // explicit `true` is refused), so resolve admin status — lazily, only for
+    // addressed group messages that look like a command, so ordinary chatter
+    // costs no getChatMember round trip. Mirrors Baileys' lazy groupMetadata.
+    const isGroupAdmin =
+      isGroup && !saveOnly && looksLikeCommand(cleanText)
+        ? await isSenderGroupAdmin(ctx)
+        : undefined;
 
     await handleTextMessage(ctx, cleanText, {
       senderJid: ctx.from ? chatIdToJid(ctx.from.id) : undefined,
-      saveOnly: isGroup && !addressed,
+      saveOnly,
+      isGroupAdmin,
     });
   });
 

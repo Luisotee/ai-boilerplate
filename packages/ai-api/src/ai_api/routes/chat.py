@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from starlette.requests import Request
 
 from ..agent import AgentDeps, format_message_history, get_ai_response
-from ..commands import is_command, parse_and_execute, strip_leading_mentions
+from ..commands import is_command, normalize_command, parse_and_execute
 from ..config import get_whatsapp_api_key, get_whatsapp_client_url, settings
 from ..database import (
     get_conversation_history,
@@ -249,7 +249,7 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
 
         # /link and /unlink need an async Redis client, so they're handled
         # here rather than inside the sync `parse_and_execute`.
-        cleaned_message = strip_leading_mentions(chat_request.message)
+        cleaned_message = normalize_command(chat_request.message)
         link_parts = cleaned_message.split()
         link_command = link_parts[0].lower() if link_parts else ""
 

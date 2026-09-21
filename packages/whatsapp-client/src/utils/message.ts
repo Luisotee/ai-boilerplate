@@ -1,4 +1,4 @@
-import type { WAMessage } from '@whiskeysockets/baileys';
+import type { GroupParticipant, WAMessage, WAMessageKey } from '@whiskeysockets/baileys';
 import { extractPhoneFromJid, phoneFromJid, stripDeviceSuffix } from './jid.js';
 import { logger } from '../logger.js';
 
@@ -81,4 +81,30 @@ export function isReplyToBotMessage(msg: WAMessage, botJid: string, botLid?: str
  */
 export function shouldRespondInGroup(msg: WAMessage, botJid: string, botLid?: string): boolean {
   return isBotMentioned(msg, botJid, botLid) || isReplyToBotMessage(msg, botJid, botLid);
+}
+
+/**
+ * Whether the sender of a group message is an admin/superadmin of that group.
+ *
+ * Matches on every identifier either side carries — the sender's
+ * `key.participant` / `key.participantAlt` against each participant's `id`,
+ * `lid` and `phoneNumber` — because the sender may be LID-addressed while the
+ * group metadata lists the phone JID (or vice versa). The AI API refuses admin
+ * commands on anything but an explicit `true`, so a format mismatch would lock
+ * a real admin out.
+ */
+export function isSenderGroupAdmin(
+  participants: GroupParticipant[],
+  key: Pick<WAMessageKey, 'participant' | 'participantAlt'>
+): boolean {
+  const senderIds = new Set(
+    [key.participant, key.participantAlt]
+      .filter((j): j is string => Boolean(j))
+      .map(stripDeviceSuffix)
+  );
+  if (senderIds.size === 0) return false;
+  const participant = participants.find((p) =>
+    [p.id, p.lid, p.phoneNumber].some((j) => j && senderIds.has(stripDeviceSuffix(j)))
+  );
+  return participant?.admin === 'admin' || participant?.admin === 'superadmin';
 }
