@@ -20,6 +20,7 @@ from ..database import (
 )
 from ..deps import UPLOAD_DIR, limiter
 from ..embeddings import create_embedding_service
+from ..formatting import markdown_to_whatsapp
 from ..kb_models import KnowledgeBaseDocument
 from ..logger import logger
 from ..queue.connection import get_redis_client
@@ -654,6 +655,8 @@ async def chat(request: Request, chat_request: ChatRequest, db: Session = Depend
             ai_response = ""
             async for token in get_ai_response(content, message_history, agent_deps=agent_deps):
                 ai_response += token
+            # Same backstop as streams/processor.py: the model drifts into Markdown.
+            ai_response = markdown_to_whatsapp(ai_response)
 
         # Generate embedding for assistant response using embedding service
         assistant_embedding = None

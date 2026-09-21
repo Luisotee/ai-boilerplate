@@ -1,0 +1,58 @@
+[
+  {
+    "name": "bold",
+    "markdown": "The **deadline** is Friday.",
+    "whatsapp": "The *deadline* is Friday.",
+    "telegram_html": ["The <b>deadline</b> is Friday."]
+  },
+  {
+    "name": "heading_and_list",
+    "markdown": "## Next steps\n1. **Install** the CLI\n2. Run `make setup`",
+    "whatsapp": "*Next steps*\n1. *Install* the CLI\n2. Run `make setup`",
+    "telegram_html": [
+      "<b>Next steps</b>\n1. <b>Install</b> the CLI\n2. Run <code>make setup</code>"
+    ]
+  },
+  {
+    "name": "labelled_link",
+    "markdown": "Read [the guide](https://example.com/guide) first.",
+    "whatsapp": "Read the guide: https://example.com/guide first.",
+    "telegram_html": ["Read the guide: https://example.com/guide first."]
+  },
+  {
+    "name": "bold_link_label",
+    "markdown": "**[Example Docs](https://docs.example.com)**",
+    "whatsapp": "*Example Docs*: https://docs.example.com",
+    "telegram_html": ["<b>Example Docs</b>: https://docs.example.com"]
+  },
+  {
+    "name": "bold_italic",
+    "markdown": "***Heads up:*** this is ~~optional~~ required.",
+    "whatsapp": "*_Heads up:_* this is ~optional~ required.",
+    "telegram_html": ["<b><i>Heads up:</i></b> this is <s>optional</s> required."]
+  },
+  {
+    "name": "italic_inside_bold",
+    "markdown": "**bold *italic* bold**",
+    "whatsapp": "*bold _italic_ bold*",
+    "telegram_html": ["<b>bold <i>italic</i> bold</b>"]
+  },
+  {
+    "name": "url_with_underscores",
+    "markdown": "See **https://x.com/a__b__c** now",
+    "whatsapp": "See https://x.com/a__b__c now",
+    "telegram_html": ["See https://x.com/a__b__c now"]
+  },
+  {
+    "name": "code_untouched",
+    "markdown": "Use `**literal**` and <tags> & more",
+    "whatsapp": "Use `**literal**` and <tags> & more",
+    "telegram_html": ["Use <code>**literal**</code> and &lt;tags&gt; &amp; more"]
+  },
+  {
+    "name": "bursts",
+    "markdown": "Hi!\n---\n### Answer\n**Yes**, it works.\n---\nAnything else?",
+    "whatsapp": "Hi!\n---\n*Answer*\n*Yes*, it works.\n---\nAnything else?",
+    "telegram_html": ["Hi!", "<b>Answer</b>\n<b>Yes</b>, it works.", "Anything else?"]
+  }
+]
