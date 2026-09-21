@@ -1,7 +1,7 @@
 import './instrument.js';
 import { Sentry } from './instrument.js';
-import crypto from 'node:crypto';
 import { config } from './config.js';
+import { hasValidApiKey } from './utils/api-key.js';
 import Fastify from 'fastify';
 import FastifySwagger from '@fastify/swagger';
 import FastifySwaggerUI from '@fastify/swagger-ui';
@@ -168,14 +168,7 @@ async function start() {
     ) {
       return;
     }
-    const apiKey = request.headers['x-api-key'];
-    const expected = config.whatsappApiKey;
-    if (
-      !apiKey ||
-      typeof apiKey !== 'string' ||
-      apiKey.length !== expected.length ||
-      !crypto.timingSafeEqual(Buffer.from(apiKey), Buffer.from(expected))
-    ) {
+    if (!hasValidApiKey(request.headers['x-api-key'], config.whatsappApiKey)) {
       app.log.warn({ url: request.url, ip: request.ip }, 'Unauthorized request');
       return reply.code(401).send({ error: 'Invalid or missing API key' });
     }
@@ -185,7 +178,15 @@ async function start() {
   await app.register(FastifyRateLimit, {
     max: config.rateLimitGlobal,
     timeWindow: '1 minute',
-    allowList: (req) => req.url.startsWith('/health') || req.url.startsWith('/webhook'),
+    // Authenticated inter-service calls are exempt: they all share the AI API's
+    // IP, so a per-IP budget would throttle legitimate bot traffic. The auth hook
+    // above runs first (route-level rate-limit hooks run last), so bad-key
+    // requests get a 401 without ever being counted — the limiter does NOT
+    // throttle API-key guessing.
+    allowList: (req) =>
+      req.url.startsWith('/health') ||
+      req.url.startsWith('/webhook') ||
+      hasValidApiKey(req.headers['x-api-key'], config.whatsappApiKey),
   });
 
   // Register multipart for file uploads
@@ -278,6 +279,21 @@ async function start() {
     app.log.info('User whitelist DISABLED (all users allowed)');
   }
   app.log.info('='.repeat(60));
+
+  // Graceful shutdown: stop accepting requests and let in-flight ones finish,
+  // flush Sentry, then exit 0. Errors while closing are logged, never rethrown.
+  for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+    process.on(signal, async () => {
+      app.log.info({ signal }, 'Received shutdown signal, shutting down gracefully...');
+      try {
+        await app.close();
+      } catch (err) {
+        app.log.error({ err }, 'Error during graceful shutdown');
+      }
+      await Sentry.close(2000);
+      process.exit(0);
+    });
+  }
 }
 
 async function shutdownWithError(err: unknown, message: string): Promise<never> {
