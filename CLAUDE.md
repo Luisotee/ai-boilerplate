@@ -57,6 +57,14 @@ How a WhatsApp message traverses the system end-to-end:
 7. Typing indicator is maintained via `@grammyjs/auto-chat-action` (set `ctx.chatAction = 'typing'`, middleware refreshes every ~5s until the handler returns)
 8. The synthetic JID `tg:<chat_id>` is stored in `users.whatsapp_jid`; chat IDs are integers (supergroup IDs are negative, e.g. `tg:-1001234567890`)
 
+### Cross-platform identity (`/link`, phone auto-link)
+
+One human on WhatsApp and Telegram can share one `users` row (history, core memory, preferences). Two ways, both in `services/`, both with the **discard-orphan** policy (the Telegram orphan row is deleted; `cascade="all, delete-orphan"` drops its messages, preferences and core memory; the WhatsApp row is kept and gains `telegram_jid`):
+
+- **`/link` codes** (`services/link.py`): `/link` mints a 6-digit code in Redis (10 min TTL) on one platform, `/link <code>` on the other merges. Handled in `routes/chat.py` before `parse_and_execute` (needs async Redis)
+- **Phone auto-link** (`services/autolink.py`, `POST /chat/link-phone`, `LinkPhoneRequest`): on Telegram, `/linkphone` (client-side, `handlers/link-prompt.ts`) shows a `request_contact` keyboard; the `message:contact` handler forwards the phone, `contact.user_id` and `ctx.from.id` verbatim (the client decides nothing). `try_autolink` refuses unless ALL hold: the caller is not a group; it is an unlinked `tg:` orphan; the contact carries a `user_id` equal to the sender's (anti-hijack — a shared card for someone else carries THEIR id); the phone normalizes to a plausible international number (`+` and 8-15 digits, or 12-15 bare digits — a bare 11-digit number could be a national mobile misread as `+1…`, so NANP users need the `+` or `/link`); exactly one private, non-Telegram row has that phone; and that row is not already linked. The route rejects group JIDs before touching the DB (under `GROUP_GATING=membership` `_is_whitelisted` admits groups)
+- **Identity columns**: `users.whatsapp_jid` is `UNIQUE NOT NULL` and holds `tg:<chat_id>` for an unlinked Telegram user; `telegram_jid` is set only by a merge. `get_or_create_user` looks up `telegram_jid` first for a `tg:` JID and **skips the LID/phone merge steps for Telegram** — letting a `tg:` JID reach the phone merge would let it silently take over a WhatsApp row. That is why phone linking is a separate, refusing-by-default path
+
 ### Cloud API Message Flow (whatsapp-cloud)
 
 1. Meta sends webhook POST → `routes/webhook.ts` verifies HMAC-SHA256 signature

@@ -10,6 +10,7 @@ import { handleTextMessage } from './handlers/text.js';
 import { extractAndTranscribeVoice } from './handlers/voice.js';
 import { extractPhotoData } from './handlers/photo.js';
 import { extractDocumentData } from './handlers/document.js';
+import { handleSharedContact, offerPhoneLink } from './handlers/link-prompt.js';
 import { logger } from './logger.js';
 import * as telegramApi from './services/telegram-api.js';
 import { chatIdToJid, chatTypeToConversationType } from './utils/telegram-id.js';
@@ -20,6 +21,24 @@ import { decideGroupGating } from './utils/gating.js';
 import { isSenderGroupAdmin, looksLikeCommand } from './services/group-admin.js';
 
 export function registerUpdateHandlers(): void {
+  // ---------------- Account linking (phone share) ----------------
+  // Registered FIRST: grammY runs middleware in registration order, and the
+  // catch-all `message:text` below would otherwise forward /linkphone to the
+  // AI API as ordinary text. `/link` and `/link <code>` still go to the AI API,
+  // which owns the code flow.
+  bot.command('linkphone', async (ctx) => {
+    // saveOnly: an un-addressed or (GROUP_GATING=membership) non-whitelisted
+    // group sender gets no reply at all, not even the "private only" hint.
+    const { skip, saveOnly } = resolveGate(ctx);
+    if (skip || saveOnly) return;
+    await offerPhoneLink(ctx);
+  });
+
+  bot.on('message:contact', async (ctx) => {
+    if (resolveGate(ctx).skip) return;
+    await handleSharedContact(ctx);
+  });
+
   // ---------------- Text ----------------
   bot.on('message:text', async (ctx) => {
     const { skip, isGroup, saveOnly } = resolveGate(ctx);

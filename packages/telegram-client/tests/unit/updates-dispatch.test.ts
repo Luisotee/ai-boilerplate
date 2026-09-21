@@ -212,3 +212,24 @@ describe('command forms Telegram actually delivers', () => {
     expectAnswered(sendMessageToAI.mock.calls[0][2]);
   });
 });
+
+describe('phone-link dispatch', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('/linkphone is handled by the client, never forwarded to the AI API', async () => {
+    const { bot, sendMessageToAI } = await freshDispatch();
+    const update = privateText('/linkphone');
+    (update.message as { entities?: Entity[] }).entities = command('/linkphone');
+    await bot.handleUpdate(update);
+    expect(sendMessageToAI).not.toHaveBeenCalled();
+  });
+
+  it('/link with a code still reaches the AI API (code flow unchanged)', async () => {
+    const { bot, sendMessageToAI } = await freshDispatch();
+    const update = privateText('/link 123456');
+    (update.message as { entities?: Entity[] }).entities = command('/link 123456');
+    await bot.handleUpdate(update);
+    expect(sendMessageToAI).toHaveBeenCalledTimes(1);
+    expect(sendMessageToAI.mock.calls[0][1]).toBe('/link 123456');
+  });
+});

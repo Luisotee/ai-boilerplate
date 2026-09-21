@@ -32,8 +32,10 @@ from ..schemas import (
     ChatRequest,
     ChatResponse,
     CommandResponse,
+    LinkPhoneRequest,
     SaveMessageRequest,
 )
+from ..services.autolink import try_autolink
 from ..services.link import (
     consume_link_code,
     generate_link_code,
@@ -103,6 +105,42 @@ def _is_whitelisted(whatsapp_jid: str, phone: str | None = None) -> bool:
     if settings.group_gating == "membership" and is_group_jid(whatsapp_jid):
         return True
     return is_whitelisted(_parse_whitelist(raw), whatsapp_jid, phone)
+
+
+@router.post("/chat/link-phone", response_model=CommandResponse, tags=["Chat"])
+@limiter.limit(f"{settings.rate_limit_expensive}/minute")
+async def link_phone(
+    request: Request, link_request: LinkPhoneRequest, db: Session = Depends(get_db)
+):
+    """Auto-link a Telegram account to a WhatsApp one via a shared phone number.
+
+    Called by the Telegram client when a user taps the `request_contact`
+    keyboard button (`/linkphone`). Every authorization rule — including the
+    `contact_user_id == sender_user_id` anti-hijack check — lives in
+    `services.autolink`; this route only gates and resolves the caller's row.
+    """
+    # Reject groups BEFORE touching the DB: under GROUP_GATING=membership
+    # `_is_whitelisted` admits every group JID, and `get_or_create_user` below
+    # would happily resolve — or create — a row for the group.
+    if is_group_jid(link_request.whatsapp_jid):
+        logger.warning(f"Blocked link-phone for a group JID: {link_request.whatsapp_jid}")
+        return CommandResponse(
+            is_command=True, response="Account linking only works in a private chat."
+        )
+
+    if not _is_whitelisted(link_request.whatsapp_jid):
+        logger.warning(f"Blocked non-whitelisted link-phone: {link_request.whatsapp_jid}")
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    user = get_or_create_user(db, link_request.whatsapp_jid, "private")
+    result = try_autolink(
+        db,
+        user,
+        link_request.phone,
+        link_request.contact_user_id,
+        link_request.sender_user_id,
+    )
+    return CommandResponse(is_command=True, response=result.message or "")
 
 
 async def get_stream_job_status(redis, job_id: str) -> str:
@@ -314,6 +352,11 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
                         f"On {other}, send `/link {code}` within 10 minutes.\n\n"
                         "Note: any prior conversation history on the other platform will be discarded."
                     )
+                    if platform == "telegram":
+                        response_text += (
+                            "\n\nTip: on Telegram you can also send `/linkphone` and share "
+                            "your number instead of using a code."
+                        )
             logger.info(f"Command executed for {chat_request.whatsapp_jid}: {link_command}")
             return CommandResponse(is_command=True, response=response_text)
 
