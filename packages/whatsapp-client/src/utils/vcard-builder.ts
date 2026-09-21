@@ -35,7 +35,9 @@ export function buildVCard(contact: ContactInfo): string {
 /**
  * Validate contact information before building vCard
  */
-export function validateContactInfo(contact: ContactInfo): { valid: boolean; error?: string } {
+export function validateContactInfo(
+  contact: ContactInfo
+): { valid: true } | { valid: false; error: string } {
   if (!contact.name || contact.name.trim().length === 0) {
     return { valid: false, error: 'Contact name is required' };
   }
