@@ -1,3 +1,4 @@
+import hashlib
 import uuid
 from pathlib import Path
 
@@ -15,6 +16,41 @@ from ..schemas import BatchUploadResponse, FileUploadResult, UploadPDFResponse
 from ..streams.manager import enqueue_pdf_processing
 
 router = APIRouter()
+
+
+# Streaming read size for uploads (memory-efficient)
+_CHUNK_SIZE = 8192
+
+
+async def _save_upload(file: UploadFile, file_path: Path) -> str:
+    """Stream an upload to disk and return its SHA-256 hex digest."""
+    sha256 = hashlib.sha256()
+    await file.seek(0)
+    with open(file_path, "wb") as f:
+        while chunk := await file.read(_CHUNK_SIZE):
+            sha256.update(chunk)
+            f.write(chunk)
+    return sha256.hexdigest()
+
+
+def _find_duplicate(db: Session, file_hash: str) -> KnowledgeBaseDocument | None:
+    """
+    Return a global knowledge-base document with identical content, if any.
+
+    Conversation-scoped (chat) PDFs are ignored — they expire and belong to one
+    chat. So are ``failed`` documents, so a file whose processing failed can be
+    uploaded again. Rows from before the ``file_hash`` column have NULL there and
+    never match.
+    """
+    return (
+        db.query(KnowledgeBaseDocument)
+        .filter(
+            KnowledgeBaseDocument.file_hash == file_hash,
+            KnowledgeBaseDocument.is_conversation_scoped.is_(False),
+            KnowledgeBaseDocument.status != "failed",
+        )
+        .first()
+    )
 
 
 def _discard_upload(db: Session, document: KnowledgeBaseDocument, file_path: Path) -> None:
@@ -35,7 +71,7 @@ def _discard_upload(db: Session, document: KnowledgeBaseDocument, file_path: Pat
 
 
 @router.post("/knowledge-base/upload", response_model=UploadPDFResponse, tags=["Knowledge Base"])
-@limiter.limit(f"{settings.rate_limit_expensive}/minute")
+@limiter.exempt  # bulk loads (upload-kb.sh) — the route is still behind X-API-Key
 async def upload_pdf(
     request: Request,
     file: UploadFile = File(...),
@@ -56,6 +92,9 @@ async def upload_pdf(
     - `filename`: Original filename
     - `status`: Initial status ('queued')
     - `message`: Human-readable status message
+
+    **Errors:**
+    - `409`: identical content (SHA-256) is already in the knowledge base
     """
     logger.info(f"Received PDF upload: {file.filename}")
 
@@ -90,11 +129,7 @@ async def upload_pdf(
                 detail=f"File too large ({file_size / 1024 / 1024:.1f} MB). Maximum size: {settings.kb_max_file_size_mb} MB",
             )
 
-        # Stream file to disk in chunks (memory-efficient)
-        CHUNK_SIZE = 8192  # 8 KB chunks
-        with open(file_path, "wb") as f:
-            while chunk := await file.read(CHUNK_SIZE):
-                f.write(chunk)
+        file_hash = await _save_upload(file, file_path)
 
         logger.info(f"Saved PDF to {file_path} ({file_size / 1024:.1f} KB)")
 
@@ -102,7 +137,26 @@ async def upload_pdf(
         raise
     except Exception as e:
         logger.error(f"Error saving file: {str(e)}", exc_info=True)
+        file_path.unlink(missing_ok=True)
         raise HTTPException(status_code=500, detail="Failed to save file")
+
+    # Reject content that is already in the knowledge base
+    try:
+        existing = _find_duplicate(db, file_hash)
+    except Exception:
+        logger.error("Duplicate check failed", exc_info=True)
+        file_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail="Failed to check for duplicates")
+    if existing:
+        file_path.unlink(missing_ok=True)
+        logger.info(f"Rejected duplicate upload {file.filename} (matches {existing.id})")
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Duplicate document: '{existing.original_filename}' "
+                f"(ID: {existing.id}, status: {existing.status})"
+            ),
+        )
 
     # Create database record
     try:
@@ -111,6 +165,7 @@ async def upload_pdf(
             filename=stored_filename,
             original_filename=file.filename,
             file_size_bytes=file_size,
+            file_hash=file_hash,
             mime_type=file.content_type or "application/pdf",
             status="queued",
         )
@@ -155,7 +210,7 @@ async def upload_pdf(
     response_model=BatchUploadResponse,
     tags=["Knowledge Base"],
 )
-@limiter.limit(f"{settings.rate_limit_expensive}/minute")
+@limiter.exempt  # bulk loads (upload-kb.sh) — the route is still behind X-API-Key
 async def upload_pdf_batch(
     request: Request,
     files: list[UploadFile] = File(...),
@@ -177,6 +232,9 @@ async def upload_pdf_batch(
     - `rejected`: Number of files rejected during validation
     - `results`: Per-file status with document_id (if accepted) or error (if rejected)
     - `message`: Overall batch status message
+
+    Files whose content (SHA-256) is already in the knowledge base, or appears
+    earlier in the same batch, are rejected as duplicates.
 
     **Configuration:**
     - `KB_MAX_FILE_SIZE_MB`: Maximum individual file size (default: 50 MB)
@@ -266,6 +324,8 @@ async def upload_pdf_batch(
     accepted_count = 0
     rejected_count = 0
 
+    batch_hashes: dict[str, str] = {}  # sha256 -> filename, for intra-batch dedup
+
     for validation in file_validations:
         filename = validation["filename"]
         error = validation["error"]
@@ -278,6 +338,7 @@ async def upload_pdf_batch(
             continue
 
         # File is valid, save it
+        file_path: Path | None = None
         try:
             file = validation["file"]
             file_size = validation["size"]
@@ -287,14 +348,25 @@ async def upload_pdf_batch(
             stored_filename = f"{doc_id}.pdf"
             file_path = UPLOAD_DIR / stored_filename
 
-            # Stream file to disk in chunks (memory-efficient)
-            CHUNK_SIZE = 8192  # 8 KB chunks
-            file.file.seek(0)  # Ensure at beginning
-            with open(file_path, "wb") as f:
-                while chunk := await file.read(CHUNK_SIZE):
-                    f.write(chunk)
+            file_hash = await _save_upload(file, file_path)
 
             logger.info(f"Saved PDF to {file_path} ({file_size / 1024:.1f} KB)")
+
+            # Duplicates: within this batch first (no DB round trip), then the KB
+            duplicate_error = None
+            if file_hash in batch_hashes:
+                duplicate_error = f"Duplicate of '{batch_hashes[file_hash]}' in this batch"
+            elif existing := _find_duplicate(db, file_hash):
+                duplicate_error = f"Duplicate of '{existing.original_filename}' (ID: {existing.id})"
+            if duplicate_error:
+                file_path.unlink(missing_ok=True)
+                results.append(
+                    FileUploadResult(filename=filename, status="rejected", error=duplicate_error)
+                )
+                rejected_count += 1
+                logger.info(f"Rejected duplicate: {filename} - {duplicate_error}")
+                continue
+            batch_hashes[file_hash] = filename
 
             # Create database record
             document = KnowledgeBaseDocument(
@@ -302,6 +374,7 @@ async def upload_pdf_batch(
                 filename=stored_filename,
                 original_filename=filename,
                 file_size_bytes=file_size,
+                file_hash=file_hash,
                 mime_type=file.content_type or "application/pdf",
                 status="queued",
             )
@@ -345,21 +418,27 @@ async def upload_pdf_batch(
 
         except Exception as e:
             logger.error(f"Error saving file {filename}: {str(e)}", exc_info=True)
+            # A failed commit leaves the shared session unusable for the rest of
+            # the batch until it is rolled back.
+            try:
+                db.rollback()
+            except Exception:
+                logger.error("Rollback failed during batch upload", exc_info=True)
 
-            # Add to rejected results
+            # Generic message only: str(e) can leak DB/SQL details to the caller
             results.append(
                 FileUploadResult(
                     filename=filename,
                     status="rejected",
-                    error=f"Failed to save file: {str(e)}",
+                    error="Failed to save file",
                 )
             )
             rejected_count += 1
 
             # Clean up file if it was saved
             try:
-                if file_path.exists():
-                    file_path.unlink()
+                if file_path is not None:
+                    file_path.unlink(missing_ok=True)
             except Exception as cleanup_error:
                 logger.error(f"Cleanup error for {filename}: {str(cleanup_error)}")
 

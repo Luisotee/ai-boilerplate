@@ -145,7 +145,13 @@ cd packages/ai-api && uv run pytest tests/unit  # AI API unit tests only
 
 - **PostgreSQL + pgvector** (3072-dim vectors via `gemini-embedding-001`)
 - **8 tables**: users, conversation_messages, conversation_preferences, core_memories, knowledge_base_documents, knowledge_base_chunks, bot_prompt, runtime_settings
-- **No Alembic migrations** — uses SQLAlchemy `create_all()`. Schema changes require manual `ALTER TABLE` or table recreation; `create_all()` only adds new tables
+- **No Alembic migrations** — uses SQLAlchemy `create_all()`, which only creates missing *tables*, never new columns. Column/index changes ship as hand-written, idempotent (`IF NOT EXISTS`) SQL in `packages/ai-api/docs/migrations/<YYYY-MM-DD>-<name>.sql`, named so they match what `create_all()` emits on a fresh DB. Apply them to an existing Docker deployment BEFORE rolling out the code that needs them (safe to re-run):
+  ```bash
+  docker exec -i aiagent-postgres psql -U aiagent -d aiagent \
+    < packages/ai-api/docs/migrations/<file>.sql
+  ```
+  (`aiagent-postgres` is the compose `container_name`; substitute your `POSTGRES_USER` / `POSTGRES_DB` if you changed the defaults.) Current migrations: `2026-09-21-kb-file-hash.sql`
+- **Knowledge-base dedup**: `knowledge_base_documents.file_hash` (SHA-256 hex of the uploaded bytes, indexed, computed while streaming the upload to disk). `POST /knowledge-base/upload` answers **409** when identical content is already in the KB; the batch route rejects that file (and a repeat of an earlier file in the same batch) while accepting the rest. Only global documents with a status other than `failed` count — conversation-scoped chat PDFs never block an upload, and a failed document can be re-uploaded. Rows from before the migration have `file_hash = NULL` and never match. Both upload routes are `@limiter.exempt` (bulk loads via `./upload-kb.sh <dir>`, which posts a folder of PDFs to the batch route with `AI_API_KEY` from the env or `.env`); they stay behind `X-API-Key`
 - Models: `database.py` (users, messages, preferences, core_memories, bot_prompt, runtime_settings) + `kb_models.py` (documents, chunks)
 - **Core memories**: one markdown document per user (`core_memories` table), injected into the prompt via `@agent.instructions inject_core_memory` in `agent/core.py`
 - **System prompt is DB-backed**: the active prompt lives in the single-row `bot_prompt` table, loaded per-run via `@agent.instructions base_system_prompt` in `agent/core.py`, falling back to the hardcoded `DEFAULT_SYSTEM_PROMPT` when no row exists. Edit it through `PUT /admin/prompt` — takes effect on the next message, no restart. Uses `instructions` (not `system_prompt`) so a changed prompt is never shadowed by one retained in `message_history`

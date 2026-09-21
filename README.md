@@ -21,7 +21,8 @@ A production-ready AI agent system that brings conversational AI to WhatsApp wit
 - Semantic search through past conversations using vector embeddings
 
 ### RAG Knowledge Base
-- PDF document upload with background processing (LlamaParse cloud API; optional local Docling fallback)
+- PDF document upload, processed by the background worker from a Redis Stream queue with retries (LlamaParse cloud API; optional local Docling fallback)
+- Duplicate uploads (same SHA-256 content) rejected with 409
 - Semantic chunking with token-aware splitting (512 tokens/chunk)
 - Vector similarity search using pgvector (3072-dim embeddings)
 - Auto-generated citations with document name, page number, and section
@@ -205,6 +206,8 @@ The free tier covers 10M records/month and is hard-capped at $0 — it can never
 | GET | `/knowledge-base/documents` | List documents (paginated) |
 | GET | `/knowledge-base/status/{id}` | Processing status |
 | DELETE | `/knowledge-base/documents/{id}` | Delete document |
+
+Bulk-load a folder of PDFs with `./upload-kb.sh /path/to/pdfs` (uses `AI_API_KEY` from the environment or `.env`; `AI_API_URL` defaults to `http://localhost:8000`). Re-running it is safe: files already in the knowledge base are rejected as duplicates.
 
 ### Speech
 | Method | Endpoint | Description |

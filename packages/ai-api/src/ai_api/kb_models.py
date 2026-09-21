@@ -39,6 +39,9 @@ class KnowledgeBaseDocument(Base):
     filename = Column(String, nullable=False)  # Stored filename (UUID.pdf)
     original_filename = Column(String, nullable=False)  # User's original filename
     file_size_bytes = Column(Integer, nullable=False)
+    # SHA-256 hex digest of the uploaded bytes, for duplicate detection. NULL on
+    # rows created before the column existed (docs/migrations/*-kb-file-hash.sql).
+    file_hash = Column(String(64), nullable=True, index=True)
     mime_type = Column(String, default="application/pdf")
     upload_date = Column(DateTime, default=datetime.utcnow, nullable=False)
     processed_date = Column(DateTime, nullable=True)

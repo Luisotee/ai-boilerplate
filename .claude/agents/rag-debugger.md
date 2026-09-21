@@ -40,15 +40,17 @@ When the user describes an issue, determine WHERE in the pipeline it occurs:
 - Size limits: `KB_MAX_FILE_SIZE_MB` (50 MB), `KB_MAX_BATCH_SIZE_MB` (500 MB)
 - Empty file rejection
 - Disk write to `UPLOAD_DIR` (default: `/tmp/knowledge_base`)
-- DB record created with status `pending`
-- Background task scheduled via FastAPI `BackgroundTasks`
+- SHA-256 dedup: identical content already in the KB → 409 (batch: rejected per file)
+- DB record created with status `queued`
+- Job enqueued on the `stream:pdf_processing` Redis Stream (`streams/manager.py` `enqueue_pdf_processing`); parsed by the stream worker's PDF consumer (`streams/pdf_consumer.py`), NOT the API process
 
 ### Parsing issues (Stage 2)
 **File:** `packages/ai-api/src/ai_api/processing.py`
 - Docling converter runs in `asyncio.to_thread()` (thread pool)
 - Overall timeout: `KB_PROCESSING_TIMEOUT_SECONDS` (300s)
 - Docling-specific timeout: `KB_DOCLING_TIMEOUT_SECONDS` (180s)
-- Status: `pending` → `processing`
+- Status: `queued` → `processing` (legacy rows may say `pending`)
+- Retries (timeouts/network/429/5xx, or worker died mid-parse): `KB_MAX_PDF_RETRIES`, backoff parked in the `pdf_processing:retry` sorted set; permanent failures land on `stream:pdf_processing:dead`
 - Common failures: corrupt/complex PDFs, Docling crashes, file not found
 
 ### Chunking issues (Stage 3)
@@ -112,7 +114,8 @@ When the user describes an issue, determine WHERE in the pipeline it occurs:
 |---------|-------------|---------------|
 | Upload returns 400 | File not .pdf or wrong content-type | `routes/knowledge_base.py` |
 | Upload returns 413 | Exceeds `KB_MAX_FILE_SIZE_MB` (50 MB) | Config: `config.py` |
-| Status stuck at `pending` | Background task never started | Check FastAPI logs for exceptions |
+| Status stuck at `queued` | Stream worker not running, or a retry is waiting | `docker compose logs worker`; `XLEN stream:pdf_processing`, `ZRANGE pdf_processing:retry 0 -1 WITHSCORES` |
+| Job vanished, status `failed` | Dead-lettered | `XRANGE stream:pdf_processing:dead - +` (has `reason`) |
 | Status stuck at `processing` | Docling timeout or crash | Check `KB_DOCLING_TIMEOUT_SECONDS` |
 | Status `partial` | Some chunk embeddings failed | Check `doc_metadata.processing_errors` |
 | Status `failed` | No chunks embedded successfully | Check GEMINI_API_KEY, API logs |
