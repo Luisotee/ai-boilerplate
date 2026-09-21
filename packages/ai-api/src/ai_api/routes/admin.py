@@ -142,6 +142,19 @@ def _settings_payload(db: Session) -> SettingsResponse:
     return SettingsResponse(settings=items)
 
 
+# Free-form model names read per run by build_runtime_model() (no choices/allowlist
+# by design); a typo surfaces as an agent error on the next message, so only reject
+# obvious garbage and cap length to keep payloads sane.
+_MODEL_NAME_KEYS = ("gemini_model", "deepseek_model")
+
+
+def _validate_model_name(key: str, value: object) -> None:
+    if not isinstance(value, str) or not value.strip():
+        raise HTTPException(status_code=400, detail=f"{key} must be a non-empty string")
+    if len(value) > 200:
+        raise HTTPException(status_code=400, detail=f"{key} is too long (max 200 characters)")
+
+
 def _validate_cross_constraints(coerced: dict[str, object]) -> None:
     """Reject overrides that would violate invariants Settings checks at boot.
 
@@ -176,20 +189,9 @@ def _validate_cross_constraints(coerced: dict[str, object]) -> None:
                 status_code=400,
                 detail="Cannot set stt_provider=whisper: whisper_base_url is not set",
             )
-    if "gemini_model" in coerced:
-        # Free-form string by design (no choices/allowlist), but reject obvious
-        # garbage and cap length to keep payloads sane.
-        value = coerced["gemini_model"]
-        if not isinstance(value, str) or not value.strip():
-            raise HTTPException(
-                status_code=400,
-                detail="gemini_model must be a non-empty string",
-            )
-        if len(value) > 200:
-            raise HTTPException(
-                status_code=400,
-                detail="gemini_model is too long (max 200 characters)",
-            )
+    for model_key in _MODEL_NAME_KEYS:
+        if model_key in coerced:
+            _validate_model_name(model_key, coerced[model_key])
     if "whitelist_phones" in coerced:
         # Deliberately no *format* check: entry shapes are forward-compatible
         # (future JID schemes land in the id set and simply never match), and

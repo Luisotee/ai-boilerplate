@@ -8,7 +8,7 @@ A production-ready AI agent system that brings conversational AI to WhatsApp wit
 |-------|-------------|
 | **Client** | Node.js, TypeScript, Fastify, Baileys (WhatsApp Web), Zod |
 | **API** | Python 3.11+, FastAPI, Pydantic AI, SQLAlchemy 2.0 |
-| **AI/ML** | Google Gemini (LLM, Embeddings, TTS), Groq Whisper or self-hosted Whisper (STT), LlamaParse (PDF parsing) |
+| **AI/ML** | Google Gemini (LLM, Embeddings, TTS), optional DeepSeek (primary LLM with Gemini fallback), Groq Whisper or self-hosted Whisper (STT), LlamaParse (PDF parsing) |
 | **Database** | PostgreSQL 16 + pgvector (vector similarity search) |
 | **Infrastructure** | Docker Compose, Redis Streams, Background Workers |
 
@@ -132,7 +132,7 @@ cd ai-boilerplate
 ./setup.sh             # interactive: generates .env, installs deps
 ```
 
-The script checks prerequisites, creates `.env` from the template (auto-generating passwords and inter-service keys), prompts for `GEMINI_API_KEY` and any optional integrations (Meta Cloud API, Groq), then runs `pnpm install:all`.
+The script checks prerequisites, creates `.env` from the template (auto-generating passwords and inter-service keys), prompts for `GEMINI_API_KEY` and any optional integrations (DeepSeek, Meta Cloud API, Groq), then runs `pnpm install:all`.
 
 ### Run with Docker (recommended)
 
@@ -241,7 +241,8 @@ pnpm format          # Format all code
 | Variable | Description |
 |----------|-------------|
 | `GEMINI_API_KEY` | Google Gemini API key (required) |
-| `GEMINI_MODEL` | Primary chat model (default `gemini-3.1-flash-lite`); any Gemini model ID, hot-swappable via `PATCH /admin/settings` |
+| `GEMINI_MODEL` | Gemini chat model (default `gemini-3.1-flash-lite`) — the fallback when `DEEPSEEK_API_KEY` is set, otherwise the only model; any Gemini model ID, hot-swappable via `PATCH /admin/settings` |
+| `DEEPSEEK_API_KEY` | Optional. When set, DeepSeek (`DEEPSEEK_MODEL`, default `deepseek-flash`) is the primary chat model and Gemini the automatic fallback; chat content is then sent to DeepSeek's servers (China). Unset = Gemini only |
 | `LLAMA_CLOUD_API_KEY` | LlamaCloud API key for PDF parsing via LlamaParse (optional; required when `PDF_PARSER=llamaparse` or `auto` without the `[docling]` extra) |
 | `GROQ_API_KEY` | Groq API key (optional, for STT) |
 | `PDF_PARSER` | `auto` (default), `llamaparse`, or `docling` |

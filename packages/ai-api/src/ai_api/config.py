@@ -27,7 +27,18 @@ class Settings(BaseSettings):
     # Required
     database_url: str
     gemini_api_key: str
-    gemini_model: str = "gemini-3.1-flash-lite"  # primary LLM; overridable at runtime via /admin
+    # Gemini: the fallback when DEEPSEEK_API_KEY is set, otherwise the only model.
+    # Overridable at runtime via /admin.
+    gemini_model: str = "gemini-3.1-flash-lite"
+
+    # DeepSeek primary model (optional — when set, the agent runs DeepSeek first and
+    # falls back to Gemini via FallbackModel; when unset, it runs on Gemini alone)
+    deepseek_api_key: str | None = None
+    deepseek_model: str = "deepseek-flash"
+    # httpx read timeout (max gap between bytes) AND the wall-clock limit on
+    # receiving the first chunk (agent/model_chain.py GuardedModel) — NOT a cap on
+    # the whole reply. Short so a hung DeepSeek rolls over to Gemini.
+    deepseek_timeout_seconds: float = Field(30, gt=0)
 
     # API Authentication
     ai_api_key: str  # Required — app fails to start if not set

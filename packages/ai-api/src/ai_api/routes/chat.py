@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from starlette.requests import Request
 
 from ..agent import AgentDeps, format_message_history, get_ai_response
+from ..agent.model_chain import MODEL_ERRORS
 from ..commands import is_command, normalize_command, parse_and_execute
 from ..config import get_whatsapp_api_key, get_whatsapp_client_url, settings
 from ..database import (
@@ -674,6 +675,13 @@ async def chat(request: Request, chat_request: ChatRequest, db: Session = Depend
 
         return ChatResponse(response=ai_response)
 
+    except MODEL_ERRORS as e:
+        # Same classification as streams/processor.py: the model chain failed
+        # (transient provider outage, both DeepSeek and Gemini down, exhausted
+        # retries). 503 tells the caller it is retryable; nothing is saved as the
+        # assistant turn and no provider detail leaks into the response.
+        logger.error(f"AI model error in /chat: {e}", exc_info=True)
+        raise HTTPException(status_code=503, detail="AI model temporarily unavailable") from e
     except Exception as e:
         logger.error(f"Error processing chat: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")

@@ -8,6 +8,7 @@ making it compatible with Redis Streams.
 import httpx
 
 from ..agent import AgentDeps, format_message_history, get_ai_response
+from ..agent.model_chain import MODEL_ERRORS
 from ..config import get_whatsapp_api_key, get_whatsapp_client_url, settings
 from ..database import SessionLocal, get_conversation_history, save_message
 from ..embeddings import create_embedding_service
@@ -16,6 +17,12 @@ from ..processing import process_pdf_document
 from ..queue.connection import get_redis_client
 from ..queue.utils import delete_job_image, get_job_image, save_job_chunk, set_job_metadata
 from ..whatsapp import WhatsAppClient, create_whatsapp_client
+
+#: Reply delivered when the model chain fails. English, like every user-facing
+#: string in this template. Deliberately NOT saved to conversation history.
+MODEL_ERROR_FALLBACK_TEXT = (
+    "Sorry, something went wrong while processing your message. Please try again."
+)
 
 
 async def process_chat_job_direct(
@@ -212,14 +219,62 @@ async def process_chat_job_direct(
                         f"[Job {job_id}] Image flag set but no image data found in Redis"
                     )
 
-            async for token in get_ai_response(
-                ai_message,
-                message_history,
-                agent_deps=agent_deps,
-                image_data=image_data,
-                image_mimetype=image_mimetype,
-            ):
-                full_response += token
+            try:
+                async for token in get_ai_response(
+                    ai_message,
+                    message_history,
+                    agent_deps=agent_deps,
+                    image_data=image_data,
+                    image_mimetype=image_mimetype,
+                ):
+                    full_response += token
+            except MODEL_ERRORS as model_error:
+                logger.error(f"[Job {job_id}] AI model error: {model_error}", exc_info=True)
+                # Deliver the fallback text as a normal COMPLETED job (no "status":
+                # "failed"): the clients treat "failed" as an exception and answer
+                # it with their OWN error text + ❌, so publishing this text AND
+                # failing the job would double both. Here the ❌ comes from us
+                # (once) and the client simply delivers the text. Nothing partial
+                # has reached the user (chunks are published only on completion).
+                # The text is NOT saved to history, so it never replays to the model
+                # as a prior assistant turn.
+                if whatsapp_message_id:
+                    try:
+                        await whatsapp_client.send_reaction(whatsapp_jid, whatsapp_message_id, "❌")
+                    except Exception as reaction_error:
+                        logger.warning(
+                            f"[Job {job_id}] Failed to send error reaction: {reaction_error}",
+                            exc_info=True,
+                        )
+
+                if has_image:
+                    await delete_job_image(redis, job_id)
+
+                await save_job_chunk(redis, job_id, 0, MODEL_ERROR_FALLBACK_TEXT)
+                chunk_index = 1
+                await set_job_metadata(
+                    redis,
+                    job_id,
+                    {
+                        "user_id": user_id,
+                        "whatsapp_jid": whatsapp_jid,
+                        "message": message,
+                        "conversation_type": conversation_type,
+                        "total_chunks": chunk_index,
+                        "db_message_id": None,
+                        "user_message_id": user_message_id,
+                        "model_error": True,
+                    },
+                )
+
+                return {
+                    "success": True,
+                    "job_id": job_id,
+                    "total_chunks": chunk_index,
+                    "response_length": len(MODEL_ERROR_FALLBACK_TEXT),
+                    "db_message_id": None,
+                    "model_error": True,
+                }
 
             # Clean up image data from Redis after processing
             if has_image:

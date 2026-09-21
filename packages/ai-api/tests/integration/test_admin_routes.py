@@ -357,6 +357,64 @@ class TestSettings:
     @patch("ai_api.main.init_db")
     @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
     @patch("ai_api.main.cleanup_expired_documents")
+    async def test_patch_deepseek_model_accepted(self, *_):
+        app = _app_with_db(_make_mock_db())
+        try:
+            with (
+                patch("ai_api.routes.admin.set_setting_overrides_batch") as mock_batch,
+                patch(
+                    "ai_api.routes.admin.get_setting_overrides",
+                    return_value={"deepseek_model": '"deepseek-v4-pro"'},
+                ),
+            ):
+                async with _client(app) as client:
+                    resp = await client.patch(
+                        "/admin/settings",
+                        json={"overrides": {"deepseek_model": "deepseek-v4-pro"}},
+                        headers=AUTH_HEADERS,
+                    )
+            assert resp.status_code == 200
+            assert mock_batch.call_args.args[1] == {"deepseek_model": '"deepseek-v4-pro"'}
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_patch_deepseek_model_empty_rejected(self, *_):
+        app = _app_with_db(_make_mock_db())
+        try:
+            async with _client(app) as client:
+                resp = await client.patch(
+                    "/admin/settings",
+                    json={"overrides": {"deepseek_model": "   "}},
+                    headers=AUTH_HEADERS,
+                )
+            assert resp.status_code == 400
+            assert resp.json()["detail"] == "deepseek_model must be a non-empty string"
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_patch_deepseek_model_too_long_rejected(self, *_):
+        app = _app_with_db(_make_mock_db())
+        try:
+            async with _client(app) as client:
+                resp = await client.patch(
+                    "/admin/settings",
+                    json={"overrides": {"deepseek_model": "x" * 201}},
+                    headers=AUTH_HEADERS,
+                )
+            assert resp.status_code == 400
+            assert resp.json()["detail"] == "deepseek_model is too long (max 200 characters)"
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
     async def test_patch_empty_overrides_rejected(self, *_):
         app = _app_with_db(_make_mock_db())
         try:
