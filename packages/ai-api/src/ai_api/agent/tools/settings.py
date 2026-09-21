@@ -9,6 +9,7 @@ from ...commands import (
 from ...database import get_or_create_preferences
 from ...logger import logger
 from ..core import AgentDeps, agent
+from ._db import safe_rollback
 
 
 @agent.tool
@@ -41,13 +42,13 @@ async def get_user_settings(ctx: RunContext[AgentDeps]) -> str:
         return result
 
     except Exception as e:
-        ctx.deps.db.rollback()
+        safe_rollback(ctx.deps.db)
         logger.error(f"Error getting user settings: {str(e)}", exc_info=True)
         logger.info("=" * 80)
         logger.info("❌ TOOL ERROR: get_user_settings")
         logger.info(f"   Error: {str(e)}")
         logger.info("=" * 80)
-        return f"Failed to retrieve settings: {str(e)}"
+        return "Failed to retrieve settings. Please try again."
 
 
 @agent.tool
@@ -119,13 +120,13 @@ async def update_tts_settings(
         return result
 
     except Exception as e:
-        ctx.deps.db.rollback()
+        safe_rollback(ctx.deps.db)
         logger.error(f"Error updating TTS settings: {str(e)}", exc_info=True)
         logger.info("=" * 80)
         logger.info("❌ TOOL ERROR: update_tts_settings")
         logger.info(f"   Error: {str(e)}")
         logger.info("=" * 80)
-        return f"Failed to update TTS settings: {str(e)}"
+        return "Failed to update TTS settings. Please try again."
 
 
 @agent.tool
@@ -185,13 +186,13 @@ async def update_stt_settings(
         return result
 
     except Exception as e:
-        ctx.deps.db.rollback()
+        safe_rollback(ctx.deps.db)
         logger.error(f"Error updating STT settings: {str(e)}", exc_info=True)
         logger.info("=" * 80)
         logger.info("❌ TOOL ERROR: update_stt_settings")
         logger.info(f"   Error: {str(e)}")
         logger.info("=" * 80)
-        return f"Failed to update STT settings: {str(e)}"
+        return "Failed to update STT settings. Please try again."
 
 
 @agent.tool
@@ -238,10 +239,10 @@ async def clean_user_data(
         return result
 
     except Exception as e:
-        ctx.deps.db.rollback()
+        safe_rollback(ctx.deps.db)
         logger.error(f"Error cleaning user data: {str(e)}", exc_info=True)
         logger.info("=" * 80)
         logger.info("❌ TOOL ERROR: clean_user_data")
         logger.info(f"   Error: {str(e)}")
         logger.info("=" * 80)
-        return f"Failed to clean user data: {str(e)}"
+        return "Failed to clean user data. Please try again."

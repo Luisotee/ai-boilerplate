@@ -68,7 +68,7 @@ async def web_search(ctx: RunContext[AgentDeps], query: str) -> str:
         logger.info("❌ TOOL ERROR: web_search")
         logger.info(f"   Error: {str(e)}")
         logger.info("=" * 80)
-        return f"Search failed: {str(e)}"
+        return "Web search failed. Please try again."
 
 
 @agent.tool
@@ -138,4 +138,4 @@ async def fetch_website(ctx: RunContext[AgentDeps], url: str) -> str:
         logger.info("❌ TOOL ERROR: fetch_website")
         logger.info(f"   Error: {str(e)}")
         logger.info("=" * 80)
-        return f"Failed to fetch URL: {str(e)}"
+        return "Failed to fetch that URL. Please try again."
