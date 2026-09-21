@@ -153,6 +153,9 @@ services:
       TELEGRAM_CLIENT_URL: http://telegram:3003
     volumes:
       - knowledge-base-data:/app/knowledge_base
+      # Docling / Hugging Face / EasyOCR / tiktoken model caches (PDF parsing runs
+      # here), so models aren't re-downloaded every time the container is recreated
+      - model-cache:/home/appuser/.cache
     depends_on:
       postgres:
         condition: service_healthy
@@ -365,6 +368,7 @@ volumes:
   postgres-data:
   redis-data:
   knowledge-base-data:
+  model-cache:
   whatsapp-session:
   whisper-cache:
 
