@@ -14,6 +14,7 @@ import os
 from datetime import UTC, datetime
 
 from redis.asyncio import Redis
+from redis.exceptions import WatchError
 
 from ..logger import logger
 
@@ -249,8 +250,11 @@ async def promote_due_pdf_retries(redis: Redis, now: float, limit: int = 50) -> 
     """
     Move retries whose due time has passed back onto the PDF stream.
 
-    ZREM decides ownership, so with several workers each retry is promoted
-    exactly once.
+    Each retry is moved in one MULTI/EXEC (ZREM + XADD) under WATCH, so it is
+    always either still parked or already on the stream: a connection lost
+    mid-promotion can never leave it in neither place. If another worker
+    touched the retry set in between, EXEC aborts (WatchError) and the retry is
+    left for the next sweep, so each retry is still promoted exactly once.
 
     Returns:
         Number of jobs re-enqueued
@@ -258,14 +262,23 @@ async def promote_due_pdf_retries(redis: Redis, now: float, limit: int = 50) -> 
     due = await redis.zrangebyscore(PDF_RETRY_KEY, "-inf", now, start=0, num=limit)
     promoted = 0
     for member in due:
-        if not await redis.zrem(PDF_RETRY_KEY, member):
-            continue  # another worker got it
         try:
             fields = json.loads(member)
         except (TypeError, ValueError):
-            logger.error(f"Dropping malformed PDF retry entry: {member!r}")
+            if await redis.zrem(PDF_RETRY_KEY, member):
+                logger.error(f"Dropping malformed PDF retry entry: {member!r}")
             continue
-        await redis.xadd(PDF_STREAM_KEY, fields, maxlen=PDF_STREAM_MAXLEN, approximate=True)
+        async with redis.pipeline(transaction=True) as pipe:
+            try:
+                await pipe.watch(PDF_RETRY_KEY)
+                if await pipe.zscore(PDF_RETRY_KEY, member) is None:
+                    continue  # another worker got it
+                pipe.multi()
+                pipe.zrem(PDF_RETRY_KEY, member)
+                pipe.xadd(PDF_STREAM_KEY, fields, maxlen=PDF_STREAM_MAXLEN, approximate=True)
+                await pipe.execute()
+            except WatchError:
+                continue  # the retry set changed underneath us; next sweep retries
         promoted += 1
         logger.info(
             f"Re-enqueued PDF document {fields.get('document_id')} "

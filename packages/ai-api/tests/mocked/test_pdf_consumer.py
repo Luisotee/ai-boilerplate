@@ -302,6 +302,35 @@ class TestRetryPromotion:
         assert data[b"retry_count"] == b"1"
         assert await redis.zcard(PDF_RETRY_KEY) == 1  # "later" still parked
 
+    async def test_failed_promotion_keeps_the_retry_parked(self, redis):
+        """Redis dropping mid-promotion must not lose the job: it stays parked."""
+        await manager.schedule_pdf_retry(
+            redis, {"document_id": "due", "file_path": "/a.pdf", "retry_count": "1"}, 100.0
+        )
+
+        with patch(
+            "redis.asyncio.client.Pipeline.execute",
+            AsyncMock(side_effect=ConnectionError("redis went away")),
+        ):
+            with pytest.raises(ConnectionError):
+                await promote_due_pdf_retries(redis, now=200.0)
+
+        assert await redis.zcard(PDF_RETRY_KEY) == 1
+        assert await redis.xlen(PDF_STREAM_KEY) == 0
+        assert await promote_due_pdf_retries(redis, now=200.0) == 1
+
+    async def test_retry_promoted_by_another_worker_is_skipped(self, redis):
+        member = json.dumps({"document_id": "due", "file_path": "/a.pdf", "retry_count": "1"})
+        # Seen as due, but another worker promoted it before this one claimed it.
+        with patch.object(redis, "zrangebyscore", AsyncMock(return_value=[member])):
+            assert await promote_due_pdf_retries(redis, now=200.0) == 0
+        assert await redis.xlen(PDF_STREAM_KEY) == 0
+
+    async def test_malformed_retry_entry_is_dropped(self, redis):
+        await redis.zadd(PDF_RETRY_KEY, {"not json": 100.0})
+        assert await promote_due_pdf_retries(redis, now=200.0) == 0
+        assert await redis.zcard(PDF_RETRY_KEY) == 0
+
     async def test_retry_round_trip(self, redis, settings_override, status_updates):
         """A retriable failure comes back on the stream once its delay has passed."""
         await enqueue_pdf_processing(redis, "doc-1", "/data/doc-1.pdf")
