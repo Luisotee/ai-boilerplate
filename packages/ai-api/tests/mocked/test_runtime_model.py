@@ -1,5 +1,5 @@
 """Verify that build_runtime_model() honors the runtime_config overrides and
-that the wired model flows into agent.run_stream from agent/response.py.
+that the wired model flows into agent.run_stream_events from agent/response.py.
 
 When DEEPSEEK_API_KEY is set the factory returns
 FallbackModel(DeepSeek -> Gemini), otherwise Gemini alone."""
@@ -107,35 +107,23 @@ def test_deepseek_thinking_disabled_only_on_deepseek():
     assert "settings" not in mock_google.call_args.kwargs
 
 
-async def test_run_stream_receives_model_override():
-    """agent.run_stream is invoked with model=build_runtime_model() — confirms
+async def test_run_stream_events_receives_model_override():
+    """agent.run_stream_events is invoked with model=build_runtime_model() — confirms
     every chat run picks up the current runtime_config value, not the
     module-level Agent default."""
+    from pydantic_ai import AgentRunResultEvent
+
     from ai_api.agent import response as agent_response
 
-    fake_stream_ctx = MagicMock()
+    async def _events(*args, **kwargs):
+        yield MagicMock(name="intermediate_event")
+        yield AgentRunResultEvent(result=MagicMock(output="hello world"))
 
-    async def _aenter(self):
-        result = MagicMock()
-
-        async def _stream_text(delta: bool = True):
-            for chunk in ("hello", " world"):
-                yield chunk
-
-        result.stream_text = _stream_text
-        return result
-
-    async def _aexit(self, *a):
-        return None
-
-    fake_stream_ctx.__aenter__ = _aenter
-    fake_stream_ctx.__aexit__ = _aexit
-
-    fake_run_stream = MagicMock(return_value=fake_stream_ctx)
+    fake_run_stream_events = MagicMock(side_effect=_events)
     sentinel_model = object()
 
     with (
-        patch.object(agent_response.agent, "run_stream", fake_run_stream),
+        patch.object(agent_response.agent, "run_stream_events", fake_run_stream_events),
         patch.object(agent_response, "build_runtime_model", return_value=sentinel_model),
     ):
         chunks = []
@@ -146,9 +134,9 @@ async def test_run_stream_receives_model_override():
         ):
             chunks.append(chunk)
 
-    assert chunks == ["hello", " world"]
-    fake_run_stream.assert_called_once()
-    assert fake_run_stream.call_args.kwargs["model"] is sentinel_model
+    assert chunks == ["hello world"]
+    fake_run_stream_events.assert_called_once()
+    assert fake_run_stream_events.call_args.kwargs["model"] is sentinel_model
 
 
 def test_real_chain_objects_construct():

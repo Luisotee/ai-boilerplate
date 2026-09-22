@@ -51,7 +51,7 @@ agent = Agent(
 def build_runtime_model() -> Model:
     """Build a Model for this run from the current runtime_config values.
 
-    Called by ``agent/response.py`` for every ``agent.run_stream`` invocation, so a
+    Called by ``agent/response.py`` for every ``agent.run_stream_events`` invocation, so a
     ``/admin/settings`` change to ``deepseek_model`` or ``gemini_model`` takes
     effect on the next message without restarting the process (≤ ~10s in the
     stream worker, via runtime_config's TTL cache; instant in the API process).

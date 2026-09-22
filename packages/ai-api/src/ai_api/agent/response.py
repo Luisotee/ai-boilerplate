@@ -1,6 +1,6 @@
 import base64
 
-from pydantic_ai import BinaryContent
+from pydantic_ai import AgentRunResultEvent, BinaryContent
 
 from ..logger import logger
 from .core import AgentDeps, agent, build_runtime_model
@@ -14,7 +14,7 @@ async def get_ai_response(
     image_mimetype: str | None = None,
 ):
     """
-    Stream AI response token by token for a user message with optional history
+    Run the agent for a user message (with optional history) and yield its reply
 
     Args:
         user_message: The user's message
@@ -24,7 +24,7 @@ async def get_ai_response(
         image_mimetype: Optional image MIME type (e.g., 'image/jpeg')
 
     Yields:
-        str: Text chunks as they arrive from Gemini
+        str: The final reply text, once the run (including every tool call) finishes
     """
     has_image = image_data is not None and image_mimetype is not None
 
@@ -53,17 +53,20 @@ async def get_ai_response(
     # Track full response for logging
     full_response = ""
 
-    # Use async context manager to enter streaming context
-    async with agent.run_stream(
+    # NOT agent.run_stream: it treats the first text as the final output and skips any
+    # tool call made after it in the same response. DeepSeek often writes a preamble
+    # ("Let me check...") and then calls a tool, so the user got only the
+    # preamble. run_stream_events runs every tool call; only the final output is sent.
+    # Model requests are still streamed, so GuardedModel's first-chunk timeout holds.
+    async for event in agent.run_stream_events(
         prompt,
         message_history=message_history,
         deps=agent_deps,
         model=build_runtime_model(),  # honor /admin model overrides per-run
-    ) as result:
-        # Call .stream_text(delta=True) to get incremental deltas (NOT cumulative text)
-        async for text_chunk in result.stream_text(delta=True):
-            full_response += text_chunk
-            yield text_chunk
+    ):
+        if isinstance(event, AgentRunResultEvent):
+            full_response = event.result.output
+            yield full_response
 
     logger.info("=" * 80)
     logger.info("✅ AGENT COMPLETED")
