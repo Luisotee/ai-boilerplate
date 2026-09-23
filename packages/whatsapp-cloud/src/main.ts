@@ -139,9 +139,12 @@ async function start() {
   // webhook signature is computed over the exact raw bytes — so we store them on the request.
   app.removeContentTypeParser('application/json');
   app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (req, body, done) => {
-    (req as unknown as { rawBody: Buffer }).rawBody = body;
+    // parseAs: 'buffer' always yields a Buffer; the type is `string | Buffer` only
+    // because Fastify types both parseAs modes with one signature.
+    const raw = Buffer.isBuffer(body) ? body : Buffer.from(body);
+    (req as unknown as { rawBody: Buffer }).rawBody = raw;
     try {
-      done(null, JSON.parse(body.toString()));
+      done(null, JSON.parse(raw.toString()));
     } catch (err) {
       done(err as Error, undefined);
     }

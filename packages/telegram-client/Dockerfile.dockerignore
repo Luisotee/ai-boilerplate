@@ -1,0 +1,23 @@
+# Build-context filter for packages/telegram-client/Dockerfile (BuildKit picks up
+# <Dockerfile>.dockerignore next to the Dockerfile and uses it INSTEAD of the
+# root .dockerignore, since the build context is the repo root).
+#
+# Allowlist: send only what the image build copies.
+**
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!packages/telegram-client/package.json
+!packages/telegram-client/tsconfig.json
+!packages/telegram-client/src/
+
+# Never send these, even if a rule above would re-include them
+**/node_modules/
+**/dist/
+packages/telegram-client/tests/
+packages/telegram-client/vitest.config.ts
+**/*.test.ts
+**/.env
+**/.env.*
+**/auth_info_baileys/
+# Logfire local credentials (never bake a write token into an image)
+**/.logfire/

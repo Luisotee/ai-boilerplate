@@ -40,7 +40,7 @@ export async function registerMessagingRoutes(app: FastifyInstance) {
         const sock = getBaileysSocket();
 
         const result = await sock.sendMessage(normalizedJid, { text });
-        return { success: true, message_id: result?.key.id };
+        return { success: true, message_id: result?.key.id ?? undefined };
       } catch (err) {
         const error = err as Error;
         app.log.error({ error }, 'Failed to send message');

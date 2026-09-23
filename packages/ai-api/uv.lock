@@ -48,7 +48,6 @@ name = "ai-api"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "arq" },
     { name = "ddgs" },
     { name = "fastapi" },
     { name = "genai-prices" },
@@ -91,7 +90,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "arq", specifier = ">=0.26.3" },
     { name = "ddgs", specifier = ">=9.10.0" },
     { name = "docling", marker = "extra == 'docling'", specifier = ">=2.64.0" },
     { name = "docling-core", extras = ["chunking-openai"], marker = "extra == 'docling'", specifier = ">=2.54.1" },
@@ -328,19 +326,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/38/61/0b9ae6399dd4a58d8c1b1dc5a27d6f2808023d0b5dd3104bb99f45a33ff6/argcomplete-3.6.3.tar.gz", hash = "sha256:62e8ed4fd6a45864acc8235409461b72c9a28ee785a2011cc5eb78318786c89c", size = 73754, upload-time = "2025-10-20T03:33:34.741Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/74/f5/9373290775639cb67a2fce7f629a1c240dce9f12fe927bc32b2736e16dfc/argcomplete-3.6.3-py3-none-any.whl", hash = "sha256:f5007b3a600ccac5d25bbce33089211dfd49eab4a7718da3f10e3082525a92ce", size = 43846, upload-time = "2025-10-20T03:33:33.021Z" },
-]
-
-[[package]]
-name = "arq"
-version = "0.26.3"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "click" },
-    { name = "redis", extra = ["hiredis"] },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/4f/65/5add7049297a449d1453e26a8d5924f0d5440b3876edc9e80d5dc621f16d/arq-0.26.3.tar.gz", hash = "sha256:362063ea3c726562fb69c723d5b8ee80827fdefda782a8547da5be3d380ac4b1", size = 291111, upload-time = "2025-01-06T22:44:49.771Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/85/b3/a24a183c628da633b7cafd1759b14aaf47958de82ba6bcae9f1c2898781d/arq-0.26.3-py3-none-any.whl", hash = "sha256:9f4b78149a58c9dc4b88454861a254b7c4e7a159f2c973c89b548288b77e9005", size = 25968, upload-time = "2025-01-06T22:44:45.771Z" },
 ]
 
 [[package]]

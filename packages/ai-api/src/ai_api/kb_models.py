@@ -24,7 +24,9 @@ class KnowledgeBaseDocument(Base):
     to document chunks.
 
     Status values:
-    - 'pending': Upload received, queued for processing
+    - 'queued': Upload received, waiting on the PDF stream (also while a retry is
+      scheduled). Rows created before the PDF stream existed may say 'pending'
+    - 'pending': Legacy name for 'queued'
     - 'processing': Currently being parsed and chunked
     - 'completed': Successfully processed, all chunks generated
     - 'partial': Partially processed, some chunks created before failure
@@ -37,12 +39,15 @@ class KnowledgeBaseDocument(Base):
     filename = Column(String, nullable=False)  # Stored filename (UUID.pdf)
     original_filename = Column(String, nullable=False)  # User's original filename
     file_size_bytes = Column(Integer, nullable=False)
+    # SHA-256 hex digest of the uploaded bytes, for duplicate detection. NULL on
+    # rows created before the column existed (docs/migrations/*-kb-file-hash.sql).
+    file_hash = Column(String(64), nullable=True, index=True)
     mime_type = Column(String, default="application/pdf")
     upload_date = Column(DateTime, default=datetime.utcnow, nullable=False)
     processed_date = Column(DateTime, nullable=True)
     status = Column(
-        String, nullable=False, default="pending"
-    )  # 'pending', 'processing', 'completed', 'failed'
+        String, nullable=False, default="queued"
+    )  # 'queued', 'processing', 'completed', 'partial', 'failed' (legacy: 'pending')
     error_message = Column(Text, nullable=True)
     doc_metadata = Column(JSON, nullable=True)  # Document-level metadata (author, title, etc.)
     chunk_count = Column(Integer, default=0)

@@ -50,6 +50,20 @@ export async function registerMediaRoutes(app: FastifyInstance) {
               error: { type: 'string' },
             },
           },
+          406: {
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+              code: { type: 'string' },
+            },
+          },
+          413: {
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+              code: { type: 'string' },
+            },
+          },
           500: {
             type: 'object',
             properties: {
@@ -129,7 +143,7 @@ export async function registerMediaRoutes(app: FastifyInstance) {
         });
 
         app.log.debug({ messageId: result?.key.id }, 'Message sent successfully');
-        return { success: true, message_id: result?.key.id };
+        return { success: true, message_id: result?.key.id ?? undefined };
       } catch (err) {
         const error = err as Error & { code?: string };
         // Extract error details for proper logging
@@ -220,6 +234,20 @@ export async function registerMediaRoutes(app: FastifyInstance) {
               error: { type: 'string' },
             },
           },
+          406: {
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+              code: { type: 'string' },
+            },
+          },
+          413: {
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+              code: { type: 'string' },
+            },
+          },
           500: {
             type: 'object',
             properties: {
@@ -301,7 +329,7 @@ export async function registerMediaRoutes(app: FastifyInstance) {
         });
 
         app.log.debug({ messageId: result?.key.id }, 'Message sent successfully');
-        return { success: true, message_id: result?.key.id };
+        return { success: true, message_id: result?.key.id ?? undefined };
       } catch (err) {
         const error = err as Error & { code?: string };
         // Extract error details for proper logging
@@ -387,6 +415,20 @@ export async function registerMediaRoutes(app: FastifyInstance) {
               error: { type: 'string' },
             },
           },
+          406: {
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+              code: { type: 'string' },
+            },
+          },
+          413: {
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+              code: { type: 'string' },
+            },
+          },
           500: {
             type: 'object',
             properties: {
@@ -468,7 +510,7 @@ export async function registerMediaRoutes(app: FastifyInstance) {
         });
 
         app.log.debug({ messageId: result?.key.id }, 'Message sent successfully');
-        return { success: true, message_id: result?.key.id };
+        return { success: true, message_id: result?.key.id ?? undefined };
       } catch (err) {
         const error = err as Error & { code?: string };
         // Extract error details for proper logging
@@ -555,6 +597,20 @@ export async function registerMediaRoutes(app: FastifyInstance) {
               error: { type: 'string' },
             },
           },
+          406: {
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+              code: { type: 'string' },
+            },
+          },
+          413: {
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+              code: { type: 'string' },
+            },
+          },
           500: {
             type: 'object',
             properties: {
@@ -638,7 +694,7 @@ export async function registerMediaRoutes(app: FastifyInstance) {
         });
 
         app.log.debug({ messageId: result?.key.id }, 'Message sent successfully');
-        return { success: true, message_id: result?.key.id };
+        return { success: true, message_id: result?.key.id ?? undefined };
       } catch (err) {
         const error = err as Error & { code?: string };
         // Extract error details for proper logging
@@ -723,7 +779,7 @@ export async function registerMediaRoutes(app: FastifyInstance) {
           },
         });
 
-        return { success: true, message_id: result?.key.id };
+        return { success: true, message_id: result?.key.id ?? undefined };
       } catch (err) {
         const error = err as Error;
         app.log.error({ error }, 'Failed to send location');
@@ -790,7 +846,7 @@ export async function registerMediaRoutes(app: FastifyInstance) {
           },
         });
 
-        return { success: true, message_id: result?.key.id };
+        return { success: true, message_id: result?.key.id ?? undefined };
       } catch (err) {
         const error = err as Error;
         app.log.error({ error }, 'Failed to send contact');

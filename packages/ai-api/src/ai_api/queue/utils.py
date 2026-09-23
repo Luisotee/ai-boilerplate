@@ -101,7 +101,7 @@ async def set_job_metadata(redis: Redis, job_id: str, metadata: dict[str, Any]) 
     await redis.set(
         meta_key,
         json.dumps(metadata),
-        ex=settings.arq_keep_result,  # Match job result TTL
+        ex=settings.arq_keep_result,  # ARQ_KEEP_RESULT: legacy env name, still the metadata TTL
     )
 
 

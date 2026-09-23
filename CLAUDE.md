@@ -85,7 +85,7 @@ pnpm dev:server                         # Start AI API (port 8000)
 pnpm dev:whatsapp                       # Start Baileys WhatsApp client (port 3001)
 pnpm dev:cloud                          # Start Cloud API WhatsApp client (port 3002)
 pnpm dev:telegram                       # Start Telegram client (port 3003)
-pnpm dev:queue                          # Start background stream worker
+pnpm dev:queue                          # Start the stream worker (chat consumer + PDF consumer; required for replies AND PDF processing)
 pnpm install:all                        # Install Node + Python dependencies
 
 # Linting & Formatting
@@ -145,11 +145,24 @@ cd packages/ai-api && uv run pytest tests/unit  # AI API unit tests only
 
 - **PostgreSQL + pgvector** (3072-dim vectors via `gemini-embedding-001`)
 - **8 tables**: users, conversation_messages, conversation_preferences, core_memories, knowledge_base_documents, knowledge_base_chunks, bot_prompt, runtime_settings
-- **No Alembic migrations** — uses SQLAlchemy `create_all()`. Schema changes require manual `ALTER TABLE` or table recreation; `create_all()` only adds new tables
+- **No Alembic migrations** — uses SQLAlchemy `create_all()`, which only creates missing *tables*, never new columns. Column/index changes ship as hand-written, idempotent (`IF NOT EXISTS`) SQL in `packages/ai-api/docs/migrations/<YYYY-MM-DD>-<name>.sql`, named so they match what `create_all()` emits on a fresh DB. Apply them to an existing Docker deployment BEFORE rolling out the code that needs them (safe to re-run):
+  ```bash
+  docker exec -i aiagent-postgres psql -U aiagent -d aiagent \
+    < packages/ai-api/docs/migrations/<file>.sql
+  ```
+  (`aiagent-postgres` is the compose `container_name`; substitute your `POSTGRES_USER` / `POSTGRES_DB` if you changed the defaults.) Current migrations: `2026-09-21-kb-file-hash.sql`
+- **Knowledge-base dedup**: `knowledge_base_documents.file_hash` (SHA-256 hex of the uploaded bytes, indexed, computed while streaming the upload to disk). `POST /knowledge-base/upload` answers **409** when identical content is already in the KB; the batch route rejects that file (and a repeat of an earlier file in the same batch) while accepting the rest. Only global documents with a status other than `failed` count — conversation-scoped chat PDFs never block an upload, and a failed document can be re-uploaded. Rows from before the migration have `file_hash = NULL` and never match. Both upload routes are `@limiter.exempt` (bulk loads via `./upload-kb.sh <dir>`, which posts a folder of PDFs to the batch route with `AI_API_KEY` from the env or `.env`); they stay behind `X-API-Key`
 - Models: `database.py` (users, messages, preferences, core_memories, bot_prompt, runtime_settings) + `kb_models.py` (documents, chunks)
 - **Core memories**: one markdown document per user (`core_memories` table), injected into the prompt via `@agent.instructions inject_core_memory` in `agent/core.py`
 - **System prompt is DB-backed**: the active prompt lives in the single-row `bot_prompt` table, loaded per-run via `@agent.instructions base_system_prompt` in `agent/core.py`, falling back to the hardcoded `DEFAULT_SYSTEM_PROMPT` when no row exists. Edit it through `PUT /admin/prompt` — takes effect on the next message, no restart. Uses `instructions` (not `system_prompt`) so a changed prompt is never shadowed by one retained in `message_history`
 - **Conversation-scoped PDFs** expire after 24h (`CONVERSATION_PDF_TTL_HOURS`). Cleanup task runs in `main.py` lifespan
+- **PDF processing queue**: every PDF — knowledge-base uploads (`routes/knowledge_base.py`) and chat attachments (`streams/processor.py`) — is enqueued on the shared Redis Stream `stream:pdf_processing` and parsed by `streams/pdf_consumer.py`, which `scripts/run_stream_worker.py` runs next to the chat consumer (the worker exits non-zero if either stops, so Docker restarts both). Nothing parses in the API process any more (the old FastAPI `BackgroundTasks` path is gone) or inline in a chat job (a minutes-long Docling parse used to block that user's whole stream). Semantics:
+  - **Concurrency**: `KB_MAX_CONCURRENT_PROCESSING` (default 2) per worker process; a slot is acquired *before* `XREADGROUP`, so waiting jobs stay in Redis rather than piling up in memory. **Memory trade-off**: the worker reuses the api image, so with `INSTALL_DOCLING=true` each Docling parse (1-2 GB) runs inside the 2G worker container next to the agent — keep this at 1-2 or raise the worker's memory limit. LlamaParse-only deployments are light
+  - **Ack / retry / dead letter**: a job is `XACK`ed and `XDEL`eted once settled. Retriable failures (`processing.is_retriable_error`: timeouts, httpx/LlamaParse transport errors, HTTP 408/429/5xx — it walks `__cause__`/`__context__` because the pipeline wraps timeouts in a `ValueError`) and "0 chunks stored" are retried up to `KB_MAX_PDF_RETRIES` (3) times with `KB_RETRY_BASE_DELAY_SECONDS * 4**attempt` backoff, parked in the `pdf_processing:retry` sorted set so a restart doesn't lose them. Everything else, and exhausted retries, is copied to `stream:pdf_processing:dead` with a `reason`
+  - **Crash recovery**: a job whose worker died mid-parse (restart, OOM kill) stays pending and is reclaimed by an `XAUTOCLAIM` sweep every 15s once idle > `2 * KB_PROCESSING_TIMEOUT_SECONDS + 60s`; it counts as an attempt, so a PDF that keeps OOM-killing the worker ends in the dead letter instead of looping. `process_pdf_document` deletes the document's existing chunks first, so re-running a job never duplicates them
+  - **Chat UX**: the chat job reacts ⏳, enqueues the PDF and tells the agent the document "is not searchable yet" (so it acknowledges rather than inventing a summary); the consumer reacts ✅ when the document is `completed` (searchable via `search_knowledge_base`) or ❌ when it permanently failed or ended `partial` (search only reads `completed` documents). If the enqueue itself fails, the user gets the old "couldn't process your document" reply
+  - `file_path` in the job is the API's path; the API and worker must share the upload directory (`knowledge-base-data` volume at `/app/knowledge_base` in compose)
+  - New uploads start as `queued` (formerly `pending`; old rows may still say `pending`, and the status filter accepts both). If the enqueue fails, the upload is rolled back (row + file deleted) and the route answers 503 / rejects that batch file
 - **PDF parsing**: LlamaParse (cloud, primary) via `llama-cloud` SDK, with **optional** Docling fallback behind the `[docling]` extra. Behavior controlled by `PDF_PARSER` (`auto` | `llamaparse` | `docling`). In `auto` mode, LlamaParse runs when `LLAMA_CLOUD_API_KEY` is set and falls back to Docling on any parser error *if* the extra is installed
 - **Speech-to-Text**: Groq Whisper (cloud, primary) plus an **optional** self-hosted Whisper server (speaches by default, any OpenAI-compatible endpoint works). Controlled by `STT_PROVIDER` (`auto` | `groq` | `whisper`). In `auto` mode: with `GROQ_API_KEY` set, Groq runs and falls back to self-hosted on recoverable errors when `WHISPER_BASE_URL` is also set; with only `WHISPER_BASE_URL` set, self-hosted runs alone; if neither is configured, `/transcribe` returns 503. Start the self-hosted container with `docker compose --profile whisper up -d`
 
@@ -304,7 +317,7 @@ Multipart routes can't use Zod validation directly. Follow the pattern in `route
 - Core memory is a single markdown document per user (not individual rows) — the AI reads the whole doc and rewrites it via `update_core_memory` tool
 - CORS middleware must be added AFTER `APIKeyMiddleware` in `main.py` (Starlette processes middleware LIFO — reversing this breaks CORS preflight)
 - pgvector IVFFlat index must be created manually for `knowledge_base_chunks` — without it, similarity search does full table scan
-- Redis Streams (`streams/`) supersedes the arq queue (`queue/worker.py`) — both coexist in the codebase
+- **Redis Streams (`streams/`) is the only job pipeline.** The dead arq worker (`queue/worker.py`, `scripts/run_worker.py`) and the `arq` dependency were removed; `queue/` now holds only the Redis plumbing that outlived it — `queue/connection.py` (plain `redis.asyncio`), job metadata and response-chunk storage. The `get_arq_redis` / `close_arq_redis` / `create_arq_pool` names and the `ARQ_KEEP_RESULT` env var (still the job-metadata TTL) keep their legacy names on purpose: renaming them would break callers, test patches and existing overrides
 - Embedding task types matter: `RETRIEVAL_DOCUMENT` for storage, `RETRIEVAL_QUERY` for search — mixing them degrades retrieval quality
 - Agent tool modules must be imported in `agent/tools/__init__.py` or the `@agent.tool` decorators won't register
 - Agent tools that touch `ctx.deps.db` must call `safe_rollback(ctx.deps.db)` (`agent/tools/_db.py`) in their except blocks — all tools share one DB session per agent run, so a failed flush/commit leaves it dirty and later tool calls hit `PendingRollbackError`. `safe_rollback` swallows (and logs) a failing rollback, so it can never replace the tool's reply with a crash
@@ -313,6 +326,17 @@ Multipart routes can't use Zod validation directly. Follow the pattern in `route
 ### General
 - Husky pre-commit hook runs `pnpm format` automatically — do NOT run format manually before committing
 - **Logging/shutdown (TS)**: pino-pretty is used only when `NODE_ENV !== 'production'` (the Dockerfiles set `production`, so containers emit plain JSON). All three clients handle SIGTERM/SIGINT with `app.close()` in try/catch, flush Sentry and exit 0; startup failures and `unhandledRejection` still go through `shutdownWithError` (Sentry flush, exit 1)
+- **Docker images run as non-root.** The three TS clients are multi-stage builds: `tsc` → `dist/` in a builder stage, production-only deps in the runtime stage, `USER node` (uid 1000), started with `node --import ./dist/instrument.js dist/main.js` so Sentry's ESM hooks register before `main.js`'s imports are linked (`main.js` still imports `./instrument.js`; it resolves to the same module and is not evaluated twice). **Type errors fail the image build** — never add `|| true` to the build step. The ai-api image runs as `appuser` (uid/gid 1000); code and venv are root-owned/read-only, the writable paths are `/app`, `/app/knowledge_base` and `/home/appuser/.cache` (`HF_HOME`, `EASYOCR_MODULE_PATH`, `TIKTOKEN_CACHE_DIR` for Docling/tiktoken models; the worker mounts the `model-cache` volume there)
+- **Build-context ignore files**: the TS clients build from the repo root, so a `packages/<pkg>/.dockerignore` would be ignored. Each uses an allowlist `packages/<pkg>/Dockerfile.dockerignore` (BuildKit uses it *instead of* the root `.dockerignore`), which is why their contexts are a few hundred KB. The ai-api context is `packages/ai-api`, so its own `.dockerignore` applies. Keep the `.logfire/` exclusions in all of them
+- **Upgrading an existing deployment to the non-root images**: named volumes created by the old root images keep root ownership, so the new processes can't write them (Baileys can't save its session; uploads fail). Once, after building the new images:
+  ```bash
+  docker compose build
+  docker compose stop whatsapp api worker
+  docker compose run --rm --no-deps --user root --entrypoint chown whatsapp -R node:node /app/packages/whatsapp-client/auth_info_baileys
+  docker compose run --rm --no-deps --user root --entrypoint chown api -R appuser:appuser /app/knowledge_base
+  docker compose up -d
+  ```
+  New volumes need nothing: Docker copies the image directory's ownership on first mount
 - ai-api Dockerfile installs `ffmpeg` always (used by pydub for TTS/STT). `poppler-utils`, `tesseract-ocr`, and `libmagic1` are only installed when `INSTALL_DOCLING=true` (build arg) — the default image uses LlamaParse only and skips them to stay lean. Docker Compose forwards `${INSTALL_DOCLING}` from the shell environment as a build arg
 - API docs: http://localhost:8000/docs (AI API), http://localhost:3001/docs (Baileys client), http://localhost:3002/docs (Cloud API client)
 - DB GUI: http://localhost:8080 (Adminer)

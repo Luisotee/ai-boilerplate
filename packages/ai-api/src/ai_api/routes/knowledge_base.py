@@ -1,6 +1,8 @@
+import hashlib
 import uuid
+from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 from starlette.requests import Request
 
@@ -9,25 +11,78 @@ from ..database import get_db
 from ..deps import UPLOAD_DIR, limiter
 from ..kb_models import KnowledgeBaseDocument
 from ..logger import logger
-from ..processing import process_pdf_document
+from ..queue.connection import get_redis_client
 from ..schemas import BatchUploadResponse, FileUploadResult, UploadPDFResponse
+from ..streams.manager import enqueue_pdf_processing
 
 router = APIRouter()
 
 
+# Streaming read size for uploads (memory-efficient)
+_CHUNK_SIZE = 8192
+
+
+async def _save_upload(file: UploadFile, file_path: Path) -> str:
+    """Stream an upload to disk and return its SHA-256 hex digest."""
+    sha256 = hashlib.sha256()
+    await file.seek(0)
+    with open(file_path, "wb") as f:
+        while chunk := await file.read(_CHUNK_SIZE):
+            sha256.update(chunk)
+            f.write(chunk)
+    return sha256.hexdigest()
+
+
+def _find_duplicate(db: Session, file_hash: str) -> KnowledgeBaseDocument | None:
+    """
+    Return a global knowledge-base document with identical content, if any.
+
+    Conversation-scoped (chat) PDFs are ignored — they expire and belong to one
+    chat. So are ``failed`` documents, so a file whose processing failed can be
+    uploaded again. Rows from before the ``file_hash`` column have NULL there and
+    never match.
+    """
+    return (
+        db.query(KnowledgeBaseDocument)
+        .filter(
+            KnowledgeBaseDocument.file_hash == file_hash,
+            KnowledgeBaseDocument.is_conversation_scoped.is_(False),
+            KnowledgeBaseDocument.status != "failed",
+        )
+        .first()
+    )
+
+
+def _discard_upload(db: Session, document: KnowledgeBaseDocument, file_path: Path) -> None:
+    """Remove a just-created document row and its file (enqueue failed)."""
+    try:
+        db.delete(document)
+        db.commit()
+    except Exception:
+        logger.error(f"Failed to delete unqueued document {document.id}", exc_info=True)
+        db.rollback()
+        return
+    # File only after the row is gone (an orphan file is harmless, a row
+    # pointing at a missing file is not).
+    try:
+        file_path.unlink(missing_ok=True)
+    except OSError:
+        logger.warning(f"Failed to delete unqueued upload {file_path}", exc_info=True)
+
+
 @router.post("/knowledge-base/upload", response_model=UploadPDFResponse, tags=["Knowledge Base"])
-@limiter.limit(f"{settings.rate_limit_expensive}/minute")
+@limiter.exempt  # bulk loads (upload-kb.sh) — the route is still behind X-API-Key
 async def upload_pdf(
     request: Request,
     file: UploadFile = File(...),
-    background_tasks: BackgroundTasks = BackgroundTasks(),
     db: Session = Depends(get_db),
 ):
     """
     Upload a PDF document to the knowledge base
 
-    The PDF will be parsed with Docling, chunked semantically, and indexed for retrieval.
-    Processing happens in the background.
+    The PDF is queued on the `stream:pdf_processing` Redis Stream and parsed by the
+    stream worker (LlamaParse or Docling, per `PDF_PARSER`), chunked, and indexed
+    for retrieval. Poll `/knowledge-base/status/{document_id}` for progress.
 
     **Request:**
     - `file`: PDF file (multipart/form-data)
@@ -35,8 +90,11 @@ async def upload_pdf(
     **Response:**
     - `document_id`: UUID for tracking processing status
     - `filename`: Original filename
-    - `status`: Initial status ('pending')
+    - `status`: Initial status ('queued')
     - `message`: Human-readable status message
+
+    **Errors:**
+    - `409`: identical content (SHA-256) is already in the knowledge base
     """
     logger.info(f"Received PDF upload: {file.filename}")
 
@@ -71,11 +129,7 @@ async def upload_pdf(
                 detail=f"File too large ({file_size / 1024 / 1024:.1f} MB). Maximum size: {settings.kb_max_file_size_mb} MB",
             )
 
-        # Stream file to disk in chunks (memory-efficient)
-        CHUNK_SIZE = 8192  # 8 KB chunks
-        with open(file_path, "wb") as f:
-            while chunk := await file.read(CHUNK_SIZE):
-                f.write(chunk)
+        file_hash = await _save_upload(file, file_path)
 
         logger.info(f"Saved PDF to {file_path} ({file_size / 1024:.1f} KB)")
 
@@ -83,7 +137,26 @@ async def upload_pdf(
         raise
     except Exception as e:
         logger.error(f"Error saving file: {str(e)}", exc_info=True)
+        file_path.unlink(missing_ok=True)
         raise HTTPException(status_code=500, detail="Failed to save file")
+
+    # Reject content that is already in the knowledge base
+    try:
+        existing = _find_duplicate(db, file_hash)
+    except Exception:
+        logger.error("Duplicate check failed", exc_info=True)
+        file_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail="Failed to check for duplicates")
+    if existing:
+        file_path.unlink(missing_ok=True)
+        logger.info(f"Rejected duplicate upload {file.filename} (matches {existing.id})")
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Duplicate document: '{existing.original_filename}' "
+                f"(ID: {existing.id}, status: {existing.status})"
+            ),
+        )
 
     # Create database record
     try:
@@ -92,8 +165,9 @@ async def upload_pdf(
             filename=stored_filename,
             original_filename=file.filename,
             file_size_bytes=file_size,
+            file_hash=file_hash,
             mime_type=file.content_type or "application/pdf",
-            status="pending",
+            status="queued",
         )
         db.add(document)
         db.commit()
@@ -108,18 +182,26 @@ async def upload_pdf(
             file_path.unlink()
         raise HTTPException(status_code=500, detail="Failed to create database record")
 
-    # Schedule background processing
-    background_tasks.add_task(
-        process_pdf_document, document_id=str(doc_id), file_path=str(file_path)
-    )
+    # Enqueue for the stream worker's PDF consumer
+    try:
+        async with get_redis_client() as redis_client:
+            await enqueue_pdf_processing(
+                redis_client, document_id=str(doc_id), file_path=str(file_path)
+            )
+    except Exception:
+        logger.error(f"Failed to enqueue PDF processing for {doc_id}", exc_info=True)
+        # Nothing would ever pick the document up: undo the upload so the client
+        # can simply retry (and a retry isn't blocked as a duplicate).
+        _discard_upload(db, document, file_path)
+        raise HTTPException(status_code=503, detail="Document queue unavailable. Please try again.")
 
-    logger.info(f"Scheduled background processing for document {doc_id}")
+    logger.info(f"Enqueued PDF processing for document {doc_id}")
 
     return UploadPDFResponse(
         document_id=str(doc_id),
         filename=file.filename,
-        status="pending",
-        message="PDF uploaded successfully. Processing in background.",
+        status="queued",
+        message="PDF uploaded successfully. Queued for processing.",
     )
 
 
@@ -128,19 +210,18 @@ async def upload_pdf(
     response_model=BatchUploadResponse,
     tags=["Knowledge Base"],
 )
-@limiter.limit(f"{settings.rate_limit_expensive}/minute")
+@limiter.exempt  # bulk loads (upload-kb.sh) — the route is still behind X-API-Key
 async def upload_pdf_batch(
     request: Request,
     files: list[UploadFile] = File(...),
-    background_tasks: BackgroundTasks = BackgroundTasks(),
     db: Session = Depends(get_db),
 ):
     """
     Upload multiple PDF documents to the knowledge base in a single request
 
-    Each file is validated independently. Valid files are saved and processed,
-    while invalid files are rejected with error details. Processing happens in
-    the background for all accepted files.
+    Each file is validated independently. Valid files are saved and queued on the
+    `stream:pdf_processing` Redis Stream for the stream worker, while invalid
+    files are rejected with error details.
 
     **Request:**
     - `files`: Multiple PDF files (multipart/form-data)
@@ -151,6 +232,9 @@ async def upload_pdf_batch(
     - `rejected`: Number of files rejected during validation
     - `results`: Per-file status with document_id (if accepted) or error (if rejected)
     - `message`: Overall batch status message
+
+    Files whose content (SHA-256) is already in the knowledge base, or appears
+    earlier in the same batch, are rejected as duplicates.
 
     **Configuration:**
     - `KB_MAX_FILE_SIZE_MB`: Maximum individual file size (default: 50 MB)
@@ -240,6 +324,8 @@ async def upload_pdf_batch(
     accepted_count = 0
     rejected_count = 0
 
+    batch_hashes: dict[str, str] = {}  # sha256 -> filename, for intra-batch dedup
+
     for validation in file_validations:
         filename = validation["filename"]
         error = validation["error"]
@@ -252,6 +338,7 @@ async def upload_pdf_batch(
             continue
 
         # File is valid, save it
+        file_path: Path | None = None
         try:
             file = validation["file"]
             file_size = validation["size"]
@@ -261,14 +348,25 @@ async def upload_pdf_batch(
             stored_filename = f"{doc_id}.pdf"
             file_path = UPLOAD_DIR / stored_filename
 
-            # Stream file to disk in chunks (memory-efficient)
-            CHUNK_SIZE = 8192  # 8 KB chunks
-            file.file.seek(0)  # Ensure at beginning
-            with open(file_path, "wb") as f:
-                while chunk := await file.read(CHUNK_SIZE):
-                    f.write(chunk)
+            file_hash = await _save_upload(file, file_path)
 
             logger.info(f"Saved PDF to {file_path} ({file_size / 1024:.1f} KB)")
+
+            # Duplicates: within this batch first (no DB round trip), then the KB
+            duplicate_error = None
+            if file_hash in batch_hashes:
+                duplicate_error = f"Duplicate of '{batch_hashes[file_hash]}' in this batch"
+            elif existing := _find_duplicate(db, file_hash):
+                duplicate_error = f"Duplicate of '{existing.original_filename}' (ID: {existing.id})"
+            if duplicate_error:
+                file_path.unlink(missing_ok=True)
+                results.append(
+                    FileUploadResult(filename=filename, status="rejected", error=duplicate_error)
+                )
+                rejected_count += 1
+                logger.info(f"Rejected duplicate: {filename} - {duplicate_error}")
+                continue
+            batch_hashes[file_hash] = filename
 
             # Create database record
             document = KnowledgeBaseDocument(
@@ -276,8 +374,9 @@ async def upload_pdf_batch(
                 filename=stored_filename,
                 original_filename=filename,
                 file_size_bytes=file_size,
+                file_hash=file_hash,
                 mime_type=file.content_type or "application/pdf",
-                status="pending",
+                status="queued",
             )
             db.add(document)
             db.commit()
@@ -285,12 +384,26 @@ async def upload_pdf_batch(
 
             logger.info(f"Created database record for document {doc_id}")
 
-            # Schedule background processing
-            background_tasks.add_task(
-                process_pdf_document, document_id=str(doc_id), file_path=str(file_path)
-            )
+            # Enqueue for the stream worker's PDF consumer
+            try:
+                async with get_redis_client() as redis_client:
+                    await enqueue_pdf_processing(
+                        redis_client, document_id=str(doc_id), file_path=str(file_path)
+                    )
+            except Exception:
+                logger.error(f"Failed to enqueue PDF processing for {doc_id}", exc_info=True)
+                _discard_upload(db, document, file_path)
+                results.append(
+                    FileUploadResult(
+                        filename=filename,
+                        status="rejected",
+                        error="Document queue unavailable. Please try again.",
+                    )
+                )
+                rejected_count += 1
+                continue
 
-            logger.info(f"Scheduled processing for {filename} ({doc_id})")
+            logger.info(f"Enqueued processing for {filename} ({doc_id})")
 
             # Add to accepted results
             results.append(
@@ -305,21 +418,27 @@ async def upload_pdf_batch(
 
         except Exception as e:
             logger.error(f"Error saving file {filename}: {str(e)}", exc_info=True)
+            # A failed commit leaves the shared session unusable for the rest of
+            # the batch until it is rolled back.
+            try:
+                db.rollback()
+            except Exception:
+                logger.error("Rollback failed during batch upload", exc_info=True)
 
-            # Add to rejected results
+            # Generic message only: str(e) can leak DB/SQL details to the caller
             results.append(
                 FileUploadResult(
                     filename=filename,
                     status="rejected",
-                    error=f"Failed to save file: {str(e)}",
+                    error="Failed to save file",
                 )
             )
             rejected_count += 1
 
             # Clean up file if it was saved
             try:
-                if file_path.exists():
-                    file_path.unlink()
+                if file_path is not None:
+                    file_path.unlink(missing_ok=True)
             except Exception as cleanup_error:
                 logger.error(f"Cleanup error for {filename}: {str(cleanup_error)}")
 
@@ -357,7 +476,7 @@ async def get_document_status(document_id: str, db: Session = Depends(get_db)):
     **Response:**
     - `id`: Document UUID
     - `original_filename`: Original filename
-    - `status`: Current status (pending, processing, completed, failed)
+    - `status`: Current status (queued, processing, completed, partial, failed)
     - `chunk_count`: Number of chunks created (0 if not completed)
     - `error_message`: Error details if status is 'failed'
     - `upload_date`: When document was uploaded
@@ -403,7 +522,7 @@ async def list_documents(
     Returns a paginated list of documents with optional status filtering.
 
     **Query Parameters:**
-    - `status`: Optional filter by status (pending, processing, completed, failed)
+    - `status`: Optional filter by status (queued, pending, processing, completed, partial, failed)
     - `limit`: Maximum number of documents to return (default: 50, max: 100)
     - `offset`: Number of documents to skip for pagination (default: 0)
 
@@ -425,7 +544,7 @@ async def list_documents(
 
         # Apply status filter if provided
         if status:
-            valid_statuses = ["pending", "processing", "completed", "partial", "failed"]
+            valid_statuses = ["queued", "pending", "processing", "completed", "partial", "failed"]
             if status not in valid_statuses:
                 raise HTTPException(
                     status_code=400,

@@ -10,3 +10,8 @@ __pycache__/
 .gitignore
 .python-version
 .logfire/
+# Tests and docs are not part of the image
+tests/
+pytest.ini
+docs/
+.pytest_cache/

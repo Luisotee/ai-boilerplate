@@ -21,7 +21,8 @@ A production-ready AI agent system that brings conversational AI to WhatsApp wit
 - Semantic search through past conversations using vector embeddings
 
 ### RAG Knowledge Base
-- PDF document upload with background processing (LlamaParse cloud API; optional local Docling fallback)
+- PDF document upload, processed by the background worker from a Redis Stream queue with retries (LlamaParse cloud API; optional local Docling fallback)
+- Duplicate uploads (same SHA-256 content) rejected with 409
 - Semantic chunking with token-aware splitting (512 tokens/chunk)
 - Vector similarity search using pgvector (3072-dim embeddings)
 - Auto-generated citations with document name, page number, and section
@@ -122,7 +123,7 @@ packages/
 - Node.js 18+ and pnpm
 - Python 3.11+ and uv
 - Docker and Docker Compose
-- API Keys: [Google Gemini](https://aistudio.google.com/apikey), [LlamaCloud](https://cloud.llamaindex.ai) (primary PDF parser), [Groq](https://console.groq.com/keys) (optional STT)
+- API Keys: [Google Gemini](https://aistudio.google.com/apikey), [LlamaCloud](https://cloud.llamaindex.ai) (primary PDF parser), [Groq](https://console.groq.com/keys) (optional STT) — step-by-step for every key in [docs/api-keys.md](docs/api-keys.md)
 
 ### Setup
 
@@ -146,6 +147,16 @@ docker compose --profile dev --profile cloud up -d      # everything
 
 Profiles are opt-in: without `--profile`, Adminer, the Cloud API client, and the self-hosted Whisper server stay stopped. Infrastructure ports (`5432`, `6379`, `8080`, `8771`) bind to `127.0.0.1` only — application services (`8000`, `3001`, `3002`) remain on all interfaces so they can be reached from host tooling and the WhatsApp client.
 
+The images run as non-root users (uid 1000). **Upgrading a deployment built from the older root images?** Chown the existing Baileys session and upload volumes once, or the WhatsApp session and uploads can't be written:
+
+```bash
+docker compose build
+docker compose stop whatsapp api worker
+docker compose run --rm --no-deps --user root --entrypoint chown whatsapp -R node:node /app/packages/whatsapp-client/auth_info_baileys
+docker compose run --rm --no-deps --user root --entrypoint chown api -R appuser:appuser /app/knowledge_base
+docker compose up -d
+```
+
 ### Self-hosted STT (optional)
 
 Groq Whisper is the default cloud STT. If you prefer to run Whisper locally (privacy, cost, offline), start the `whisper` profile — it launches `ghcr.io/speaches-ai/speaches:latest-cpu`, exposing an OpenAI-compatible `POST /v1/audio/transcriptions` at `http://whisper:8000` inside the Docker network (and `http://127.0.0.1:8771` from the host). Then in `.env` set:
@@ -164,7 +175,7 @@ Starting the profile also launches a one-shot `whisper-init` sidecar that pulls 
 docker compose up -d postgres redis     # just infra in containers
 pnpm dev:server                          # Terminal 1: AI API
 pnpm dev:whatsapp                        # Terminal 2: WhatsApp client (scan QR)
-pnpm dev:queue                           # Terminal 3: background worker
+pnpm dev:queue                           # Terminal 3: stream worker (chat replies + PDF parsing)
 ```
 
 ### Verify
@@ -206,6 +217,8 @@ The free tier covers 10M records/month and is hard-capped at $0 — it can never
 | GET | `/knowledge-base/status/{id}` | Processing status |
 | DELETE | `/knowledge-base/documents/{id}` | Delete document |
 
+Bulk-load a folder of PDFs with `./upload-kb.sh /path/to/pdfs` (uses `AI_API_KEY` from the environment or `.env`; `AI_API_URL` defaults to `http://localhost:8000`). Re-running it is safe: files already in the knowledge base are rejected as duplicates.
+
 ### Speech
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -245,6 +258,8 @@ pnpm format          # Format all code
 | `DEEPSEEK_API_KEY` | Optional. When set, DeepSeek (`DEEPSEEK_MODEL`, default `deepseek-flash`) is the primary chat model and Gemini the automatic fallback; chat content is then sent to DeepSeek's servers (China). Unset = Gemini only |
 | `LLAMA_CLOUD_API_KEY` | LlamaCloud API key for PDF parsing via LlamaParse (optional; required when `PDF_PARSER=llamaparse` or `auto` without the `[docling]` extra) |
 | `GROQ_API_KEY` | Groq API key (optional, for STT) |
+| `KB_MAX_CONCURRENT_PROCESSING` | PDFs parsed at once per stream worker (default `2`; keep low with Docling, ~1-2 GB RAM per parse) |
+| `KB_MAX_PDF_RETRIES` / `KB_RETRY_BASE_DELAY_SECONDS` | PDF job retries (default `3`) and backoff base (default `30` → 30s, 120s, 480s) |
 | `PDF_PARSER` | `auto` (default), `llamaparse`, or `docling` |
 | `LLAMAPARSE_TIER` | `cost_effective` (default), `fast`, `agentic`, or `agentic_plus` |
 | `DATABASE_URL` | PostgreSQL connection string |
@@ -253,7 +268,7 @@ pnpm format          # Format all code
 | `LOGFIRE_TOKEN` | Pydantic Logfire write token for LLM token/cost tracking (optional; empty disables it) |
 | `LOGFIRE_ENVIRONMENT` | Environment label shown in the Logfire UI (default `development`) |
 
-See `packages/*/.env.example` for full configuration options.
+See `.env.example` for the full configuration and [docs/api-keys.md](docs/api-keys.md) for obtaining each external key.
 
 ## License
 

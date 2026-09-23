@@ -460,7 +460,7 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
                     original_filename=chat_request.document_filename,
                     file_size_bytes=file_size,
                     mime_type=chat_request.document_mimetype,
-                    status="pending",
+                    status="queued",
                     whatsapp_jid=chat_request.whatsapp_jid,
                     expires_at=expires_at,
                     is_conversation_scoped=True,
@@ -519,7 +519,7 @@ async def get_job_status(request: Request, job_id: str):
     """
     try:
         async with get_redis_client() as redis_client:
-            # Infer status from Redis data (no arq)
+            # Infer status from Redis data (job metadata + chunks)
             status = await get_stream_job_status(redis_client, job_id)
 
             # Get chunks

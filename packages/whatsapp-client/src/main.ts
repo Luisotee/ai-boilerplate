@@ -38,7 +38,7 @@ function createMixedSchemaTransform() {
     '/whatsapp/send-video',
   ];
 
-  return function mixedTransform(transformObject) {
+  return function mixedTransform(transformObject: Parameters<typeof jsonSchemaTransform>[0]) {
     const { schema, url } = transformObject;
 
     // Multipart routes use plain JSON Schema - pass through unchanged
