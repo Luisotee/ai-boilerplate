@@ -116,6 +116,25 @@ class CommandResponse(BaseModel):
     response: str = Field(..., description="Command result message")
 
 
+class LinkPhoneRequest(BaseModel):
+    """Telegram phone-sharing auto-link request (POST /chat/link-phone).
+
+    `contact_user_id` is the `user_id` on the shared `Contact`, and
+    `sender_user_id` is `ctx.from.id`. The server requires them to be equal —
+    a user can share anyone's contact card, and a card for someone else carries
+    that person's id, so this is what shows the phone belongs to the sender.
+    """
+
+    whatsapp_jid: str = Field(..., description="Telegram JID of the caller (tg:<chat_id>)")
+    phone: str | None = Field(None, description="Phone number from the shared contact")
+    contact_user_id: int | None = Field(
+        None, description="Telegram user_id carried on the shared contact card"
+    )
+    sender_user_id: int | None = Field(
+        None, description="Telegram user_id of the sender (ctx.from.id)"
+    )
+
+
 class PreferencesResponse(BaseModel):
     """User preferences"""
 

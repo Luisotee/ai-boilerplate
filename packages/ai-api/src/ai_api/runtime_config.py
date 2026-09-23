@@ -59,6 +59,17 @@ REGISTRY: tuple[SettingSpec, ...] = (
         "(4915755945319, +49 157 5594 5319, 4915755945319@s.whatsapp.net) or a "
         "verbatim chat id (120363...@g.us, ...@lid, tg:123). Empty = all allowed.",
     ),
+    SettingSpec(
+        "group_gating",
+        "str",
+        False,
+        "access",
+        "How a group gets in scope when the whitelist is set: 'jid' = the group's "
+        "own id must be listed; 'membership' = the chat client decides (Baileys: "
+        "the group has a whitelisted member; Telegram: any group) and only "
+        "whitelisted senders get replies. Shared with the TS clients; restart all.",
+        choices=("jid", "membership"),
+    ),
     # --- Hot: conversation behaviour ---
     SettingSpec(
         "history_limit_private",
@@ -80,6 +91,16 @@ REGISTRY: tuple[SettingSpec, ...] = (
         True,
         "conversation",
         "Label for the bot's own messages in transcripts the agent reads back (get_chat_history).",
+    ),
+    SettingSpec(
+        "shared_group_tools_enabled",
+        "bool",
+        True,
+        "conversation",
+        "Let users, in a private chat, read (get_group_context) and post into "
+        "(send_group_message) groups they share with the bot. Sends group "
+        "transcripts to the LLM provider in private-chat context. Baileys and "
+        "Telegram only.",
     ),
     SettingSpec(
         "core_memory_max_length",

@@ -196,6 +196,7 @@ async def process_chat_job_direct(
                 http_client=http_client,
                 whatsapp_client=whatsapp_client,
                 current_message_id=whatsapp_message_id,
+                client_id=client_id,
             )
 
             # Step 4: Format message with sender name for group context

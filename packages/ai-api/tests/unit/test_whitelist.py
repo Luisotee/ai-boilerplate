@@ -14,6 +14,8 @@ a restart. These tests patch that accessor.
 
 from unittest.mock import patch
 
+import pytest
+
 from ai_api.routes.chat import _is_whitelisted, _parse_whitelist
 from ai_api.whitelist import (
     _PHONE_DIGITS,
@@ -278,3 +280,51 @@ class TestWhitelistOverridePropagation:
             runtime_config._overrides = prior_overrides
             runtime_config._loaded_at = prior_loaded_at
             _parse_whitelist.cache_clear()
+
+
+class TestGroupGatingMode:
+    """GROUP_GATING: `jid` (default) matches groups like any chat id; in
+    `membership` mode every group JID is admitted here because the chat client
+    owns group scope (it alone can see membership). 1:1 chats are enforced in
+    both modes."""
+
+    WL = "5491126726818"
+    WA_GROUP = "120363000000000000@g.us"
+    TG_GROUP = "tg:-1001234567890"
+
+    def _patch_mode(self, mode: str):
+        return patch("ai_api.routes.chat.settings.group_gating", mode)
+
+    def test_default_is_jid(self):
+        from ai_api.config import Settings
+
+        assert Settings.model_fields["group_gating"].default == "jid"
+
+    def test_jid_mode_blocks_unlisted_groups(self):
+        with _patch_whitelist(self.WL), self._patch_mode("jid"):
+            assert _is_whitelisted(self.WA_GROUP) is False
+            assert _is_whitelisted(self.TG_GROUP) is False
+
+    def test_membership_mode_admits_any_group(self):
+        with _patch_whitelist(self.WL), self._patch_mode("membership"):
+            assert _is_whitelisted(self.WA_GROUP) is True
+            assert _is_whitelisted(self.TG_GROUP) is True
+
+    def test_membership_mode_still_enforces_private_chats(self):
+        with _patch_whitelist(self.WL), self._patch_mode("membership"):
+            assert _is_whitelisted("9999999999@s.whatsapp.net") is False
+            assert _is_whitelisted("tg:123") is False  # positive id = private chat
+            assert _is_whitelisted("109994229891095@lid") is False
+            assert _is_whitelisted(f"{self.WL}@s.whatsapp.net") is True
+
+    def test_membership_mode_with_empty_whitelist_allows_all(self):
+        with _patch_whitelist(""), self._patch_mode("membership"):
+            assert _is_whitelisted("anything") is True
+
+    def test_invalid_mode_fails_settings_validation(self):
+        import pydantic
+
+        from ai_api.config import Settings
+
+        with pytest.raises(pydantic.ValidationError):
+            Settings(group_gating="members")

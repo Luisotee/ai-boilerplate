@@ -10,26 +10,44 @@ import { handleTextMessage } from './handlers/text.js';
 import { extractAndTranscribeVoice } from './handlers/voice.js';
 import { extractPhotoData } from './handlers/photo.js';
 import { extractDocumentData } from './handlers/document.js';
+import { handleSharedContact, offerPhoneLink } from './handlers/link-prompt.js';
 import { logger } from './logger.js';
 import * as telegramApi from './services/telegram-api.js';
 import { chatIdToJid, chatTypeToConversationType } from './utils/telegram-id.js';
 import { isAddressedToBot, stripBotMention } from './utils/mention.js';
 import { documentMarker, imageMarker } from './utils/group-media-marker.js';
 import { isWhitelisted } from './utils/whitelist.js';
+import { decideGroupGating } from './utils/gating.js';
 import { isSenderGroupAdmin, looksLikeCommand } from './services/group-admin.js';
 
 export function registerUpdateHandlers(): void {
+  // ---------------- Account linking (phone share) ----------------
+  // Registered FIRST: grammY runs middleware in registration order, and the
+  // catch-all `message:text` below would otherwise forward /linkphone to the
+  // AI API as ordinary text. `/link` and `/link <code>` still go to the AI API,
+  // which owns the code flow.
+  bot.command('linkphone', async (ctx) => {
+    // saveOnly: an un-addressed or (GROUP_GATING=membership) non-whitelisted
+    // group sender gets no reply at all, not even the "private only" hint.
+    const { skip, saveOnly } = resolveGate(ctx);
+    if (skip || saveOnly) return;
+    await offerPhoneLink(ctx);
+  });
+
+  bot.on('message:contact', async (ctx) => {
+    if (resolveGate(ctx).skip) return;
+    await handleSharedContact(ctx);
+  });
+
   // ---------------- Text ----------------
   bot.on('message:text', async (ctx) => {
-    const chatType = ctx.chat?.type ?? 'private';
-    const conversationType = chatTypeToConversationType(chatType);
-    if (passesWhitelist(ctx.chat?.id) === false) return;
+    const { skip, isGroup, saveOnly } = resolveGate(ctx);
+    if (skip) return;
 
     const text = ctx.msg.text;
-    const isGroup = conversationType === 'group';
-    const addressed = !isGroup || isAddressed(ctx);
-    const cleanText = addressed && isGroup ? stripBotMentionFromCtx(ctx, text) : text;
-    const saveOnly = isGroup && !addressed;
+    // Only strip the mention when answering; a saved-only transcript line
+    // should read exactly as it was written in the group.
+    const cleanText = isGroup && !saveOnly ? stripBotMentionFromCtx(ctx, text) : text;
 
     // The AI API gates group admin commands and fails closed (anything but an
     // explicit `true` is refused), so resolve admin status — lazily, only for
@@ -49,13 +67,10 @@ export function registerUpdateHandlers(): void {
 
   // ---------------- Voice / Audio ----------------
   bot.on(['message:voice', 'message:audio'], async (ctx) => {
-    const chatType = ctx.chat?.type ?? 'private';
-    const conversationType = chatTypeToConversationType(chatType);
-    if (passesWhitelist(ctx.chat?.id) === false) return;
+    const { skip, saveOnly } = resolveGate(ctx);
+    if (skip) return;
 
-    const isGroup = conversationType === 'group';
-    const addressed = !isGroup || isAddressed(ctx);
-    if (isGroup && !addressed) {
+    if (saveOnly) {
       // For voice we don't save a transcript on non-mention — matches Baileys
       // behavior (no attempt to transcribe group chatter just for context).
       return;
@@ -109,18 +124,15 @@ export function registerUpdateHandlers(): void {
 
   // ---------------- Photo ----------------
   bot.on('message:photo', async (ctx) => {
-    const chatType = ctx.chat?.type ?? 'private';
-    const conversationType = chatTypeToConversationType(chatType);
-    if (passesWhitelist(ctx.chat?.id) === false) return;
+    const { skip, saveOnly } = resolveGate(ctx);
+    if (skip) return;
 
-    const isGroup = conversationType === 'group';
-    const addressed = !isGroup || isAddressed(ctx);
     const caption = ctx.msg.caption ?? '';
 
     // Group non-mention: save an [Image] / [Image: caption] marker to history
     // without downloading the binary. Matches Baileys (whatsapp.ts:226-234) so
     // the AI keeps image context across both clients.
-    if (isGroup && !addressed) {
+    if (saveOnly) {
       await handleTextMessage(ctx, imageMarker(caption), {
         senderJid: ctx.from ? chatIdToJid(ctx.from.id) : undefined,
         saveOnly: true,
@@ -152,18 +164,15 @@ export function registerUpdateHandlers(): void {
 
   // ---------------- Document ----------------
   bot.on('message:document', async (ctx) => {
-    const chatType = ctx.chat?.type ?? 'private';
-    const conversationType = chatTypeToConversationType(chatType);
-    if (passesWhitelist(ctx.chat?.id) === false) return;
+    const { skip, saveOnly } = resolveGate(ctx);
+    if (skip) return;
 
-    const isGroup = conversationType === 'group';
-    const addressed = !isGroup || isAddressed(ctx);
     const caption = ctx.msg.caption ?? '';
     const filename = ctx.msg.document?.file_name ?? 'document.pdf';
 
     // Group non-mention: save a [Document: filename] marker without
     // downloading the file. Matches Baileys (whatsapp.ts:262-273).
-    if (isGroup && !addressed) {
+    if (saveOnly) {
       await handleTextMessage(ctx, documentMarker(filename, caption), {
         senderJid: ctx.from ? chatIdToJid(ctx.from.id) : undefined,
         saveOnly: true,
@@ -213,8 +222,58 @@ function passesWhitelist(chatId: number | undefined): boolean {
   return isWhitelisted(config.whitelistPhones, chatIdToJid(chatId));
 }
 
+interface GateResult {
+  /** Drop entirely — not saved, not answered. */
+  skip: boolean;
+  isGroup: boolean;
+  /** Save to history without generating a response. */
+  saveOnly: boolean;
+}
+
+/**
+ * The whitelist gate + save-only decision for one update (utils/gating.ts, the
+ * truth table shared with Baileys).
+ *
+ * `jid` mode (default) is the historical behaviour: the CHAT id must be listed
+ * — a private chat's id is its user's id, a group's is the group's — and then
+ * every member of a listed group may address the bot.
+ *
+ * `membership` mode: the Bot API cannot enumerate a group's members, so there
+ * is no "has a whitelisted member" check to make — every group the bot is in
+ * is in scope and its transcript is saved, but only a whitelisted SENDER
+ * (`tg:<from.id>`) gets a reply, unless the group itself is listed. This
+ * client's decision is the only gate there is for Telegram groups in that
+ * mode: the AI API admits every group JID then.
+ */
+function resolveGate(ctx: TelegramContext): GateResult {
+  const conversationType = chatTypeToConversationType(ctx.chat?.type ?? 'private');
+  const isGroup = conversationType === 'group';
+  const whitelistEnabled = config.whitelistPhones.size > 0;
+  const chatListed = passesWhitelist(ctx.chat?.id);
+  const membership = isGroup && config.groupGating === 'membership';
+  const senderWhitelisted = membership
+    ? ctx.from !== undefined && isWhitelisted(config.whitelistPhones, chatIdToJid(ctx.from.id))
+    : chatListed;
+
+  const decision = decideGroupGating({
+    isGroup,
+    whitelistEnabled,
+    senderWhitelisted,
+    groupExplicit: chatListed,
+    groupAllowed: membership ? true : chatListed,
+    respondInGroup: isGroup && isAddressed(ctx),
+  });
+  if (decision.skip) {
+    logger.debug(
+      { chatId: ctx.chat?.id, isGroup, groupGating: config.groupGating },
+      'Skipping non-whitelisted chat'
+    );
+  }
+  return { skip: decision.skip, isGroup, saveOnly: decision.saveOnly };
+}
+
 // Exported for unit tests only.
-export const _internals = { passesWhitelist };
+export const _internals = { passesWhitelist, resolveGate };
 
 /**
  * `bot.botInfo` THROWS when the bot has not been initialized (grammY >= 1.4x) —

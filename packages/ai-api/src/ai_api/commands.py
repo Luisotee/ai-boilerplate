@@ -115,6 +115,7 @@ def _get_help_text() -> str:
 /memories clear - Delete all core memories
 /link - Get a code to link this account to your other platform (WhatsApp ↔ Telegram)
 /link [code] - Enter a code from the other platform to complete linking
+/linkphone - (Telegram) Link by sharing your phone number instead of a code
 /unlink - Unlink your accounts
 /help - Show this message
 

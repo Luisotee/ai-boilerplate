@@ -199,6 +199,16 @@ def is_telegram_jid(jid: str) -> bool:
     return jid.startswith("tg:")
 
 
+def is_group_jid(jid: str) -> bool:
+    """True for a group conversation on either platform.
+
+    WhatsApp groups end in `@g.us`. Telegram group/supergroup/channel chat ids
+    are always negative, so their synthetic JID starts with `tg:-` — a private
+    Telegram chat id is positive and never matches.
+    """
+    return jid.endswith("@g.us") or jid.startswith("tg:-")
+
+
 def _clean_profile_name(name: str | None, whatsapp_jid: str, phone: str | None) -> str | None:
     """Return the stripped name, or None if it is empty or looks like an identifier.
 

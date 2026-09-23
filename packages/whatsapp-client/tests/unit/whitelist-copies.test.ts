@@ -33,3 +33,18 @@ describe('whitelist.ts copies', () => {
     expect(readFileSync(resolve(REPO_ROOT, copy), 'utf8')).toBe(reference);
   });
 });
+
+// utils/gating.ts is shared the same way, by whatsapp-client and telegram-client
+// (the Cloud client has no group context, so it has no copy).
+describe('gating.ts copies', () => {
+  const reference = readFileSync(
+    resolve(REPO_ROOT, 'packages/whatsapp-client/src/utils/gating.ts'),
+    'utf8'
+  );
+
+  it('packages/telegram-client/src/utils/gating.ts is byte-identical to the reference', () => {
+    expect(
+      readFileSync(resolve(REPO_ROOT, 'packages/telegram-client/src/utils/gating.ts'), 'utf8')
+    ).toBe(reference);
+  });
+});

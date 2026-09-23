@@ -54,6 +54,14 @@ class Settings(BaseSettings):
     # Comma-separated entries, each matched as either a phone number or a
     # verbatim chat id (group JID, @lid, tg:<chat_id>). Empty = all allowed.
     whitelist_phones: str = ""
+    # How a GROUP gets in scope when the whitelist is set (shared with the TS
+    # clients via the root .env):
+    #   jid        - the group's own chat id must be listed (historical behaviour)
+    #   membership - the chat client decides (Baileys: the group has a
+    #                whitelisted member; Telegram: any group), and replies only
+    #                to whitelisted senders. This API then admits every group
+    #                JID, because it cannot see group membership.
+    group_gating: Literal["jid", "membership"] = "jid"
 
     # CORS
     cors_origins: str = ""  # Comma-separated allowed origins
@@ -81,6 +89,13 @@ class Settings(BaseSettings):
     # How the bot's own lines are labelled in transcripts the agent reads back
     # (get_chat_history). Overridable at runtime via /admin.
     bot_name: str = "Assistant"
+
+    # Shared-group tools (get_group_context / send_group_message): let a user,
+    # in a PRIVATE chat, read and post into groups they share with the bot.
+    # Off by default: it moves group transcripts into private-chat model
+    # context (and so to the LLM provider in a new context) and lets the bot
+    # post into groups on a member's behalf. Overridable at runtime via /admin.
+    shared_group_tools_enabled: bool = False
 
     # Token Management
     max_context_tokens: int = 50000

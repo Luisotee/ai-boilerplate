@@ -30,6 +30,11 @@ class AgentDeps:
     http_client: httpx.AsyncClient | None = None
     whatsapp_client: WhatsAppClient | None = None
     current_message_id: str | None = None
+    #: Which chat client the message came from: "baileys"/None (Baileys),
+    #: "cloud" (Meta Cloud API) or "telegram". The shared-group tools dispatch
+    #: on it, since each platform answers "which groups does this user share
+    #: with the bot" differently (or, for Cloud API, not at all).
+    client_id: str | None = None
 
 
 # Startup default: DeepSeek -> Gemini when DEEPSEEK_API_KEY is set, else Gemini
@@ -184,6 +189,7 @@ DEFAULT_SYSTEM_PROMPT = """You are a helpful AI assistant communicating via What
     answers as one message; never put `---` inside a list or fenced block.
 
     Important: WhatsApp tools only send to the current conversation. You cannot message other users.
+    (If shared-group tools are enabled, they are described separately below.)
 
     When citing knowledge base sources, ALWAYS include document name, page number, and section heading."""
 
@@ -223,6 +229,33 @@ async def formatting_guidance(ctx: RunContext[AgentDeps]) -> str:
     deterministic backstop for when the model ignores it anyway.
     """
     return _FORMATTING_GUIDANCE
+
+
+_SHARED_GROUP_GUIDANCE = (
+    "\n\n== SHARED GROUPS ==\n"
+    "In a PRIVATE chat you can also reach groups that you and this user are BOTH in:\n"
+    "- get_group_context: list shared groups, read a group's recent messages (limit / "
+    "since_hours), or search a group's history (search_query). Only ever mention "
+    "groups this tool returns; never imply knowledge of any other group.\n"
+    "- send_group_message: post a message into a shared group on the user's behalf. "
+    "BEFORE calling it, repeat back the exact group name and the exact text and wait "
+    "for the user's explicit confirmation — a group message cannot be unsent. The "
+    "message is always prefixed with who asked for it; pass the user's name as "
+    "sender_name (ask for it if you don't know it).\n"
+    "Neither works inside a group chat, and neither works on the WhatsApp Cloud API.\n"
+    "== END SHARED GROUPS =="
+)
+
+
+@agent.instructions
+async def shared_group_guidance(ctx: RunContext[AgentDeps]) -> str:
+    """Describe the shared-group tools — only when they are enabled.
+
+    An instructions hook (not part of ``DEFAULT_SYSTEM_PROMPT``) so it follows
+    the SHARED_GROUP_TOOLS_ENABLED switch, which hides the tools themselves via
+    their ``prepare`` hook, and survives an ``/admin`` prompt override.
+    """
+    return _SHARED_GROUP_GUIDANCE if runtime_config.get("shared_group_tools_enabled") else ""
 
 
 @agent.instructions

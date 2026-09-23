@@ -1,6 +1,16 @@
 /**
- * TTL cache over `sock.groupMetadata`, used only to resolve a group's *subject*
- * — the conversation's display name in the dashboard.
+ * The client's one cache of group metadata, with two read paths:
+ *
+ *  - per group (`getGroupMetadataCached`, 5 min TTL over `sock.groupMetadata`):
+ *    the conversation's display name, and — under GROUP_GATING=membership —
+ *    whether a group has a whitelisted member;
+ *  - the whole fleet (`getParticipatingGroups`, 60 s TTL over
+ *    `sock.groupFetchAllParticipating`): which groups a requesting user shares
+ *    with the bot (`POST /whatsapp/shared-groups`). A fleet fetch also seeds the
+ *    per-group entries, so both views come from the same data.
+ *
+ * Membership changes (`group-participants.update`) and renames (`groups.update`)
+ * evict eagerly via `invalidateGroup`, which drops the fleet snapshot too.
  *
  * Deliberately NOT wired to Baileys' `cachedGroupMetadata` socket option. That
  * option is consumed inside `relayMessage`, where `participants` becomes the
@@ -8,10 +18,11 @@
  * messages-send.js`). Serving a stale participant list there means a newly
  * added member cannot decrypt the bot's replies and a removed one still can.
  * Letting Baileys fetch its own metadata per send is the correct trade: this
- * cache exists for a display name and must never influence encryption.
+ * cache must never influence encryption.
  *
- * Nothing here throws, and no lookup may stall the message hot path — see
- * FETCH_TIMEOUT_MS.
+ * Nothing here throws except `getParticipatingGroups` (its route must answer
+ * 500, not an empty list), and no per-group lookup may stall the message hot
+ * path — see FETCH_TIMEOUT_MS.
  */
 
 import type { GroupMetadata, WASocket } from '@whiskeysockets/baileys';
@@ -122,10 +133,98 @@ export async function getGroupSubject(sock: WASocket, jid: string): Promise<stri
   }
 }
 
-/** Drop one group — call when its metadata is known to have changed. */
+/**
+ * The group's metadata, or undefined if it can't be resolved within `timeoutMs`.
+ * The fetch keeps running after a timeout and warms the cache for next time.
+ */
+export async function getGroupMetadataBounded(
+  sock: WASocket,
+  jid: string,
+  timeoutMs: number = FETCH_TIMEOUT_MS
+): Promise<GroupMetadata | undefined> {
+  let timer: NodeJS.Timeout | undefined;
+  const bounded = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => {
+      logger.warn({ jid, timeoutMs }, 'Group metadata lookup timed out');
+      resolve(undefined);
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([getGroupMetadataCached(sock, jid), bounded]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Fleet snapshot: every group the bot participates in
+// ---------------------------------------------------------------------------
+
+/**
+ * Short on purpose: this answers "which groups does this user share with the
+ * bot", so a membership change must not leak for long. Eager eviction on
+ * `group-participants.update` covers the common case; the TTL bounds the rest.
+ */
+const FLEET_TTL_MS = 60_000;
+
+let fleet: { data: Record<string, GroupMetadata>; expiresAt: number } | null = null;
+let fleetInflight: Promise<Record<string, GroupMetadata>> | null = null;
+
+/**
+ * Every group the bot is in, keyed by group JID (cached, de-duped).
+ *
+ * Throws when the query fails — unlike the per-group path, the caller here is
+ * an authorization decision, and "no groups" must not be confused with "could
+ * not check".
+ */
+export async function getParticipatingGroups(
+  sock: WASocket
+): Promise<Record<string, GroupMetadata>> {
+  if (fleet && Date.now() < fleet.expiresAt) return fleet.data;
+  if (fleetInflight) return fleetInflight;
+
+  const gen = generation;
+  const promise = (async () => {
+    const data = await sock.groupFetchAllParticipating();
+    if (gen === generation) {
+      fleet = { data, expiresAt: Date.now() + FLEET_TTL_MS };
+      for (const meta of Object.values(data)) cache.set(meta.id, hit(meta));
+    }
+    return data;
+  })().finally(() => {
+    fleetInflight = null;
+  });
+
+  fleetInflight = promise;
+  return promise;
+}
+
+/**
+ * Store metadata that just arrived complete (with its participant list), e.g.
+ * the `groups.update` burst Baileys emits from inside `groupFetchAllParticipating`.
+ *
+ * Priming — not invalidating — is what keeps that burst from evicting the very
+ * snapshot it belongs to: treating it as a change bumped the generation, so
+ * the fleet result was never cached and every lookup refetched the whole fleet.
+ */
+export function primeGroup(meta: GroupMetadata): void {
+  cache.set(meta.id, hit(meta));
+}
+
+/** True when a `groups.update` entry is a complete metadata object, not a partial change. */
+export function isCompleteGroupMetadata(update: Partial<GroupMetadata>): update is GroupMetadata {
+  return (
+    typeof update.id === 'string' &&
+    typeof update.subject === 'string' &&
+    Array.isArray(update.participants)
+  );
+}
+
+/** Drop one group (and the fleet snapshot) — call when its metadata is known to have changed. */
 export function invalidateGroup(jid: string): void {
   generation++;
   cache.delete(jid);
+  fleet = null;
 }
 
 /** Drop everything — call on socket teardown/relink, and in tests. */
@@ -133,4 +232,6 @@ export function clearGroupCache(): void {
   generation++;
   cache.clear();
   inflight.clear();
+  fleet = null;
+  fleetInflight = null;
 }

@@ -23,6 +23,8 @@ interface MessageOptions {
   conversationType: 'private' | 'group';
   senderJid?: string;
   senderName?: string;
+  /** The conversation's display name — the group's title (never a participant's). */
+  profileName?: string;
   saveOnly?: boolean;
   messageId?: string;
   image?: ImagePayload;
@@ -64,7 +66,16 @@ export async function sendMessageToAI(
   message: string,
   options: MessageOptions
 ): Promise<string | null> {
-  const { conversationType, senderJid, senderName, saveOnly, messageId, image, document } = options;
+  const {
+    conversationType,
+    senderJid,
+    senderName,
+    profileName,
+    saveOnly,
+    messageId,
+    image,
+    document,
+  } = options;
 
   if (saveOnly) {
     logger.info({ jid, saveOnly, conversationType }, 'Saving message only');
@@ -79,6 +90,7 @@ export async function sendMessageToAI(
           message,
           sender_jid: senderJid,
           sender_name: senderName,
+          profile_name: profileName,
           conversation_type: conversationType,
           whatsapp_message_id: messageId,
         }),
@@ -102,6 +114,7 @@ export async function sendMessageToAI(
     message,
     sender_jid: senderJid,
     sender_name: senderName,
+    profile_name: profileName,
     conversation_type: conversationType,
     whatsapp_message_id: messageId,
     client_id: 'telegram',
@@ -210,6 +223,52 @@ export async function getUserPreferences(jid: string): Promise<UserPreferences |
     return response.json();
   } catch (error) {
     logger.warn({ jid, error }, 'Error fetching user preferences');
+    return null;
+  }
+}
+
+export interface SharedContact {
+  phone: string;
+  /** `user_id` carried on the shared contact card, if the contact is on Telegram. */
+  contactUserId?: number;
+  /** `ctx.from.id` of the sender. */
+  senderUserId?: number;
+}
+
+/**
+ * Ask the AI API to auto-link this Telegram account to the WhatsApp account
+ * owning the shared phone (POST /chat/link-phone). The client makes NO
+ * authorization decision: both ids are forwarded verbatim and the API refuses
+ * unless they match (anti-hijack) and every other rule holds.
+ *
+ * Returns the user-facing reply, or null on a transport/HTTP failure.
+ */
+export async function linkPhone(jid: string, contact: SharedContact): Promise<string | null> {
+  try {
+    const response = await fetchWithTimeout(
+      `${config.aiApiUrl}/chat/link-phone`,
+      {
+        method: 'POST',
+        headers: aiApiHeaders('application/json'),
+        body: JSON.stringify({
+          whatsapp_jid: jid,
+          phone: contact.phone,
+          contact_user_id: contact.contactUserId,
+          sender_user_id: contact.senderUserId,
+        }),
+      },
+      config.timeouts.default
+    );
+
+    if (!response.ok) {
+      logger.warn({ jid, status: response.status }, 'link-phone request failed');
+      return null;
+    }
+
+    const body: { response?: string } = await response.json();
+    return body.response ?? '';
+  } catch (error) {
+    logger.error({ jid, error }, 'Error calling link-phone');
     return null;
   }
 }

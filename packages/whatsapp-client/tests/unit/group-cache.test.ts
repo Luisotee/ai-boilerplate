@@ -15,7 +15,10 @@ import {
   clearGroupCache,
   getGroupMetadataCached,
   getGroupSubject,
+  getParticipatingGroups,
   invalidateGroup,
+  isCompleteGroupMetadata,
+  primeGroup,
 } from '../../src/services/group-cache.js';
 
 const GROUP = '120363012345678@g.us';
@@ -244,5 +247,73 @@ describe('stale writes and stuck lookups', () => {
 
     expect(await pending).toBeUndefined();
     vi.useRealTimers();
+  });
+});
+
+describe('getParticipatingGroups (fleet snapshot)', () => {
+  function makeFleetSock() {
+    const meta = { id: GROUP, subject: 'Fleet Group', participants: [] };
+    return {
+      groupFetchAllParticipating: vi.fn().mockResolvedValue({ [GROUP]: meta }),
+      groupMetadata: vi.fn().mockResolvedValue(meta),
+    } as any;
+  }
+
+  it('caches within the 60s TTL and refetches after it', async () => {
+    vi.useFakeTimers();
+    const sock = makeFleetSock();
+
+    await getParticipatingGroups(sock);
+    await getParticipatingGroups(sock);
+    expect(sock.groupFetchAllParticipating).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(60_001);
+    await getParticipatingGroups(sock);
+    expect(sock.groupFetchAllParticipating).toHaveBeenCalledTimes(2);
+  });
+
+  it('seeds the per-group cache, so a subject lookup needs no extra query', async () => {
+    const sock = makeFleetSock();
+    await getParticipatingGroups(sock);
+
+    expect(await getGroupSubject(sock, GROUP)).toBe('Fleet Group');
+    expect(sock.groupMetadata).not.toHaveBeenCalled();
+  });
+
+  it('invalidateGroup drops the fleet snapshot (membership changed)', async () => {
+    const sock = makeFleetSock();
+    await getParticipatingGroups(sock);
+    invalidateGroup(GROUP);
+    await getParticipatingGroups(sock);
+
+    expect(sock.groupFetchAllParticipating).toHaveBeenCalledTimes(2);
+  });
+
+  it('primeGroup does NOT evict the snapshot (the groups.update burst from the fetch itself)', async () => {
+    const sock = makeFleetSock();
+    const data = await getParticipatingGroups(sock);
+    for (const meta of Object.values(data)) primeGroup(meta);
+    await getParticipatingGroups(sock);
+
+    expect(sock.groupFetchAllParticipating).toHaveBeenCalledTimes(1);
+  });
+
+  it('propagates a failed fleet query and does not cache it', async () => {
+    const sock = makeFleetSock();
+    sock.groupFetchAllParticipating.mockRejectedValueOnce(new Error('timeout'));
+
+    await expect(getParticipatingGroups(sock)).rejects.toThrow('timeout');
+    await getParticipatingGroups(sock);
+    expect(sock.groupFetchAllParticipating).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('isCompleteGroupMetadata', () => {
+  it('accepts a full metadata object and rejects a partial update', () => {
+    expect(isCompleteGroupMetadata({ id: GROUP, subject: 'x', participants: [] } as any)).toBe(
+      true
+    );
+    expect(isCompleteGroupMetadata({ id: GROUP, subject: 'renamed' })).toBe(false);
+    expect(isCompleteGroupMetadata({ id: GROUP, announce: true })).toBe(false);
   });
 });

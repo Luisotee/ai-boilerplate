@@ -10,6 +10,8 @@ import {
   SendTextResponseSchema,
   SuccessResponseSchema,
   ErrorResponseSchema,
+  GroupMemberSchema,
+  GroupMemberResponseSchema,
 } from '../schemas/messaging.js';
 
 export async function registerMessagingRoutes(app: FastifyInstance) {
@@ -146,6 +148,53 @@ export async function registerMessagingRoutes(app: FastifyInstance) {
         const error = err as Error;
         app.log.error({ error }, 'Failed to send chat action');
         return sendErrorResponse(reply, err, 'Failed to send chat action');
+      }
+    }
+  );
+
+  // POST /whatsapp/group-member
+  // Live membership check, used by the AI API right before relaying a message
+  // into a group on a user's behalf (send_group_message). Shared-group
+  // discovery on Telegram is derived from stored message authorship, which
+  // never expires — without this a user removed from a group would keep relay
+  // access to it indefinitely.
+  app.withTypeProvider<ZodTypeProvider>().post(
+    '/whatsapp/group-member',
+    {
+      schema: {
+        tags: ['Messaging'],
+        description: 'Check whether a user is currently a member of a group chat',
+        body: GroupMemberSchema,
+        response: {
+          200: GroupMemberResponseSchema,
+          400: ErrorResponseSchema,
+          500: ErrorResponseSchema,
+          503: ErrorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      if (!isBotReady()) {
+        return reply.code(503).send({ error: 'Telegram bot not ready' });
+      }
+
+      let chatId: number;
+      let userId: number;
+      try {
+        chatId = resolveChatId(request.body.phoneNumber);
+        userId = resolveChatId(request.body.userJid);
+      } catch (err) {
+        return sendErrorResponse(reply, err, 'Invalid chat or user identifier');
+      }
+
+      try {
+        return { is_member: await telegramApi.isChatMember(chatId, userId) };
+      } catch (err) {
+        // Never translate a lookup failure into "not a member" here: surfacing
+        // the error keeps the decision (and its fail-closed default) in one
+        // place, on the Python side.
+        request.log.error({ err, chatId }, 'Failed to check group membership');
+        return sendErrorResponse(reply, err, 'Failed to check group membership');
       }
     }
   );

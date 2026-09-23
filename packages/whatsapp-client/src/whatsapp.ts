@@ -1,4 +1,6 @@
 import makeWASocket, {
+  type WAMessage,
+  type WASocket,
   DisconnectReason,
   useMultiFileAuthState,
   normalizeMessageContent,
@@ -18,20 +20,100 @@ import {
   clearBaileysSocket,
 } from './services/baileys.js';
 import { getWaVersionConfig } from './services/wa-version.js';
-import { clearGroupCache, invalidateGroup } from './services/group-cache.js';
+import {
+  clearGroupCache,
+  invalidateGroup,
+  isCompleteGroupMetadata,
+  primeGroup,
+} from './services/group-cache.js';
+import { groupHasWhitelistedMember } from './services/groups.js';
 import { handleTextMessage } from './handlers/text.js';
 import { transcribeAudioMessage } from './handlers/audio.js';
 import { extractImageData } from './handlers/image.js';
 import { extractDocumentData } from './handlers/document.js';
 import { sendFailureReaction } from './utils/reactions.js';
-import { stripDeviceSuffix, isGroupChat, isLid, resolveSenderPhone } from './utils/jid.js';
+import {
+  stripDeviceSuffix,
+  isGroupChat,
+  isLid,
+  resolveParticipantJid,
+  resolveSenderPhone,
+} from './utils/jid.js';
 import { isWhitelisted } from './utils/whitelist.js';
+import { gateMessage, type Gate } from './utils/gating.js';
 import { isSenderGroupAdmin, shouldRespondInGroup } from './utils/message.js';
 
 const DEFAULT_IMAGE_PROMPT = 'Please describe and analyze this image';
 const DEFAULT_DOCUMENT_PROMPT = 'I have uploaded a document for you to analyze';
 
 const AUTH_DIR = 'auth_info_baileys';
+
+/**
+ * The whitelist gate for one incoming message (see utils/gating.ts).
+ *
+ * `jid` mode (default) is exactly the historical check — the conversation's own
+ * jid/phone against the whitelist — expressed through the shared truth table:
+ * a group is in scope only when listed, and then every member may address the
+ * bot. `membership` mode additionally admits a group that has a whitelisted
+ * member, but only a whitelisted SENDER may trigger a reply there.
+ *
+ * Resolves nothing it does not need: the participant identity and the
+ * membership lookup run only for a group in `membership` mode, and the lookup
+ * is skipped when the group is listed or the sender is whitelisted.
+ */
+async function resolveGate(
+  sock: WASocket,
+  msg: WAMessage,
+  whatsappJid: string,
+  isGroup: boolean,
+  phone: string | undefined
+): Promise<Gate> {
+  const wl = config.whitelistPhones;
+  const whitelistEnabled = wl.size > 0;
+  if (!whitelistEnabled) {
+    return gateMessage({
+      isGroup,
+      whitelistEnabled,
+      senderWhitelisted: true,
+      groupExplicit: false,
+      groupAllowed: true,
+    });
+  }
+
+  const chatListed = isWhitelisted(wl, whatsappJid, phone);
+  if (!isGroup || config.groupGating === 'jid') {
+    return gateMessage({
+      isGroup,
+      whitelistEnabled,
+      senderWhitelisted: chatListed,
+      groupExplicit: chatListed,
+      groupAllowed: chatListed,
+    });
+  }
+
+  // membership mode, group chat. The sender is the participant — under v7 LID
+  // addressing resolved to a phone JID where possible, and the raw (possibly
+  // LID) participant is checked too so a verbatim `…@lid` entry still works.
+  const participant = msg.key.participant ? stripDeviceSuffix(msg.key.participant) : undefined;
+  const participantJid = await resolveParticipantJid(
+    sock,
+    msg.key.participant,
+    msg.key.participantAlt
+  );
+  const senderWhitelisted =
+    (participantJid !== undefined && isWhitelisted(wl, participantJid)) ||
+    (participant !== undefined && isWhitelisted(wl, participant));
+  const groupAllowed =
+    chatListed || senderWhitelisted || (await groupHasWhitelistedMember(sock, whatsappJid, wl));
+
+  return gateMessage({
+    isGroup,
+    whitelistEnabled,
+    senderWhitelisted,
+    groupExplicit: chatListed,
+    groupAllowed,
+  });
+}
 
 /** Delete the stored Baileys creds so the next init drops back into QR (unregistered) mode.
  *  Clears the directory contents — not the dir itself, which is the session volume mountpoint. */
@@ -296,9 +378,21 @@ export async function initializeWhatsApp(): Promise<void> {
   // QR), whereas this is an idempotent cache delete whose worst outcome is one
   // refetch. Reconnect is exactly when buffered events flush, so dropping them
   // on a superseded generation would pin a stale name for the full TTL.
+  //
+  // Baileys also emits this event from inside `groupFetchAllParticipating()`
+  // with COMPLETE metadata for every group. That burst is fresh data, not a
+  // change: evicting on it would drop the very snapshot it belongs to (so the
+  // shared-groups lookup would refetch the whole fleet every time). Complete
+  // entries prime the cache instead — epoch-guarded, since a superseded socket
+  // may belong to a previous account.
   sock.ev.on('groups.update', (updates) => {
     for (const update of updates) {
-      if (update.id) invalidateGroup(update.id);
+      if (!update.id) continue;
+      if (isCompleteGroupMetadata(update)) {
+        if (myEpoch === socketEpoch) primeGroup(update);
+      } else {
+        invalidateGroup(update.id);
+      }
     }
   });
 
@@ -334,21 +428,25 @@ export async function initializeWhatsApp(): Promise<void> {
         const whatsappLid = isLid(whatsappJid) ? whatsappJid : undefined;
         const phone = await resolveSenderPhone(sock, msg.key.remoteJid!, msg.key.remoteJidAlt);
 
-        // Whitelist check. Must run AFTER resolveSenderPhone — a LID-addressed
+        // Whitelist gate. Must run AFTER resolveSenderPhone — a LID-addressed
         // chat's JID digits are an anonymized account id, not a phone, so a
         // bare-phone whitelist entry can only match via the resolved E.164.
         // Must run BEFORE `sock.user!.id` below: if sock.user is unset that
         // throws into the per-message catch, which reacts to the message —
         // sending an outbound reaction into a chat we just blocked. It also
-        // stays ahead of every expensive step (transcription, media download,
-        // groupMetadata). An unresolvable phone fails closed; whitelist the raw
-        // `@lid` if a contact is ever stuck behind a cold LID↔PN mapping.
-        if (!isWhitelisted(config.whitelistPhones, whatsappJid, phone)) {
+        // stays ahead of every expensive step (transcription, media download).
+        // An unresolvable phone fails closed; whitelist the raw `@lid` if a
+        // contact is ever stuck behind a cold LID↔PN mapping.
+        // (GROUP_GATING=membership may fetch the group's metadata here, but
+        // only for a group with a non-whitelisted sender that is not listed.)
+        const gate = await resolveGate(sock, msg, whatsappJid, isGroup, phone);
+        if (gate.skip) {
           logger.info(
             {
               remoteJid: msg.key.remoteJid,
               whatsappJid,
               isGroup,
+              groupGating: config.groupGating,
               // Only meaningful for a private chat: a group has no phone of its
               // own, so logging phoneResolved:false there would read as a
               // resolution failure and send the operator after the wrong fix.
@@ -365,7 +463,10 @@ export async function initializeWhatsApp(): Promise<void> {
         // Determine whether the bot should respond in a group
         const botJid = stripDeviceSuffix(sock.user!.id);
         const botLid = sock.user?.lid ? stripDeviceSuffix(sock.user.lid) : undefined;
-        const saveOnly = isGroup && !shouldRespondInGroup(msg, botJid, botLid);
+        // A kept group message is save-only when it isn't addressed to the bot,
+        // or (GROUP_GATING=membership) its sender may not trigger a reply.
+        const saveOnly =
+          isGroup && (gate.suppressResponse || !shouldRespondInGroup(msg, botJid, botLid));
 
         // Get text from normalized message or transcribe audio
         let text = normalizedMessage?.conversation || normalizedMessage?.extendedTextMessage?.text;
