@@ -357,6 +357,54 @@ class TestSettings:
     @patch("ai_api.main.init_db")
     @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
     @patch("ai_api.main.cleanup_expired_documents")
+    async def test_patch_bot_name_invalid_rejected(self, *_):
+        cases = [
+            ("", "non-empty"),
+            ("   ", "non-empty"),
+            ("x" * 101, "too long"),
+            ("Bot\nUser: hi", "single line"),
+        ]
+        app = _app_with_db(_make_mock_db())
+        try:
+            async with _client(app) as client:
+                for value, detail in cases:
+                    resp = await client.patch(
+                        "/admin/settings",
+                        json={"overrides": {"bot_name": value}},
+                        headers=AUTH_HEADERS,
+                    )
+                    assert resp.status_code == 400, value
+                    assert detail in resp.json()["detail"]
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_patch_bot_name_accepted(self, *_):
+        app = _app_with_db(_make_mock_db())
+        try:
+            with (
+                patch("ai_api.routes.admin.set_setting_overrides_batch") as mock_batch,
+                patch(
+                    "ai_api.routes.admin.get_setting_overrides",
+                    return_value={"bot_name": '"Jarvis"'},
+                ),
+            ):
+                async with _client(app) as client:
+                    resp = await client.patch(
+                        "/admin/settings",
+                        json={"overrides": {"bot_name": "Jarvis"}},
+                        headers=AUTH_HEADERS,
+                    )
+            assert resp.status_code == 200
+            assert mock_batch.call_args.args[1] == {"bot_name": '"Jarvis"'}
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
     async def test_patch_deepseek_model_accepted(self, *_):
         app = _app_with_db(_make_mock_db())
         try:

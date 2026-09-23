@@ -155,6 +155,17 @@ def _validate_model_name(key: str, value: object) -> None:
         raise HTTPException(status_code=400, detail=f"{key} is too long (max 200 characters)")
 
 
+def _validate_bot_name(value: object) -> None:
+    # Labels the bot's lines in history transcripts (format_transcript): an empty
+    # name yields ": …" lines, and a newline could forge extra transcript lines.
+    if not isinstance(value, str) or not value.strip():
+        raise HTTPException(status_code=400, detail="bot_name must be a non-empty string")
+    if len(value) > 100:
+        raise HTTPException(status_code=400, detail="bot_name is too long (max 100 characters)")
+    if "\n" in value or "\r" in value:
+        raise HTTPException(status_code=400, detail="bot_name must be a single line")
+
+
 def _validate_cross_constraints(coerced: dict[str, object]) -> None:
     """Reject overrides that would violate invariants Settings checks at boot.
 
@@ -192,6 +203,8 @@ def _validate_cross_constraints(coerced: dict[str, object]) -> None:
     for model_key in _MODEL_NAME_KEYS:
         if model_key in coerced:
             _validate_model_name(model_key, coerced[model_key])
+    if "bot_name" in coerced:
+        _validate_bot_name(coerced["bot_name"])
     if "whitelist_phones" in coerced:
         # Deliberately no *format* check: entry shapes are forward-compatible
         # (future JID schemes land in the id set and simply never match), and
