@@ -715,6 +715,77 @@ class TestEnqueueRegularMessage:
 
 
 # ---------------------------------------------------------------------------
+# POST /chat (synchronous) — model errors
+# ---------------------------------------------------------------------------
+
+
+class TestSyncChatModelErrors:
+    """A failed model chain answers 503 (retryable) without leaking provider detail;
+    anything else stays a generic 500. Neither saves an assistant turn."""
+
+    @staticmethod
+    def _failing_agent(exc):
+        async def failing(*_args, **_kwargs):
+            raise exc
+            yield  # unreachable — makes this an async generator
+
+        return failing
+
+    async def _post(self, exc):
+        mock_db = _make_mock_db()
+        mock_user = make_user(whatsapp_jid=TEST_JID)
+        with (
+            _patch_whitelist(),
+            patch("ai_api.routes.chat.get_conversation_history", return_value=[]),
+            patch("ai_api.routes.chat.get_or_create_user", return_value=mock_user),
+            patch("ai_api.routes.chat.create_embedding_service", return_value=None),
+            patch("ai_api.routes.chat.save_message") as mock_save,
+            patch("ai_api.routes.chat.get_ai_response", self._failing_agent(exc)),
+        ):
+            app = _get_app_with_db_override(mock_db)
+            try:
+                transport = ASGITransport(app=app)
+                async with AsyncClient(transport=transport, base_url="http://test") as client:
+                    response = await client.post(
+                        "/chat",
+                        json={
+                            "whatsapp_jid": TEST_JID,
+                            "message": "Hi",
+                            "conversation_type": "private",
+                        },
+                        headers=AUTH_HEADERS,
+                    )
+            finally:
+                _cleanup_overrides()
+        roles = [c.args[2] for c in mock_save.call_args_list]
+        return response, roles
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_model_error_returns_503(self, *_):
+        from pydantic_ai.exceptions import ModelHTTPError
+
+        exc = ModelHTTPError(status_code=503, model_name="gemini-x", body={"secret": "detail"})
+        response, roles = await self._post(exc)
+
+        assert response.status_code == 503
+        assert response.json()["detail"] == "AI model temporarily unavailable"
+        assert "secret" not in response.text
+        assert "assistant" not in roles
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_other_error_returns_500(self, *_):
+        response, roles = await self._post(RuntimeError("boom"))
+
+        assert response.status_code == 500
+        assert response.json()["detail"] == "Internal server error"
+        assert "assistant" not in roles
+
+
+# ---------------------------------------------------------------------------
 # Whitelist — exercised for real (no _is_whitelisted patch)
 # ---------------------------------------------------------------------------
 

@@ -204,6 +204,27 @@ if [ "$SKIP_ENV" = false ]; then
   read -rp "  GEMINI_MODEL (Enter for 'gemini-3.1-flash-lite'): " GEMINI_MODEL_IN
   GEMINI_MODEL_IN=$(sanitize "${GEMINI_MODEL_IN:-gemini-3.1-flash-lite}")
 
+  # Optional: DeepSeek as the primary model (Gemini becomes the fallback).
+  # Deliberately NOT in REQUIRED_KEYS — without it the agent runs on Gemini alone.
+  echo ""
+  echo "  Optional: DeepSeek as the primary chat model, with Gemini as the automatic fallback."
+  echo "  Note: chat content is sent to DeepSeek's servers (China) when this is set."
+  read -rp "  Set up DeepSeek as the primary model? (y/N): " SETUP_DEEPSEEK
+  if [[ "$SETUP_DEEPSEEK" =~ ^[Yy]$ ]]; then
+    echo -e "  ${YELLOW}Get your key at: https://platform.deepseek.com/api_keys${NC}"
+    read -rsp "  DEEPSEEK_API_KEY: " DEEPSEEK_KEY
+    echo
+    DEEPSEEK_KEY=$(sanitize "$DEEPSEEK_KEY")
+    if [ -n "$DEEPSEEK_KEY" ]; then
+      sed -i "s|^DEEPSEEK_API_KEY=.*|DEEPSEEK_API_KEY=$(escape_sed "$DEEPSEEK_KEY")|" "$ENV_FILE"
+      print_success "DeepSeek configured (Gemini is the fallback)"
+    else
+      print_warning "DEEPSEEK_API_KEY left empty — agent will run on Gemini only"
+    fi
+  else
+    print_warning "Skipped DeepSeek — agent will run on Gemini only"
+  fi
+
   # Inter-service auth keys
   echo ""
   echo "  Inter-service authentication keys (used internally between services)."

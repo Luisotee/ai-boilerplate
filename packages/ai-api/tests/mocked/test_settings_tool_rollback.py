@@ -32,8 +32,8 @@ class TestUpdateTtsSettingsRollback:
             result = await update_tts_settings(ctx, enabled=True)
 
         ctx.deps.db.rollback.assert_called_once()
-        assert result.startswith("Failed to update TTS settings:")
-        assert "connection lost" in result
+        assert result == "Failed to update TTS settings. Please try again."
+        assert "connection lost" not in result  # raw error never reaches the LLM
 
     async def test_rollback_not_called_on_success(self):
         ctx = _make_ctx()
@@ -56,8 +56,8 @@ class TestUpdateSttSettingsRollback:
             result = await update_stt_settings(ctx, language="en")
 
         ctx.deps.db.rollback.assert_called_once()
-        assert result.startswith("Failed to update STT settings:")
-        assert "db down" in result
+        assert result == "Failed to update STT settings. Please try again."
+        assert "db down" not in result  # raw error never reaches the LLM
 
     async def test_rollback_called_on_auto_failure(self):
         """The 'auto' path also commits — it should roll back on failure too."""
@@ -69,7 +69,7 @@ class TestUpdateSttSettingsRollback:
             result = await update_stt_settings(ctx, language="auto")
 
         ctx.deps.db.rollback.assert_called_once()
-        assert result.startswith("Failed to update STT settings:")
+        assert result == "Failed to update STT settings. Please try again."
 
 
 class TestGetUserSettingsRollback:
@@ -84,7 +84,7 @@ class TestGetUserSettingsRollback:
             result = await get_user_settings(ctx)
 
         ctx.deps.db.rollback.assert_called_once()
-        assert result.startswith("Failed to retrieve settings:")
+        assert result == "Failed to retrieve settings. Please try again."
 
     async def test_rollback_not_called_on_success(self):
         ctx = _make_ctx()
@@ -111,7 +111,7 @@ class TestCleanUserDataRollback:
             result = await clean_user_data(ctx, level="all")
 
         ctx.deps.db.rollback.assert_called_once()
-        assert result.startswith("Failed to clean user data:")
+        assert result == "Failed to clean user data. Please try again."
 
     async def test_rollback_not_called_on_success(self):
         ctx = _make_ctx()

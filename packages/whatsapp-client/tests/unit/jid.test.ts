@@ -13,6 +13,7 @@ import {
   isJid,
   resolveLidToPhone,
   resolveSenderPhone,
+  resolveParticipantJid,
 } from '../../src/utils/jid.js';
 
 vi.mock('../../src/services/baileys.js', () => ({
@@ -368,5 +369,37 @@ describe('normalizeJid', () => {
     await expect(normalizeJid('5491126726818')).rejects.not.toThrow(
       /is not registered on WhatsApp/
     );
+  });
+});
+
+describe('resolveParticipantJid', () => {
+  it('returns undefined when there is no participant (private chat)', async () => {
+    await expect(resolveParticipantJid(sockWithMapping(null), undefined, undefined)).resolves.toBe(
+      undefined
+    );
+  });
+
+  it('returns a phone participant as a device-stripped phone JID', async () => {
+    await expect(
+      resolveParticipantJid(sockWithMapping(null), '5511999999999:3@s.whatsapp.net', undefined)
+    ).resolves.toBe('5511999999999@s.whatsapp.net');
+  });
+
+  it('maps a LID participant to its phone JID via participantAlt', async () => {
+    const sock = sockWithMapping('5599999999999@s.whatsapp.net');
+    await expect(resolveParticipantJid(sock, LID, '5511999999999:0@s.whatsapp.net')).resolves.toBe(
+      '5511999999999@s.whatsapp.net'
+    );
+    expect(sock.signalRepository.lidMapping.getPNForLID).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the LID↔PN mapping store', async () => {
+    await expect(
+      resolveParticipantJid(sockWithMapping('5511999999999:0@s.whatsapp.net'), LID, undefined)
+    ).resolves.toBe('5511999999999@s.whatsapp.net');
+  });
+
+  it('keeps the raw LID when no phone is knowable yet', async () => {
+    await expect(resolveParticipantJid(sockWithMapping(null), LID, undefined)).resolves.toBe(LID);
   });
 });

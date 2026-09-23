@@ -52,8 +52,8 @@ async def send_whatsapp_reaction(ctx: RunContext[AgentDeps], emoji: str) -> str:
         return f"Reaction {emoji} sent successfully."
 
     except Exception as e:
-        logger.error(f"❌ Failed to send reaction: {e}")
-        return f"Failed to send reaction: {str(e)}"
+        logger.error(f"❌ Failed to send reaction: {e}", exc_info=True)
+        return "Failed to send reaction."
 
 
 @agent.tool
@@ -113,8 +113,8 @@ async def send_whatsapp_location(
         return f"Location '{location_desc}' sent successfully."
 
     except Exception as e:
-        logger.error(f"❌ Failed to send location: {e}")
-        return f"Failed to send location: {str(e)}"
+        logger.error(f"❌ Failed to send location: {e}", exc_info=True)
+        return "Failed to send location."
 
 
 @agent.tool
@@ -167,8 +167,8 @@ async def send_whatsapp_contact(
         return f"Contact card for '{contact_name}' sent successfully."
 
     except Exception as e:
-        logger.error(f"❌ Failed to send contact: {e}")
-        return f"Failed to send contact: {str(e)}"
+        logger.error(f"❌ Failed to send contact: {e}", exc_info=True)
+        return "Failed to send contact."
 
 
 @agent.tool
@@ -216,5 +216,5 @@ async def send_whatsapp_message(ctx: RunContext[AgentDeps], text: str) -> str:
         return "Message sent successfully."
 
     except Exception as e:
-        logger.error(f"❌ Failed to send message: {e}")
-        return f"Failed to send message: {str(e)}"
+        logger.error(f"❌ Failed to send message: {e}", exc_info=True)
+        return "Failed to send message."

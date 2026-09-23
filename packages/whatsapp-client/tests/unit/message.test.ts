@@ -15,6 +15,7 @@ import {
   getSenderName,
   isBotMentioned,
   isReplyToBotMessage,
+  isSenderGroupAdmin,
   shouldRespondInGroup,
 } from '../../src/utils/message.js';
 
@@ -595,5 +596,45 @@ describe('shouldRespondInGroup', () => {
     });
 
     expect(shouldRespondInGroup(msg, botJid)).toBe(true);
+  });
+});
+
+describe('isSenderGroupAdmin', () => {
+  const participants: Parameters<typeof isSenderGroupAdmin>[0] = [
+    { id: '111@lid', phoneNumber: '5511111111111@s.whatsapp.net', admin: 'admin' },
+    { id: '5522222222222@s.whatsapp.net', lid: '222@lid', admin: 'superadmin' },
+    { id: '333@lid', phoneNumber: '5533333333333@s.whatsapp.net', admin: null },
+  ];
+
+  it('matches a LID sender against a LID-keyed admin', () => {
+    expect(isSenderGroupAdmin(participants, { participant: '111@lid' })).toBe(true);
+  });
+
+  it('matches a LID sender against phone-keyed metadata via its lid field', () => {
+    expect(isSenderGroupAdmin(participants, { participant: '222@lid' })).toBe(true);
+  });
+
+  it('matches a phone sender (device-suffixed) against a LID-keyed admin via phoneNumber', () => {
+    expect(
+      isSenderGroupAdmin(participants, { participant: '5511111111111:3@s.whatsapp.net' })
+    ).toBe(true);
+  });
+
+  it('matches via participantAlt when participant alone does not match', () => {
+    expect(
+      isSenderGroupAdmin(participants, {
+        participant: '999@lid',
+        participantAlt: '5522222222222@s.whatsapp.net',
+      })
+    ).toBe(true);
+  });
+
+  it('returns false for a non-admin member', () => {
+    expect(isSenderGroupAdmin(participants, { participant: '333@lid' })).toBe(false);
+  });
+
+  it('returns false for an unknown sender or a missing participant', () => {
+    expect(isSenderGroupAdmin(participants, { participant: '444@lid' })).toBe(false);
+    expect(isSenderGroupAdmin(participants, {})).toBe(false);
   });
 });

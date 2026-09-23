@@ -154,8 +154,26 @@ REGISTRY: tuple[SettingSpec, ...] = (
         "str",
         True,
         "model",
-        "Primary Gemini model name (e.g. gemini-3.1-flash-lite). Free-form string; "
+        "Gemini model name (e.g. gemini-3.1-flash-lite) — the fallback when "
+        "DEEPSEEK_API_KEY is set, otherwise the only model. Free-form string; "
         "takes effect on the next message (≤ ~10s in the stream worker).",
+    ),
+    SettingSpec(
+        "deepseek_model",
+        "str",
+        True,
+        "model",
+        "DeepSeek primary model name (e.g. deepseek-flash), used only when "
+        "DEEPSEEK_API_KEY is set. deepseek-v4-pro takes no image input — image "
+        "messages would fail over to Gemini. Takes effect on the next message.",
+    ),
+    SettingSpec(
+        "deepseek_timeout_seconds",
+        "float",
+        False,
+        "model",
+        "Seconds DeepSeek may take to start answering (and max gap between chunks) "
+        "before falling back to Gemini (applied at startup).",
     ),
     # --- Hot: speech ---
     SettingSpec(

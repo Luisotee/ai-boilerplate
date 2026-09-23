@@ -52,6 +52,27 @@ def strip_leading_mentions(message: str) -> str:
     return re.sub(r"^(@\S+\s*)+", "", message).strip()
 
 
+def strip_command_suffix(message: str) -> str:
+    """Strip a trailing ``@BotName`` from the command token.
+
+    Telegram addresses a bot in a group by suffixing the command itself —
+    ``/settings@MyBot`` — which is also the form its own command menu produces.
+    Only the first token is touched, and only when it is a command, so arguments
+    like ``/tts lang pt`` are untouched and a message such as
+    ``email me @someone`` is not a command at all.
+    """
+    if not message.startswith("/"):
+        return message
+    head, sep, tail = message.partition(" ")
+    head = head.split("@", 1)[0]
+    return f"{head}{sep}{tail}"
+
+
+def normalize_command(message: str) -> str:
+    """Strip leading @mentions and any ``@BotName`` suffix on the command token."""
+    return strip_command_suffix(strip_leading_mentions(message))
+
+
 def is_command(message: str) -> bool:
     """Check if message is a command (starts with / after stripping mentions)."""
     cleaned = strip_leading_mentions(message)
@@ -335,13 +356,15 @@ def parse_and_execute(
         whatsapp_jid: WhatsApp JID for the conversation
         message: Raw message text (may include leading @mentions in groups)
         conversation_type: 'private' or 'group'
-        is_group_admin: Whether the sender is a group admin (None if unknown/private)
+        is_group_admin: Whether the sender is a group admin (None if unknown/private;
+            in groups only an explicit True unlocks admin-only commands)
 
     Returns:
         CommandResult with response text
     """
-    # Strip leading mentions for command parsing (handles "@BotName /settings")
-    cleaned_message = strip_leading_mentions(message)
+    # Strip leading mentions and a "/cmd@BotName" suffix for command parsing
+    # (handles "@BotName /settings" and Telegram's "/settings@BotName").
+    cleaned_message = normalize_command(message)
 
     if not cleaned_message.startswith("/"):
         return CommandResult(is_command=False)
@@ -352,8 +375,15 @@ def parse_and_execute(
 
     logger.info(f"Processing command '{command}' for user {user_id}")
 
-    # In groups, restrict admin-only commands to group admins
-    if conversation_type == "group" and command in ADMIN_ONLY_COMMANDS and is_group_admin is False:
+    # In groups, restrict admin-only commands to group admins. FAIL CLOSED: anything
+    # but an explicit True is refused. The old `is False` check let a client that
+    # omitted the field (Telegram never sent it; a failed Baileys groupMetadata
+    # fetch leaves it unset) through, so any member could e.g. `/clean all` a group.
+    if (
+        conversation_type == "group"
+        and command in ADMIN_ONLY_COMMANDS
+        and is_group_admin is not True
+    ):
         return CommandResult(
             is_command=True,
             response_text="Only group admins can use this command.",

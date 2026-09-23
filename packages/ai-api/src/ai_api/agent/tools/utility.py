@@ -52,7 +52,7 @@ async def calculate(ctx: RunContext[AgentDeps], expression: str) -> str:
         logger.info("❌ TOOL ERROR: calculate")
         logger.info(f"   Error: {str(e)}")
         logger.info("=" * 80)
-        return f"Could not calculate: {str(e)}"
+        return "Could not calculate that expression. Check the syntax and try again."
 
 
 @agent.tool
@@ -156,7 +156,7 @@ async def get_weather(ctx: RunContext[AgentDeps], city: str) -> str:
         logger.info("❌ TOOL ERROR: get_weather")
         logger.info(f"   Error: {str(e)}")
         logger.info("=" * 80)
-        return f"Could not get weather: {str(e)}"
+        return "Could not get the weather right now. Please try again."
 
 
 @agent.tool
@@ -226,7 +226,7 @@ async def wikipedia_lookup(ctx: RunContext[AgentDeps], topic: str) -> str:
         logger.info("❌ TOOL ERROR: wikipedia_lookup")
         logger.info(f"   Error: {str(e)}")
         logger.info("=" * 80)
-        return f"Wikipedia lookup failed: {str(e)}"
+        return "Wikipedia lookup failed. Please try again."
 
 
 @agent.tool
@@ -284,8 +284,8 @@ async def convert_units(
         error_msg = f"Cannot convert {from_unit} to {to_unit} - incompatible unit types"
         logger.error(error_msg)
         return error_msg
-    except pint.errors.UndefinedUnitError as e:
-        error_msg = f"Unknown unit: {e}"
+    except pint.errors.UndefinedUnitError:
+        error_msg = f"Unknown unit in '{from_unit}' or '{to_unit}'."
         logger.error(error_msg)
         return error_msg
     except Exception as e:
@@ -294,4 +294,4 @@ async def convert_units(
         logger.info("❌ TOOL ERROR: convert_units")
         logger.info(f"   Error: {str(e)}")
         logger.info("=" * 80)
-        return f"Conversion failed: {str(e)}"
+        return "Conversion failed. Please try again."

@@ -1,8 +1,8 @@
-import type { FastifyInstance, FastifyReply } from 'fastify';
+import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { isBotReady } from '../services/bot-state.js';
 import * as telegramApi from '../services/telegram-api.js';
-import { jidToChatId, isTelegramJid } from '../utils/telegram-id.js';
+import { resolveChatId, sendErrorResponse } from '../utils/chat-id.js';
 import {
   SendTextSchema,
   SendReactionSchema,
@@ -11,43 +11,6 @@ import {
   SuccessResponseSchema,
   ErrorResponseSchema,
 } from '../schemas/messaging.js';
-
-/**
- * Sentinel for malformed `phoneNumber` input. Lets route handlers map input
- * errors to HTTP 400 instead of the generic 500 used for runtime failures.
- */
-class InvalidChatIdError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'InvalidChatIdError';
-  }
-}
-
-/**
- * The AI API's WhatsAppClient sends conversation identifiers under the
- * `phoneNumber` field. For Telegram we accept either "tg:<chat_id>" or a bare
- * numeric chat id and normalize to a number.
- */
-function resolveChatId(phoneNumber: string): number {
-  if (isTelegramJid(phoneNumber)) return jidToChatId(phoneNumber);
-  const id = Number(phoneNumber);
-  if (!Number.isFinite(id) || !Number.isInteger(id)) {
-    throw new InvalidChatIdError(`Invalid chat identifier: ${phoneNumber}`);
-  }
-  return id;
-}
-
-function sendErrorResponse(
-  reply: FastifyReply,
-  err: unknown,
-  fallbackMessage: string
-): FastifyReply {
-  if (err instanceof InvalidChatIdError) {
-    return reply.code(400).send({ error: err.message });
-  }
-  const error = err as Error;
-  return reply.code(500).send({ error: error.message || fallbackMessage });
-}
 
 export async function registerMessagingRoutes(app: FastifyInstance) {
   // POST /whatsapp/send-text

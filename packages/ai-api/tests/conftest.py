@@ -24,6 +24,10 @@ os.environ.setdefault("REDIS_HOST", "localhost")
 # (LOGFIRE_SEND_TO_LOGFIRE has no effect here — instrument.py passes
 # send_to_logfire as an explicit kwarg, which short-circuits the env lookup.)
 os.environ["LOGFIRE_TOKEN"] = ""
+# Same for DeepSeek: model_chain builds its provider at import when the key is set,
+# so a developer's real DEEPSEEK_API_KEY must not reach tests (they install their
+# own provider where they need one). Empty -> falsy -> Gemini-only chain.
+os.environ["DEEPSEEK_API_KEY"] = ""
 
 # Patch create_engine at the sqlalchemy level BEFORE database.py is imported.
 # This prevents actual DB connection attempts while accepting all pool args.

@@ -16,6 +16,7 @@ import { chatIdToJid, chatTypeToConversationType } from './utils/telegram-id.js'
 import { isAddressedToBot, stripBotMention } from './utils/mention.js';
 import { documentMarker, imageMarker } from './utils/group-media-marker.js';
 import { isWhitelisted } from './utils/whitelist.js';
+import { isSenderGroupAdmin, looksLikeCommand } from './services/group-admin.js';
 
 export function registerUpdateHandlers(): void {
   // ---------------- Text ----------------
@@ -28,10 +29,21 @@ export function registerUpdateHandlers(): void {
     const isGroup = conversationType === 'group';
     const addressed = !isGroup || isAddressed(ctx);
     const cleanText = addressed && isGroup ? stripBotMentionFromCtx(ctx, text) : text;
+    const saveOnly = isGroup && !addressed;
+
+    // The AI API gates group admin commands and fails closed (anything but an
+    // explicit `true` is refused), so resolve admin status — lazily, only for
+    // addressed group messages that look like a command, so ordinary chatter
+    // costs no getChatMember round trip. Mirrors Baileys' lazy groupMetadata.
+    const isGroupAdmin =
+      isGroup && !saveOnly && looksLikeCommand(cleanText)
+        ? await isSenderGroupAdmin(ctx)
+        : undefined;
 
     await handleTextMessage(ctx, cleanText, {
       senderJid: ctx.from ? chatIdToJid(ctx.from.id) : undefined,
-      saveOnly: isGroup && !addressed,
+      saveOnly,
+      isGroupAdmin,
     });
   });
 
@@ -204,15 +216,33 @@ function passesWhitelist(chatId: number | undefined): boolean {
 // Exported for unit tests only.
 export const _internals = { passesWhitelist };
 
+/**
+ * `bot.botInfo` THROWS when the bot has not been initialized (grammY >= 1.4x) —
+ * it is not merely undefined — so every read must be guarded by `isInited()`.
+ * main.ts awaits `bot.init()` before accepting webhook deliveries, so this
+ * should never be false in production; the guard exists so a misordered
+ * bootstrap degrades to "does not answer in groups" instead of throwing on
+ * every single update.
+ */
+function botIdentity(): { id: number; username: string } | undefined {
+  if (!bot.isInited()) {
+    logger.error(
+      'bot.botInfo unavailable — bot.init() has not completed. Group @-mentions cannot be detected.'
+    );
+    return undefined;
+  }
+  return { id: bot.botInfo.id, username: bot.botInfo.username };
+}
+
 function isAddressed(ctx: TelegramContext): boolean {
   const message = ctx.msg as Message | undefined;
-  const me = bot.botInfo;
+  const me = botIdentity();
   if (!message || !me) return false;
-  return isAddressedToBot(message, { id: me.id, username: me.username });
+  return isAddressedToBot(message, me);
 }
 
 function stripBotMentionFromCtx(ctx: TelegramContext, text: string): string {
-  const me = bot.botInfo;
+  const me = botIdentity();
   if (!me) return text;
-  return stripBotMention(text, { id: me.id, username: me.username });
+  return stripBotMention(text, me);
 }

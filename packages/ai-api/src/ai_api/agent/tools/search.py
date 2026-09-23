@@ -14,6 +14,7 @@ from ...rag.knowledge_base import (
     search_knowledge_base as search_kb_fn,
 )
 from ..core import AgentDeps, agent
+from ._db import safe_rollback
 
 
 @agent.tool
@@ -96,8 +97,9 @@ async def search_conversation_history(ctx: RunContext[AgentDeps], search_query: 
         return formatted_results
 
     except Exception as e:
+        safe_rollback(ctx.deps.db)
         logger.error(f"Error in semantic search: {str(e)}", exc_info=True)
-        error_msg = f"Error searching conversation history: {str(e)}"
+        error_msg = "Error searching conversation history. Please try again."
         logger.info("=" * 80)
         logger.info("❌ TOOL ERROR: search_conversation_history")
         logger.info(f"   Error: {str(e)}")
@@ -196,8 +198,9 @@ async def search_knowledge_base(ctx: RunContext[AgentDeps], search_query: str) -
         return formatted_results
 
     except Exception as e:
+        safe_rollback(ctx.deps.db)
         logger.error(f"Error in knowledge base search: {str(e)}", exc_info=True)
-        error_msg = f"Error searching knowledge base: {str(e)}"
+        error_msg = "Error searching the knowledge base. Please try again."
         logger.info("=" * 80)
         logger.info("❌ TOOL ERROR: search_knowledge_base")
         logger.info(f"   Error: {str(e)}")

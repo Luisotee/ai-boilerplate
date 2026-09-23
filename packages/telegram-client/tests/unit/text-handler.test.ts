@@ -20,6 +20,8 @@ vi.mock('../../src/api-client.js', () => ({
 
 vi.mock('../../src/services/telegram-api.js', () => ({
   sendReaction: vi.fn().mockResolvedValue(undefined),
+  isParseEntitiesError: (err: unknown) =>
+    err instanceof Error && /can't parse entities/i.test(err.message),
 }));
 
 vi.mock('../../src/config.js', () => ({
@@ -124,9 +126,52 @@ describe('handleTextMessage', () => {
     expect(ctx.reply).toHaveBeenCalledWith(
       'Hello back!',
       expect.objectContaining({
+        parse_mode: 'HTML',
         reply_parameters: expect.objectContaining({ message_id: 42 }),
       })
     );
+  });
+
+  it('renders WhatsApp markup as Telegram HTML', async () => {
+    mockSendMessageToAI.mockResolvedValueOnce('This is *bold* & <raw>');
+    const ctx = makeCtx();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await handleTextMessage(ctx as any, 'hi');
+
+    expect(ctx.reply).toHaveBeenCalledWith(
+      'This is <b>bold</b> &amp; &lt;raw&gt;',
+      expect.objectContaining({ parse_mode: 'HTML' })
+    );
+  });
+
+  it("retries once as plain text when Telegram says it can't parse entities", async () => {
+    mockSendMessageToAI.mockResolvedValueOnce('Some *text*');
+    const ctx = makeCtx();
+    ctx.reply
+      .mockRejectedValueOnce(new Error("Bad Request: can't parse entities"))
+      .mockResolvedValueOnce(undefined);
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await handleTextMessage(ctx as any, 'hi');
+
+    expect(ctx.reply).toHaveBeenCalledTimes(2);
+    expect(ctx.reply.mock.calls[1][0]).toBe('Some *text*');
+    expect(ctx.reply.mock.calls[1][1]?.parse_mode).toBeUndefined();
+    expect(mockSendReaction).not.toHaveBeenCalled();
+  });
+
+  it('caps every chunk at 4096 chars on the group path (bursting disabled)', async () => {
+    mockSendMessageToAI.mockResolvedValueOnce('word '.repeat(3000));
+    const ctx = makeCtx({ chat: { id: -100, type: 'supergroup' } });
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await handleTextMessage(ctx as any, 'hi');
+
+    expect(ctx.reply.mock.calls.length).toBeGreaterThan(1);
+    for (const call of ctx.reply.mock.calls) {
+      expect((call[0] as string).length).toBeLessThanOrEqual(4096);
+    }
   });
 
   it('sends both a ❌ reaction AND an error reply when AI fails (H2 parity)', async () => {
