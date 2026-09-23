@@ -785,6 +785,51 @@ class TestSyncChatModelErrors:
         assert "assistant" not in roles
 
 
+class TestSyncChatMarkdownSanitising:
+    """The sync /chat path applies the same Markdown → WhatsApp backstop as the
+    stream processor, to both the returned and the saved reply."""
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_reply_is_converted_before_return_and_save(self, *_):
+        async def streaming(*_args, **_kwargs):
+            yield "## Result\n"
+            yield "**Yes** — see [docs](https://example.com)"
+
+        mock_db = _make_mock_db()
+        mock_user = make_user(whatsapp_jid=TEST_JID)
+        with (
+            _patch_whitelist(),
+            patch("ai_api.routes.chat.get_conversation_history", return_value=[]),
+            patch("ai_api.routes.chat.get_or_create_user", return_value=mock_user),
+            patch("ai_api.routes.chat.create_embedding_service", return_value=None),
+            patch("ai_api.routes.chat.save_message") as mock_save,
+            patch("ai_api.routes.chat.get_ai_response", streaming),
+        ):
+            app = _get_app_with_db_override(mock_db)
+            try:
+                transport = ASGITransport(app=app)
+                async with AsyncClient(transport=transport, base_url="http://test") as client:
+                    response = await client.post(
+                        "/chat",
+                        json={
+                            "whatsapp_jid": TEST_JID,
+                            "message": "Hi",
+                            "conversation_type": "private",
+                        },
+                        headers=AUTH_HEADERS,
+                    )
+            finally:
+                _cleanup_overrides()
+
+        expected = "*Result*\n*Yes* — see docs: https://example.com"
+        assert response.status_code == 200
+        assert response.json()["response"] == expected
+        saved = [c.args[3] for c in mock_save.call_args_list if c.args[2] == "assistant"]
+        assert saved == [expected]
+
+
 # ---------------------------------------------------------------------------
 # Whitelist — exercised for real (no _is_whitelisted patch)
 # ---------------------------------------------------------------------------

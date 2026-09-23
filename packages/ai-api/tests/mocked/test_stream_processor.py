@@ -55,6 +55,7 @@ async def _run_processor(
     *,
     whatsapp_message_id: str | None = "wamid-test",
     raises: type[BaseException] | None = None,
+    embedding_service=None,
 ):
     """Invoke process_chat_job_direct with get_ai_response replaced by `agent_fn`.
 
@@ -73,9 +74,9 @@ async def _run_processor(
 
     mock_whatsapp_client = AsyncMock()
 
-    # Return None for the embedding service so the optional embedding step is skipped.
-    # This keeps the test focused on error-path behavior.
-    mock_embed_factory = MagicMock(return_value=None)
+    # None by default, so the optional embedding step is skipped and the test
+    # stays focused on error-path behavior.
+    mock_embed_factory = MagicMock(return_value=embedding_service)
 
     mock_assistant_msg = MagicMock()
     mock_assistant_msg.id = uuid.uuid4()
@@ -327,3 +328,57 @@ class TestModelErrorJobState:
         assert mock_save_chunk.call_args.args[3] == "Hello there"
         mock_save_message.assert_called_once()
         mock_wa.send_reaction.assert_not_awaited()
+
+
+def _make_partial_then_failing_agent(tokens: list[str], exc: Exception):
+    """Yield `tokens`, then raise `exc` (a mid-stream, non-model failure)."""
+
+    async def partial(*_args, **_kwargs):
+        for token in tokens:
+            yield token
+        raise exc
+
+    return partial
+
+
+class TestMarkdownSanitising:
+    """The model's Markdown is converted to WhatsApp markup before the reply is
+    delivered, embedded or saved — saved Markdown would be replayed as history
+    and reinforce the habit."""
+
+    MARKDOWN = "## Plan\n**Step one**: read [the docs](https://example.com/docs)\n---\nDone?"
+    WHATSAPP = "*Plan*\n*Step one*: read the docs: https://example.com/docs\n---\nDone?"
+
+    @pytest.mark.asyncio
+    async def test_delivered_embedded_and_saved_text_is_converted(self):
+        embedding_service = AsyncMock()
+        embedding_service.generate.return_value = [0.1, 0.2]
+
+        _result, mock_save_chunk, _meta, mock_save_message, _wa = await _run_processor(
+            _make_streaming_agent([self.MARKDOWN[:10], self.MARKDOWN[10:]]),
+            embedding_service=embedding_service,
+        )
+
+        assert mock_save_chunk.call_args.args[3] == self.WHATSAPP
+        embedding_service.generate.assert_awaited_once_with(self.WHATSAPP)
+        assert mock_save_message.call_args.args[3] == self.WHATSAPP
+
+    @pytest.mark.asyncio
+    async def test_burst_delimiters_survive(self):
+        _result, mock_save_chunk, *_ = await _run_processor(
+            _make_streaming_agent(["Hi!\n---\n**Answer**\n---\nAnything else?"])
+        )
+        delivered = mock_save_chunk.call_args.args[3]
+        assert delivered == "Hi!\n---\n*Answer*\n---\nAnything else?"
+        assert delivered.split("\n").count("---") == 2
+
+    @pytest.mark.asyncio
+    async def test_partial_error_row_is_converted_too(self):
+        # An unexpected mid-stream error skips the happy-path conversion; the
+        # partial row is still replayed as history, so it must not hold Markdown.
+        _result, _chunk, _meta, mock_save_message, _wa = await _run_processor(
+            _make_partial_then_failing_agent(["**Half** an answer"], RuntimeError("boom")),
+            raises=RuntimeError,
+        )
+
+        assert mock_save_message.call_args.args[3] == "[Partial - Error] *Half* an answer"

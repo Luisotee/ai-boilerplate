@@ -78,6 +78,9 @@ class Settings(BaseSettings):
     # History
     history_limit_private: int = 20
     history_limit_group: int = 30
+    # How the bot's own lines are labelled in transcripts the agent reads back
+    # (get_chat_history). Overridable at runtime via /admin.
+    bot_name: str = "Assistant"
 
     # Token Management
     max_context_tokens: int = 50000

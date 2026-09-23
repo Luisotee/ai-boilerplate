@@ -1,5 +1,6 @@
 from pydantic_ai import RunContext
 
+from ...formatting import markdown_to_whatsapp
 from ...logger import logger
 from ..core import AgentDeps, agent
 
@@ -209,7 +210,8 @@ async def send_whatsapp_message(ctx: RunContext[AgentDeps], text: str) -> str:
     try:
         result = await deps.whatsapp_client.send_text(
             phone_number=deps.whatsapp_jid,
-            text=text,
+            # Out-of-band text skips the processor's conversion — apply it here.
+            text=markdown_to_whatsapp(text),
         )
 
         logger.info(f"✅ Message sent successfully (ID: {result.message_id})")

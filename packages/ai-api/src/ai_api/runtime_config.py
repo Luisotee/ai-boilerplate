@@ -75,6 +75,13 @@ REGISTRY: tuple[SettingSpec, ...] = (
         "Number of history messages loaded for group chats.",
     ),
     SettingSpec(
+        "bot_name",
+        "str",
+        True,
+        "conversation",
+        "Label for the bot's own messages in transcripts the agent reads back (get_chat_history).",
+    ),
+    SettingSpec(
         "core_memory_max_length",
         "int",
         True,

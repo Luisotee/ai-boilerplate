@@ -9,6 +9,7 @@ from ..agent.model_chain import MODEL_ERRORS
 from ..config import get_whatsapp_api_key, get_whatsapp_client_url, settings
 from ..database import SessionLocal, get_conversation_history, save_message
 from ..embeddings import create_embedding_service
+from ..formatting import markdown_to_whatsapp
 from ..logger import logger
 from ..queue.connection import get_redis_client
 from ..queue.utils import delete_job_image, get_job_image, save_job_chunk, set_job_metadata
@@ -275,6 +276,12 @@ async def process_chat_job_direct(
             if has_image:
                 await delete_job_image(redis, job_id)
 
+            # Models answer in Markdown despite the prompt. Convert before the
+            # reply is delivered, embedded or saved — saved Markdown would be
+            # replayed as history and reinforce the habit. `---` burst lines are
+            # left untouched, so the clients still split on them.
+            full_response = markdown_to_whatsapp(full_response)
+
             # Save complete response as single chunk
             await save_job_chunk(redis, job_id, 0, full_response)
             chunk_index = 1
@@ -341,7 +348,9 @@ async def process_chat_job_direct(
                         db,
                         whatsapp_jid,
                         "assistant",
-                        f"[Partial - Error] {full_response}",
+                        # Converted here too: an unexpected error can skip the
+                        # happy-path conversion, and this row is replayed as history.
+                        f"[Partial - Error] {markdown_to_whatsapp(full_response)}",
                         conversation_type,
                         embedding=None,
                     )
