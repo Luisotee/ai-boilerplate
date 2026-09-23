@@ -53,7 +53,7 @@ class _FakeDeepSeek:
             "index": 0,
             "id": "call_1",
             "type": "function",
-            "function": {"name": "list_subscriptions", "arguments": "{}"},
+            "function": {"name": "count_memories", "arguments": "{}"},
         }
         return _sse(
             _chunk({"role": "assistant", "content": PREAMBLE}),
@@ -84,7 +84,7 @@ async def _reply(fake: _FakeDeepSeek, tool_calls: list[int]) -> str:
     test_agent = Agent()
 
     @test_agent.tool_plain
-    def list_subscriptions() -> str:
+    def count_memories() -> str:
         tool_calls.append(1)
         return "3 memories"
 
