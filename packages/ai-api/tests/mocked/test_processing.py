@@ -574,8 +574,10 @@ class TestProcessPdfDocumentIntegration:
 
         await process_pdf_document("doc-id", str(pdf))
 
-        # First branch: stored_count == 0 → status "failed"
+        # First branch: stored_count == 0 → status "failed", with a reason recorded
+        # (GET /knowledge-base/status would otherwise show error_message: null).
         assert fake_doc.status == "failed"
+        assert "embedded" in (fake_doc.error_message or "")
 
     @pytest.mark.asyncio
     async def test_marks_partial_on_some_embedding_failures(self, monkeypatch, tmp_path, fake_doc):
@@ -652,9 +654,12 @@ class TestProcessPdfDocumentRetrySupport:
         embedder.generate = AsyncMock(return_value=[0.1] * 8)
         monkeypatch.setattr(processing, "create_embedding_service", lambda _key: embedder)
 
+        fake_doc.error_message = "left over from a failed attempt"
+
         status = await process_pdf_document("doc-id", str(pdf), raise_on_failure=True)
 
         assert status == "completed"
+        assert fake_doc.error_message is None
         session.query.return_value.filter_by.return_value.delete.assert_called_once_with(
             synchronize_session=False
         )

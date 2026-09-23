@@ -390,6 +390,7 @@ async def _process_pdf_document_impl(
             synchronize_session=False
         )
         document.status = "processing"
+        document.error_message = None  # a retry must not keep an earlier attempt's error
         db.commit()
         logger.info(f"Document status updated to 'processing': {document.original_filename}")
 
@@ -464,6 +465,10 @@ async def _process_pdf_document_impl(
         # Step 6: Update document status based on completeness
         if stored_count == 0:
             document.status = "failed"
+            document.error_message = (
+                f"No chunk could be embedded ({failure_metadata['chunks_skipped']} skipped); "
+                "the embedding service may be unavailable"
+            )
         elif failure_metadata["chunks_skipped"] > 0:
             document.status = "partial"
             logger.warning(
