@@ -64,7 +64,10 @@ _STRIKE_RE = _emphasis("~~")
 
 # Single-asterisk span. Inside a bold span or heading (which becomes `*…*`) it
 # can only be italic, and must become `_…_` or it would close the bold early.
-_INNER_ITALIC_RE = re.compile(r"(?<![\w*])\*(?=\S)([^*\n]*?\S)\*(?![\w*])")
+# The closing `*` may run into a word (`*italic*ized`): left as `*`, it would
+# split the surrounding bold in two. The opening side still needs a boundary,
+# so a lone `2*3` is left alone.
+_INNER_ITALIC_RE = re.compile(r"(?<![\w*])\*(?=\S)([^*\n]*?\S)\*(?!\*)")
 
 # Restores are bounded, not "until no placeholder is left": a URL can contain
 # a code placeholder, so values nest — but only a few levels deep, and a

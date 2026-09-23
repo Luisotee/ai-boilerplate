@@ -321,9 +321,22 @@ class TestNestedEmphasis:
     def test_italic_inside_bold(self):
         assert markdown_to_whatsapp("**bold *italic* bold**") == "*bold _italic_ bold*"
 
-    def test_nested_result_is_idempotent(self):
-        once = markdown_to_whatsapp("**bold *italic* bold**")
+    @pytest.mark.parametrize(
+        "text",
+        ["**bold *italic* bold**", "**bold *italic*ized more**", "## A *b*c"],
+    )
+    def test_nested_result_is_idempotent(self, text):
+        once = markdown_to_whatsapp(text)
         assert markdown_to_whatsapp(once) == once
+
+    def test_italic_running_into_a_word_does_not_split_the_bold(self):
+        assert markdown_to_whatsapp("**bold *italic*ized more**") == "*bold _italic_ized more*"
+
+    def test_italic_running_into_a_word_inside_heading(self):
+        assert markdown_to_whatsapp("## A *b*c") == "*A _b_c*"
+
+    def test_lone_asterisk_inside_bold_is_left_alone(self):
+        assert markdown_to_whatsapp("**2*3 = 6**") == "*2*3 = 6*"
 
 
 class TestTelegramPipelineFixture:
