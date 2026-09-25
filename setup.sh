@@ -52,16 +52,20 @@ port_in_use() {
 }
 
 # Find the first free port at/above $1 (scans up to +100), skipping ports already
-# claimed this run (tracked in $CHOSEN_PORTS). On success sets the global FREE_PORT
+# claimed this run (tracked in $CHOSEN_PORTS). A port published by this project's
+# own running containers ($OWN_PORTS) counts as free, so re-running setup against
+# a live stack keeps its ports instead of bumping them all. On success sets the global FREE_PORT
 # and returns 0. Sets a global (not stdout) so calls aren't run in a subshell —
 # otherwise CHOSEN_PORTS would not accumulate and two services could be assigned
 # the same bumped port.
 CHOSEN_PORTS=""
 FREE_PORT=""
+OWN_PORTS=""
 find_free_port() {
   local port="$1" max=$(( $1 + 100 ))
   while [ "$port" -le "$max" ]; do
-    if [[ " $CHOSEN_PORTS " != *" $port "* ]] && ! port_in_use "$port"; then
+    if [[ " $CHOSEN_PORTS " != *" $port "* ]] \
+      && { [[ " $OWN_PORTS " == *" $port "* ]] || ! port_in_use "$port"; }; then
       CHOSEN_PORTS="$CHOSEN_PORTS $port"
       FREE_PORT="$port"
       return 0
@@ -185,6 +189,15 @@ if [ "$SKIP_ENV" = false ]; then
     exit 1
   fi
 
+  # Host ports published by this project's running containers. Read BEFORE the
+  # .env is overwritten, so `docker compose` still resolves the current project.
+  # Any failure (no daemon, no permission) just leaves the list empty.
+  if command -v docker &>/dev/null; then
+    for cid in $(docker compose ps -q 2>/dev/null || true); do
+      OWN_PORTS="$OWN_PORTS $( (docker port "$cid" 2>/dev/null || true) | awk -F: '{print $NF}' | tr '\n' ' ')"
+    done
+  fi
+
   cp "$ENV_EXAMPLE" "$ENV_FILE"
   chmod 600 "$ENV_FILE"
   print_success "Copied .env.example → .env (mode 600)"
@@ -242,6 +255,9 @@ if [ "$SKIP_ENV" = false ]; then
   if ! command -v ss &>/dev/null && ! command -v lsof &>/dev/null; then
     print_warning "Neither 'ss' nor 'lsof' found — port probing is best-effort"
     print_warning "(loopback only); a conflict on a non-loopback interface may be missed"
+  fi
+  if [ -n "${OWN_PORTS// /}" ]; then
+    print_success "Ports used by this project's running containers are kept"
   fi
   PORT_SPECS=(
     "POSTGRES_PORT:5432"
