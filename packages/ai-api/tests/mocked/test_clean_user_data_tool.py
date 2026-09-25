@@ -74,8 +74,8 @@ class TestCleanUserDataTool:
             mock_handle.side_effect = RuntimeError("db connection lost")
             result = await clean_user_data(ctx, level="all")
 
-            assert result.startswith("Failed to clean user data:")
-            assert "db connection lost" in result
+            assert result == "Failed to clean user data. Please try again."
+            assert "db connection lost" not in result  # raw error never reaches the LLM
 
     async def test_invalid_level_propagates_handler_message(self):
         """Invalid levels are validated by handle_clean_command, not the tool."""

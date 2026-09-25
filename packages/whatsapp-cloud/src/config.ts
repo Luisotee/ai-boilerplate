@@ -2,6 +2,7 @@ import { config as dotenvConfig, parse as dotenvParse } from 'dotenv';
 import { existsSync, readFileSync } from 'fs';
 import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
+import { parseWhitelist } from './utils/whitelist.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const packageRoot = resolve(__dirname, '..');
@@ -29,12 +30,7 @@ if (existsSync(localEnvPath)) {
   dotenvConfig({ path: localEnvPath, override: true });
 }
 
-const whitelistPhones = new Set(
-  (process.env.WHITELIST_PHONES || '')
-    .split(',')
-    .map((jid) => jid.trim())
-    .filter(Boolean)
-);
+const whitelistPhones = parseWhitelist(process.env.WHITELIST_PHONES || '');
 
 function parseNonNegativeInt(name: string, defaultValue: number): number {
   const raw = process.env[name];

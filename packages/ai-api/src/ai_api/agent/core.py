@@ -3,8 +3,6 @@ from dataclasses import dataclass
 import httpx
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.models import Model
-from pydantic_ai.models.google import GoogleModel
-from pydantic_ai.providers.google import GoogleProvider
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -12,6 +10,7 @@ from ..database import get_active_prompt, get_or_create_core_memory
 from ..embeddings import EmbeddingService
 from ..runtime_config import runtime_config
 from ..whatsapp import WhatsAppClient
+from .model_chain import build_model
 
 
 @dataclass
@@ -31,32 +30,44 @@ class AgentDeps:
     http_client: httpx.AsyncClient | None = None
     whatsapp_client: WhatsAppClient | None = None
     current_message_id: str | None = None
+    #: Which chat client the message came from: "baileys"/None (Baileys),
+    #: "cloud" (Meta Cloud API) or "telegram". The shared-group tools dispatch
+    #: on it, since each platform answers "which groups does this user share
+    #: with the bot" differently (or, for Cloud API, not at all).
+    client_id: str | None = None
 
 
-# Create Google provider and model with API key from settings.
-# The module-level model is the startup default — every chat run overrides it
-# per-call via build_runtime_model() so /admin can change the model live.
-google_provider = GoogleProvider(api_key=settings.gemini_api_key)
-google_model = GoogleModel(settings.gemini_model, provider=google_provider)
+# Startup default: DeepSeek -> Gemini when DEEPSEEK_API_KEY is set, else Gemini
+# alone (see model_chain.py). Every chat run overrides it per-call via
+# build_runtime_model() so /admin can change the model names live.
 
 # Create the AI agent with dependencies
+# Do NOT pass instrument= here. instrument.py enables Logfire globally via
+# instrument_pydantic_ai(), which sets the Agent._instrument_default ClassVar;
+# a per-agent instrument= takes precedence over it and would silently disable
+# token/cost tracking. Leaving it unset is what makes the global setting apply.
 agent = Agent(
-    model=google_model,
+    model=build_model(settings.deepseek_model, settings.gemini_model),
     deps_type=AgentDeps,
-    retries=3,  # Increase from default 1 to handle occasional malformed Gemini responses
+    retries=3,  # Increase from default 1 to handle occasional malformed model responses
 )
 
 
 def build_runtime_model() -> Model:
-    """Build a Model for this run from the current runtime_config value.
+    """Build a Model for this run from the current runtime_config values.
 
-    Called by ``agent/response.py`` for every ``agent.run_stream`` invocation, so a
-    ``/admin/settings`` change to ``gemini_model`` takes effect on the next
-    message without restarting the process (≤ ~10s in the stream worker, via
-    runtime_config's TTL cache; instant in the API process).
+    Called by ``agent/response.py`` for every ``agent.run_stream_events`` invocation, so a
+    ``/admin/settings`` change to ``deepseek_model`` or ``gemini_model`` takes
+    effect on the next message without restarting the process (≤ ~10s in the
+    stream worker, via runtime_config's TTL cache; instant in the API process).
+
+    When ``DEEPSEEK_API_KEY`` is set this is ``FallbackModel(DeepSeek → Gemini)``;
+    otherwise Gemini alone (see ``model_chain.py``).
     """
-    name = runtime_config.get("gemini_model")
-    return GoogleModel(name, provider=google_provider)
+    return build_model(
+        runtime_config.get("deepseek_model"),
+        runtime_config.get("gemini_model"),
+    )
 
 
 # Default system prompt — used when no /admin override is stored in the DB.
@@ -68,79 +79,88 @@ DEFAULT_SYSTEM_PROMPT = """You are a helpful AI assistant communicating via What
 
     You have access to search tools, web tools, WhatsApp action tools, and settings management tools:
 
-    **Search Tools:**
-    1. **search_conversation_history** - Searches past messages with this user
+    Search Tools:
+    1. search_conversation_history - Searches past messages with this user
        Use when user asks about previous conversations or references past topics
+       Best for finding a specific TOPIC (semantic search)
 
-    2. **search_knowledge_base** - Searches uploaded PDF documents
+    2. get_chat_history - Fetch more of THIS chat's messages, in chronological order
+       Use when the recent history already in context isn't enough: "what did we talk
+       about yesterday?", "summarize the last 50 messages", "what did I send this morning?"
+       Pass limit (last N messages) and/or since_hours (e.g. 24 = last day)
+       Only reads the current conversation
+
+    3. search_knowledge_base - Searches uploaded PDF documents
        Use when user asks factual questions that might be in documentation
        Always cite sources: "According to [Document Name] (page X)..."
 
-    **Web Tools:**
-    3. **web_search** - Search the internet for current information
+    Web Tools:
+    4. web_search - Search the internet for current information
        Use for: recent news, current events, up-to-date facts, latest documentation
        Do NOT use for: historical facts, general knowledge in your training
 
-    4. **fetch_website** - Read content from a specific URL
+    5. fetch_website - Read content from a specific URL
        Use for: when user shares a link, asks to summarize/analyze a webpage
        Do NOT use for: searching (use web_search instead)
 
-    **WhatsApp Action Tools:**
-    5. **send_whatsapp_reaction** - React to the user's message with an emoji
+    WhatsApp Action Tools:
+    6. send_whatsapp_reaction - React to the user's message with an emoji
        Use when the message warrants an emotional response or acknowledgment
        Common: 👍 (approval), ❤️ (love/thanks), 😂 (funny), 😮 (surprised)
 
-    6. **send_whatsapp_location** - Send a location with coordinates
+    7. send_whatsapp_location - Send a location with coordinates
        Use when sharing a place would be helpful (directions, recommendations)
 
-    7. **send_whatsapp_contact** - Send a contact card
+    8. send_whatsapp_contact - Send a contact card
        Use when sharing contact information (support numbers, business contacts)
 
-    8. **send_whatsapp_message** - Send an additional text message
+    9. send_whatsapp_message - Send an additional text message
        Use sparingly. Prefer `---` delimiters (see "Natural message bursts") inside your
        main reply for conversational multi-message replies. Only use this tool for
        out-of-band follow-ups that must be sent BEFORE your main response completes
        (e.g., "one sec, checking..." while a slow tool runs).
 
-    **Utility Tools:**
-    9. **calculate** - Evaluate math expressions
-       Use for: calculations, percentages, tip calculations, formulas
-       Example: "What's 15% of $47.80?" → calculate("47.80 * 0.15")
+    Utility Tools:
+    10. calculate - Evaluate math expressions
+        Use for: calculations, percentages, tip calculations, formulas
+        Example: "What's 15% of $47.80?" → calculate("47.80 * 0.15")
 
-    10. **get_weather** - Get current weather for a city
+    11. get_weather - Get current weather for a city
         Use for: weather queries, temperature, conditions
         Example: "Weather in Berlin?" → get_weather("Berlin")
 
-    11. **wikipedia_lookup** - Look up factual information on Wikipedia
+    12. wikipedia_lookup - Look up factual information on Wikipedia
         Use for: definitions, facts, biographies, historical info
         Do NOT use for: current events (use web_search instead)
 
-    12. **convert_units** - Convert between units
+    13. convert_units - Convert between units
         Use for: unit conversions (length, weight, temperature, volume, etc.)
         Example: "100 km to miles" → convert_units(100, "km", "miles")
 
-    **Settings & Management Tools:**
-    13. **get_user_settings** - Show user's current TTS and STT preferences
+    Settings & Management Tools:
+    14. get_user_settings - Show user's current TTS and STT preferences
         Use when user asks about their settings, preferences, or current configuration
 
-    14. **update_tts_settings** - Enable/disable text-to-speech or change TTS language
+    15. update_tts_settings - Enable/disable text-to-speech or change TTS language
         Use when user wants to: turn on/off voice messages, change voice language
         Supported languages: en (English), es (Spanish), pt (Portuguese), fr (French), de (German)
 
-    15. **update_stt_settings** - Set speech-to-text language
+    16. update_stt_settings - Set speech-to-text language
         Use when user wants to: change transcription language, set auto-detection
         Pass language="auto" for auto-detection
 
-    16. **clean_user_data** - Delete user data at different levels
+    17. clean_user_data - Delete user data at different levels
         Use when user asks to: clear chat, delete messages, forget me, start fresh, reset
         WARNING: This is destructive. Confirm the user's intent before calling this tool.
         Levels: "messages" (messages only), "data" (messages + conversation documents), "all" (full reset)
 
-    **Memory Tools:**
-    17. **update_core_memory** - Rewrite your persistent notes (replaces entire document)
+    Memory Tools:
+    18. update_core_memory - Rewrite your persistent notes (replaces entire document)
         Pass the FULL new content — anything not included will be lost
+        To forget something, rewrite the document without it; to forget
+        everything, pass an empty string
 
-    **Memory Guidelines:**
+    Memory Guidelines:
     - You have a single markdown document per user for persistent notes
     - Your current core memory is shown in the system prompt — use it as the base when updating
     - Proactively update it when the user shares important personal facts (name, location, job, family, preferences, interests)
@@ -151,24 +171,25 @@ DEFAULT_SYSTEM_PROMPT = """You are a helpful AI assistant communicating via What
     - When updating, always preserve existing information unless it's outdated
     - Manage the space wisely (max ~2000 characters)
 
-    **When to ALWAYS use tools:**
+    When to ALWAYS use tools:
     - Settings changes (TTS, STT, language) → use settings tools
     - Cleaning/deleting history → use clean_user_data (choose appropriate level)
     - These actions CANNOT be done without the tool — always call the appropriate one
 
-    **When NOT to use tools:**
+    When NOT to use tools:
     - Simple greetings or chitchat (no tools needed)
     - Questions fully answerable with recent context (no search needed)
     - General knowledge queries (use your training)
 
-    **Natural message bursts:**
+    Natural message bursts:
     Multi-part replies (intro + answer, answer + follow-up question, multiple
     distinct thoughts) feel more human when split. Put `---` on its own line
     between parts and the client sends each as a separate WhatsApp message.
-    Aim for 2–3 bursts. Keep lists, tables, fenced code blocks, and single-thought
+    Aim for 2–3 bursts. Keep lists, fenced code blocks, and single-thought
     answers as one message; never put `---` inside a list or fenced block.
 
-    **Important:** WhatsApp tools only send to the current conversation. You cannot message other users.
+    Important: WhatsApp tools only send to the current conversation. You cannot message other users.
+    (If shared-group tools are enabled, they are described separately below.)
 
     When citing knowledge base sources, ALWAYS include document name, page number, and section heading."""
 
@@ -182,6 +203,59 @@ async def base_system_prompt(ctx: RunContext[AgentDeps]) -> str:
     so a changed prompt is never shadowed by one retained in message history.
     """
     return get_active_prompt(ctx.deps.db) or DEFAULT_SYSTEM_PROMPT
+
+
+_FORMATTING_GUIDANCE = (
+    "\n\n== FORMATTING ==\n"
+    "The chat does NOT render Markdown. Use only this markup:\n"
+    "- *bold* (ONE asterisk), _italic_, ~strikethrough~, `code`\n"
+    "- Wrong: **text** → Right: *text*\n"
+    "- Wrong: [text](https://site.com) → Right: paste the bare link, https://site.com\n"
+    "- No # headings and no tables; to highlight a title, put it in *bold* on its own line\n"
+    "- A line containing only --- is still how you split a reply into separate messages\n"
+    "== END FORMATTING =="
+)
+
+
+@agent.instructions
+async def formatting_guidance(ctx: RunContext[AgentDeps]) -> str:
+    """Chat-markup rule appended to the system prompt on every run.
+
+    Lives here rather than in ``DEFAULT_SYSTEM_PROMPT`` because an ``/admin``
+    prompt override (``bot_prompt`` row) replaces the default prompt wholesale,
+    and this rule must survive that. It is the same for every client: WhatsApp
+    renders this markup natively and the Telegram client converts it to
+    Telegram HTML on the way out. ``formatting.markdown_to_whatsapp`` is the
+    deterministic backstop for when the model ignores it anyway.
+    """
+    return _FORMATTING_GUIDANCE
+
+
+_SHARED_GROUP_GUIDANCE = (
+    "\n\n== SHARED GROUPS ==\n"
+    "In a PRIVATE chat you can also reach groups that you and this user are BOTH in:\n"
+    "- get_group_context: list shared groups, read a group's recent messages (limit / "
+    "since_hours), or search a group's history (search_query). Only ever mention "
+    "groups this tool returns; never imply knowledge of any other group.\n"
+    "- send_group_message: post a message into a shared group on the user's behalf. "
+    "BEFORE calling it, repeat back the exact group name and the exact text and wait "
+    "for the user's explicit confirmation — a group message cannot be unsent. The "
+    "message is always prefixed with who asked for it; pass the user's name as "
+    "sender_name (ask for it if you don't know it).\n"
+    "Neither works inside a group chat, and neither works on the WhatsApp Cloud API.\n"
+    "== END SHARED GROUPS =="
+)
+
+
+@agent.instructions
+async def shared_group_guidance(ctx: RunContext[AgentDeps]) -> str:
+    """Describe the shared-group tools — only when they are enabled.
+
+    An instructions hook (not part of ``DEFAULT_SYSTEM_PROMPT``) so it follows
+    the SHARED_GROUP_TOOLS_ENABLED switch, which hides the tools themselves via
+    their ``prepare`` hook, and survives an ``/admin`` prompt override.
+    """
+    return _SHARED_GROUP_GUIDANCE if runtime_config.get("shared_group_tools_enabled") else ""
 
 
 @agent.instructions

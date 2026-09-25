@@ -379,6 +379,50 @@ def format_conversation_message(msg: ConversationMessage, is_match: bool = False
     return " ".join(parts)
 
 
+def format_transcript(
+    messages: list[ConversationMessage],
+    *,
+    assistant_label: str,
+    with_timestamps: bool = False,
+    default_user_label: str | None = None,
+) -> str:
+    """Format stored messages into a readable chronological transcript.
+
+    Group user-message ``content`` is already stored prefixed as
+    ``"{sender_name}: {message}"`` (see ``routes/chat.py``), so the sender name
+    is only prepended when the content doesn't already start with it — avoiding a
+    doubled ``"Alice: Alice: ..."``. Assistant lines get ``assistant_label`` (the
+    configurable ``BOT_NAME``). Private user messages have no ``sender_name``;
+    they get ``default_user_label`` as a prefix when one is provided, otherwise
+    the bare content.
+
+    Args:
+        messages: Messages in chronological order.
+        assistant_label: Label for the bot's own lines.
+        with_timestamps: Prepend ``[YYYY-MM-DD HH:MM]`` (UTC) to each line.
+        default_user_label: Label for user lines lacking a sender_name (private).
+    """
+    lines = []
+    for msg in messages:
+        content = (msg.content or "").strip()
+        prefix = ""
+        if with_timestamps and msg.timestamp:
+            prefix = f"[{msg.timestamp.strftime('%Y-%m-%d %H:%M')}] "
+
+        if msg.role == "assistant":
+            lines.append(f"{prefix}{assistant_label}: {content}")
+            continue
+
+        name = (msg.sender_name or "").strip()
+        if name and not content.lower().startswith(f"{name.lower()}:"):
+            lines.append(f"{prefix}{name}: {content}")
+        elif not name and default_user_label:
+            lines.append(f"{prefix}{default_user_label}: {content}")
+        else:
+            lines.append(f"{prefix}{content}")
+    return "\n".join(lines)
+
+
 def merge_and_deduplicate_messages(
     recent_messages: list[ConversationMessage],
     semantic_messages: list[ConversationMessage],

@@ -2,6 +2,8 @@ import { config as dotenvConfig, parse as dotenvParse } from 'dotenv';
 import { existsSync, readFileSync } from 'fs';
 import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
+import { parseWhitelist } from './utils/whitelist.js';
+import { parseGroupGating } from './utils/gating.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const packageRoot = resolve(__dirname, '..');
@@ -29,12 +31,14 @@ if (existsSync(localEnvPath)) {
   dotenvConfig({ path: localEnvPath, override: true });
 }
 
-const whitelistPhones = new Set(
-  (process.env.WHITELIST_PHONES || '')
-    .split(',')
-    .map((jid) => jid.trim())
-    .filter(Boolean)
-);
+const whitelistPhones = parseWhitelist(process.env.WHITELIST_PHONES || '');
+
+// GROUP_GATING=jid|membership — see utils/gating.ts. An unknown value falls back
+// to the stricter `jid` rather than failing startup.
+const groupGating = parseGroupGating(process.env.GROUP_GATING);
+if (groupGating.invalid) {
+  console.warn(`[config] Invalid GROUP_GATING "${process.env.GROUP_GATING}", using "jid"`);
+}
 
 function parseNonNegativeInt(name: string, defaultValue: number): number {
   const raw = process.env[name];
@@ -49,6 +53,7 @@ function parseNonNegativeInt(name: string, defaultValue: number): number {
 
 export const config = {
   whitelistPhones,
+  groupGating: groupGating.mode,
   aiApiUrl: process.env.AI_API_URL || 'http://localhost:8000',
   logLevel: process.env.LOG_LEVEL || 'info',
   server: {

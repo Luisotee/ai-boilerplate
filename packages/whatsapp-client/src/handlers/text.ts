@@ -2,8 +2,9 @@ import type { WASocket, WAMessage } from '@whiskeysockets/baileys';
 import { logger } from '../logger.js';
 import { getUserPreferences, sendMessageToAI, textToSpeech } from '../api-client.js';
 import { config } from '../config.js';
-import { stripDeviceSuffix, isGroupChat } from '../utils/jid.js';
-import { getSenderName } from '../utils/message.js';
+import { stripDeviceSuffix, isGroupChat, resolveParticipantJid } from '../utils/jid.js';
+import { getPushName, getSenderName } from '../utils/message.js';
+import { getGroupSubject } from '../services/group-cache.js';
 import { sendFailureReaction } from '../utils/reactions.js';
 import { splitResponseIntoBursts, stripSplitDelimiters, sleep } from '../utils/message-split.js';
 
@@ -43,9 +44,21 @@ export async function handleTextMessage(
   const whatsappJid = stripDeviceSuffix(msg.key.remoteJid!);
   const conversationType = isGroupChat(whatsappJid) ? 'group' : 'private';
   const saveOnly = options?.saveOnly ?? false;
+  // The name of the *conversation*: the contact's own pushName in a private
+  // chat, the group's subject in a group. Never a participant's name — in a
+  // group that would rename the whole conversation after whoever spoke last.
+  const profileName =
+    conversationType === 'group' ? await getGroupSubject(sock, whatsappJid) : getPushName(msg);
   const isGroupAdmin = options?.isGroupAdmin;
   const phone = options?.phone;
   const whatsappLid = options?.whatsappLid;
+  // Group participant as a phone JID, so the same human is recorded under one
+  // stable identity regardless of LID-vs-PN addressing. Private chats have no
+  // participant.
+  const senderJid =
+    conversationType === 'group'
+      ? await resolveParticipantJid(sock, msg.key.participant, msg.key.participantAlt)
+      : undefined;
 
   // Save-only mode: persist message to history without generating a response
   if (saveOnly) {
@@ -53,8 +66,9 @@ export async function handleTextMessage(
     try {
       await sendMessageToAI(whatsappJid, text, {
         conversationType,
-        senderJid: msg.key.participant ?? undefined,
+        senderJid,
         senderName: getSenderName(msg),
+        profileName,
         messageId: msg.key.id ?? undefined,
         saveOnly: true,
         phone,
@@ -77,8 +91,9 @@ export async function handleTextMessage(
   try {
     const response = await sendMessageToAI(whatsappJid, text, {
       conversationType,
-      senderJid: msg.key.participant ?? undefined,
+      senderJid,
       senderName: getSenderName(msg),
+      profileName,
       messageId: msg.key.id ?? undefined,
       isGroupAdmin,
       phone,

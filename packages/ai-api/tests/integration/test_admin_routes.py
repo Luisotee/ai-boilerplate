@@ -357,6 +357,112 @@ class TestSettings:
     @patch("ai_api.main.init_db")
     @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
     @patch("ai_api.main.cleanup_expired_documents")
+    async def test_patch_bot_name_invalid_rejected(self, *_):
+        cases = [
+            ("", "non-empty"),
+            ("   ", "non-empty"),
+            ("x" * 101, "too long"),
+            ("Bot\nUser: hi", "single line"),
+        ]
+        app = _app_with_db(_make_mock_db())
+        try:
+            async with _client(app) as client:
+                for value, detail in cases:
+                    resp = await client.patch(
+                        "/admin/settings",
+                        json={"overrides": {"bot_name": value}},
+                        headers=AUTH_HEADERS,
+                    )
+                    assert resp.status_code == 400, value
+                    assert detail in resp.json()["detail"]
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_patch_bot_name_accepted(self, *_):
+        app = _app_with_db(_make_mock_db())
+        try:
+            with (
+                patch("ai_api.routes.admin.set_setting_overrides_batch") as mock_batch,
+                patch(
+                    "ai_api.routes.admin.get_setting_overrides",
+                    return_value={"bot_name": '"Jarvis"'},
+                ),
+            ):
+                async with _client(app) as client:
+                    resp = await client.patch(
+                        "/admin/settings",
+                        json={"overrides": {"bot_name": "Jarvis"}},
+                        headers=AUTH_HEADERS,
+                    )
+            assert resp.status_code == 200
+            assert mock_batch.call_args.args[1] == {"bot_name": '"Jarvis"'}
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_patch_deepseek_model_accepted(self, *_):
+        app = _app_with_db(_make_mock_db())
+        try:
+            with (
+                patch("ai_api.routes.admin.set_setting_overrides_batch") as mock_batch,
+                patch(
+                    "ai_api.routes.admin.get_setting_overrides",
+                    return_value={"deepseek_model": '"deepseek-v4-pro"'},
+                ),
+            ):
+                async with _client(app) as client:
+                    resp = await client.patch(
+                        "/admin/settings",
+                        json={"overrides": {"deepseek_model": "deepseek-v4-pro"}},
+                        headers=AUTH_HEADERS,
+                    )
+            assert resp.status_code == 200
+            assert mock_batch.call_args.args[1] == {"deepseek_model": '"deepseek-v4-pro"'}
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_patch_deepseek_model_empty_rejected(self, *_):
+        app = _app_with_db(_make_mock_db())
+        try:
+            async with _client(app) as client:
+                resp = await client.patch(
+                    "/admin/settings",
+                    json={"overrides": {"deepseek_model": "   "}},
+                    headers=AUTH_HEADERS,
+                )
+            assert resp.status_code == 400
+            assert resp.json()["detail"] == "deepseek_model must be a non-empty string"
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_patch_deepseek_model_too_long_rejected(self, *_):
+        app = _app_with_db(_make_mock_db())
+        try:
+            async with _client(app) as client:
+                resp = await client.patch(
+                    "/admin/settings",
+                    json={"overrides": {"deepseek_model": "x" * 201}},
+                    headers=AUTH_HEADERS,
+                )
+            assert resp.status_code == 400
+            assert resp.json()["detail"] == "deepseek_model is too long (max 200 characters)"
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
     async def test_patch_empty_overrides_rejected(self, *_):
         app = _app_with_db(_make_mock_db())
         try:
@@ -609,7 +715,14 @@ class TestConversationViewer:
     @patch("ai_api.main.cleanup_expired_documents")
     async def test_list_users(self, *_):
         mock_db = _make_mock_db()
-        user = make_user("5511999999999@s.whatsapp.net", name="Alice")
+        # A LID-addressed row whose phone was already resolved at ingestion: the
+        # dashboard must receive the phone, not just the opaque LID.
+        user = make_user(
+            "109994229891095@lid",
+            name="Alice",
+            phone="+5511999999999",
+            whatsapp_lid="109994229891095@lid",
+        )
         last = datetime(2026, 5, 25, tzinfo=UTC)
         mock_db.query.return_value.count.return_value = 1
         chain = mock_db.query.return_value.outerjoin.return_value.group_by.return_value
@@ -625,6 +738,8 @@ class TestConversationViewer:
             assert data["total"] == 1
             assert data["users"][0]["name"] == "Alice"
             assert data["users"][0]["message_count"] == 5
+            assert data["users"][0]["phone"] == "+5511999999999"
+            assert data["users"][0]["whatsapp_lid"] == "109994229891095@lid"
         finally:
             _cleanup()
 
@@ -700,6 +815,14 @@ def _patch_wa_client(status_payload=None, raises=None):
     returns status_payload (or raises)."""
     client = MagicMock()
     client.get_whatsapp_status = AsyncMock(return_value=status_payload, side_effect=raises)
+    return patch("ai_api.routes.admin.create_whatsapp_client", return_value=client)
+
+
+def _patch_wa_client_logout(result=None, raises=None):
+    """Patch create_whatsapp_client to return a client whose logout_whatsapp
+    returns result (or raises)."""
+    client = MagicMock()
+    client.logout_whatsapp = AsyncMock(return_value=result, side_effect=raises)
     return patch("ai_api.routes.admin.create_whatsapp_client", return_value=client)
 
 
@@ -795,6 +918,77 @@ class TestWhatsAppQr:
             _cleanup()
 
 
+class TestWhatsAppLogout:
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_success(self, *_):
+        from ai_api.whatsapp.client import SuccessResponse
+
+        app = _app_with_db(_make_mock_db())
+        try:
+            with _patch_wa_client_logout(SuccessResponse(success=True)):
+                async with _client(app) as client:
+                    resp = await client.post("/admin/whatsapp/logout", headers=AUTH_HEADERS)
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["success"] is True
+            assert "detail" in data
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_unreachable_client_returns_503(self, *_):
+        # Unlike the passive QR poll (which degrades to a 200 "unavailable" body),
+        # logout is an explicit action: an unreachable Baileys client must surface 503.
+        app = _app_with_db(_make_mock_db())
+        try:
+            with _patch_wa_client_logout(raises=ConnectError("connection refused")):
+                async with _client(app) as client:
+                    resp = await client.post("/admin/whatsapp/logout", headers=AUTH_HEADERS)
+            assert resp.status_code == 503
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_client_error_returns_502(self, *_):
+        # Reachable but the Node client returned an error status (WhatsAppClientError)
+        # — distinct from an unreachable transport error. Surfaces as 502, not 503, so
+        # an operator can tell an upstream failure from a networking one.
+        from ai_api.whatsapp import WhatsAppClientError
+
+        app = _app_with_db(_make_mock_db())
+        try:
+            with _patch_wa_client_logout(raises=WhatsAppClientError("boom", status_code=500)):
+                async with _client(app) as client:
+                    resp = await client.post("/admin/whatsapp/logout", headers=AUTH_HEADERS)
+            assert resp.status_code == 502
+            assert "boom" in resp.json()["detail"]
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_reported_failure_returns_502(self, *_):
+        # Reachable and 2xx, but the client reports success=False: don't pretend it
+        # worked with a 200 — surface it as a bad-gateway.
+        from ai_api.whatsapp.client import SuccessResponse
+
+        app = _app_with_db(_make_mock_db())
+        try:
+            with _patch_wa_client_logout(SuccessResponse(success=False)):
+                async with _client(app) as client:
+                    resp = await client.post("/admin/whatsapp/logout", headers=AUTH_HEADERS)
+            assert resp.status_code == 502
+        finally:
+            _cleanup()
+
+
 # ---------------------------------------------------------------------------
 # Auth
 # ---------------------------------------------------------------------------
@@ -820,3 +1014,76 @@ async def test_whatsapp_qr_requires_auth(*_):
     async with _client(app) as client:
         resp = await client.get("/admin/whatsapp/qr")
     assert resp.status_code == 401
+
+
+@patch("ai_api.main.init_db")
+@patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+@patch("ai_api.main.cleanup_expired_documents")
+async def test_whatsapp_logout_requires_auth(*_):
+    from ai_api.main import app
+
+    async with _client(app) as client:
+        resp = await client.post("/admin/whatsapp/logout")
+    assert resp.status_code == 401
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_patch_whitelist_empty_rejected(self, *_):
+        """An empty whitelist means "allow everyone", and the stored override
+        shadows the env value across restarts — so clearing a dashboard field to
+        "revert to default" would silently disable the gate for good."""
+        app = _app_with_db(_make_mock_db())
+        try:
+            async with _client(app) as client:
+                for value in ("", "   ", ",", " , , "):
+                    resp = await client.patch(
+                        "/admin/settings",
+                        json={"overrides": {"whitelist_phones": value}},
+                        headers=AUTH_HEADERS,
+                    )
+                    assert resp.status_code == 400, value
+                    assert "DELETE /admin/settings/whitelist_phones" in resp.json()["detail"]
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_patch_whitelist_too_long_rejected(self, *_):
+        app = _app_with_db(_make_mock_db())
+        try:
+            async with _client(app) as client:
+                resp = await client.patch(
+                    "/admin/settings",
+                    json={"overrides": {"whitelist_phones": "4915755945319," * 400}},
+                    headers=AUTH_HEADERS,
+                )
+            assert resp.status_code == 400
+            assert "too long" in resp.json()["detail"]
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_patch_whitelist_accepted(self, *_):
+        app = _app_with_db(_make_mock_db())
+        try:
+            with (
+                patch("ai_api.routes.admin.set_setting_overrides_batch") as mock_batch,
+                patch(
+                    "ai_api.routes.admin.get_setting_overrides",
+                    return_value={"whitelist_phones": '"4915755945319"'},
+                ),
+            ):
+                async with _client(app) as client:
+                    resp = await client.patch(
+                        "/admin/settings",
+                        json={"overrides": {"whitelist_phones": "4915755945319"}},
+                        headers=AUTH_HEADERS,
+                    )
+            assert resp.status_code == 200
+            mock_batch.assert_called_once()
+        finally:
+            _cleanup()

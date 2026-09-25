@@ -1,11 +1,15 @@
 """
-Queue package for arq-based message processing.
+Redis job-state package.
 
-This package provides:
-- Redis connection management
-- arq worker functions
-- Job status tracking and chunk storage utilities
-- Queue-specific Pydantic schemas
+Message and PDF processing live in `streams/` (Redis Streams). What remains here
+is the shared Redis plumbing that outlived the retired arq worker (the `arq`
+dependency itself is gone):
+
+- Redis connection management (`connection.py`) — the process-wide client used
+  by the API lifespan and readiness probe, plus the standalone client used for
+  direct key operations
+- Job status tracking and response-chunk storage (`utils.py`)
+- Job/response Pydantic schemas (`schemas.py`)
 """
 
 from .connection import create_arq_pool, get_arq_redis

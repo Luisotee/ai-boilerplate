@@ -1,15 +1,32 @@
-import type { WAMessage } from '@whiskeysockets/baileys';
-import { extractPhoneFromJid } from './jid.js';
+import type { GroupParticipant, WAMessage, WAMessageKey } from '@whiskeysockets/baileys';
+import { extractPhoneFromJid, phoneFromJid, stripDeviceSuffix } from './jid.js';
 import { logger } from '../logger.js';
 
 /**
- * Get sender name from message
+ * The display name the sender actually publishes, or undefined.
+ *
+ * Deliberately has NO identifier fallback: under v7 LID addressing the JID's
+ * local part is an anonymized account id, and storing that as someone's profile
+ * name renders a bare LID as if it were a person. Use this wherever the value
+ * may reach `User.name`; use getSenderName() for message-row labels.
+ */
+export function getPushName(msg: WAMessage): string | undefined {
+  return msg.pushName || msg.verifiedBizName || undefined;
+}
+
+/**
+ * Get sender name from message.
+ *
+ * Always returns something — this labels the message row (group bubbles, the
+ * content prefix), so a last-resort identifier beats an empty string. Prefers
+ * the PN Baileys carries alongside a LID over the LID's meaningless digits.
  */
 export function getSenderName(msg: WAMessage): string {
+  const altPhone = phoneFromJid(
+    stripDeviceSuffix(msg.key.participantAlt || msg.key.remoteJidAlt || '')
+  );
   return (
-    msg.pushName ||
-    msg.verifiedBizName ||
-    extractPhoneFromJid(msg.key.participant || msg.key.remoteJid!)
+    getPushName(msg) ?? altPhone ?? extractPhoneFromJid(msg.key.participant || msg.key.remoteJid!)
   );
 }
 
@@ -64,4 +81,30 @@ export function isReplyToBotMessage(msg: WAMessage, botJid: string, botLid?: str
  */
 export function shouldRespondInGroup(msg: WAMessage, botJid: string, botLid?: string): boolean {
   return isBotMentioned(msg, botJid, botLid) || isReplyToBotMessage(msg, botJid, botLid);
+}
+
+/**
+ * Whether the sender of a group message is an admin/superadmin of that group.
+ *
+ * Matches on every identifier either side carries — the sender's
+ * `key.participant` / `key.participantAlt` against each participant's `id`,
+ * `lid` and `phoneNumber` — because the sender may be LID-addressed while the
+ * group metadata lists the phone JID (or vice versa). The AI API refuses admin
+ * commands on anything but an explicit `true`, so a format mismatch would lock
+ * a real admin out.
+ */
+export function isSenderGroupAdmin(
+  participants: GroupParticipant[],
+  key: Pick<WAMessageKey, 'participant' | 'participantAlt'>
+): boolean {
+  const senderIds = new Set(
+    [key.participant, key.participantAlt]
+      .filter((j): j is string => Boolean(j))
+      .map(stripDeviceSuffix)
+  );
+  if (senderIds.size === 0) return false;
+  const participant = participants.find((p) =>
+    [p.id, p.lid, p.phoneNumber].some((j) => j && senderIds.has(stripDeviceSuffix(j)))
+  );
+  return participant?.admin === 'admin' || participant?.admin === 'superadmin';
 }

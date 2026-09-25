@@ -18,6 +18,16 @@ os.environ.setdefault("GEMINI_API_KEY", "test-key-placeholder")
 os.environ.setdefault("AI_API_KEY", "test-api-key")
 os.environ.setdefault("WHATSAPP_API_KEY", "test-wa-key")
 os.environ.setdefault("REDIS_HOST", "localhost")
+# Force Logfire off in tests. Hard assignment, not setdefault: a developer (or CI)
+# with a real LOGFIRE_TOKEN exported must not ship telemetry from a test run.
+# setup_instrumentation() returns early on a falsy token, so this is the live guard.
+# (LOGFIRE_SEND_TO_LOGFIRE has no effect here — instrument.py passes
+# send_to_logfire as an explicit kwarg, which short-circuits the env lookup.)
+os.environ["LOGFIRE_TOKEN"] = ""
+# Same for DeepSeek: model_chain builds its provider at import when the key is set,
+# so a developer's real DEEPSEEK_API_KEY must not reach tests (they install their
+# own provider where they need one). Empty -> falsy -> Gemini-only chain.
+os.environ["DEEPSEEK_API_KEY"] = ""
 
 # Patch create_engine at the sqlalchemy level BEFORE database.py is imported.
 # This prevents actual DB connection attempts while accepting all pool args.

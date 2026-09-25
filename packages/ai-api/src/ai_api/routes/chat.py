@@ -9,16 +9,19 @@ from sqlalchemy.orm import Session
 from starlette.requests import Request
 
 from ..agent import AgentDeps, format_message_history, get_ai_response
-from ..commands import is_command, parse_and_execute, strip_leading_mentions
+from ..agent.model_chain import MODEL_ERRORS
+from ..commands import is_command, normalize_command, parse_and_execute
 from ..config import get_whatsapp_api_key, get_whatsapp_client_url, settings
 from ..database import (
     get_conversation_history,
     get_db,
     get_or_create_user,
+    is_group_jid,
     save_message,
 )
 from ..deps import UPLOAD_DIR, limiter
 from ..embeddings import create_embedding_service
+from ..formatting import markdown_to_whatsapp
 from ..kb_models import KnowledgeBaseDocument
 from ..logger import logger
 from ..queue.connection import get_redis_client
@@ -29,8 +32,10 @@ from ..schemas import (
     ChatRequest,
     ChatResponse,
     CommandResponse,
+    LinkPhoneRequest,
     SaveMessageRequest,
 )
+from ..services.autolink import try_autolink
 from ..services.link import (
     consume_link_code,
     generate_link_code,
@@ -40,30 +45,102 @@ from ..services.link import (
 )
 from ..streams.manager import add_message_to_stream
 from ..whatsapp import create_whatsapp_client
+from ..whitelist import Whitelist, is_whitelisted, parse_whitelist
 
 router = APIRouter()
 
 
 @functools.lru_cache(maxsize=1)
-def _parse_whitelist(raw: str) -> frozenset[str]:
-    """Parse the comma-separated whitelist into a set. Cached by the raw string,
-    so hot paths don't re-parse on every message — the cache misses only when
-    runtime_config.get("whitelist_phones") returns a new value."""
-    return frozenset(p.strip() for p in raw.split(",") if p.strip())
+def _parse_whitelist(raw: str) -> Whitelist:
+    """Parse the comma-separated whitelist, cached by the raw string.
+
+    Hot paths don't re-parse on every message — the cache misses only when
+    runtime_config.get("whitelist_phones") returns a new value. (lru_cache keys
+    on the argument; the NamedTuple return needs no hashability.)
+    """
+    return parse_whitelist(raw)
 
 
-def _is_whitelisted(whatsapp_jid: str) -> bool:
-    """Check if a JID is whitelisted. Returns True if whitelist is empty (disabled).
+def _display_name(request: ChatRequest | SaveMessageRequest) -> str | None:
+    """Display name for the conversation itself (contact or group), or None.
+
+    In a private chat the sender *is* the conversation, so a legacy client's
+    `sender_name` is a valid fallback — `_clean_profile_name` scrubs it if that
+    client filled it with an identifier rather than a real name.
+    """
+    if request.profile_name:
+        return request.profile_name
+    if request.conversation_type == "group":
+        # Legacy clients only send `sender_name`, which in a group is the
+        # *participant* — never the group. Better nameless than mislabelled.
+        return None
+    return request.sender_name
+
+
+def _is_whitelisted(whatsapp_jid: str, phone: str | None = None) -> bool:
+    """Check if a conversation is whitelisted. True if the whitelist is empty.
 
     Reads the (overridable) whitelist via runtime_config so /admin changes take
     effect without a restart.
+
+    `whatsapp_jid` is the CONVERSATION's jid and `phone` its E.164 number if the
+    client could resolve one — never a group participant's. The `phone` argument
+    is never consulted for a group jid, so a participant's whitelisted phone can
+    never admit the whole group. See ai_api.whitelist for the full contract.
+
+    The phone clause is what makes a bare-phone entry work at all for a
+    LID-addressed WhatsApp chat, whose jid digits are an anonymized account id
+    rather than a phone number.
+
+    GROUP_GATING=membership: every group JID (WhatsApp `@g.us` or Telegram
+    `tg:-…`) is admitted here, because group scope then depends on who is IN
+    the group — which only the chat client can see (Baileys checks the
+    participant list; Telegram cannot enumerate members at all). The client is
+    authoritative for groups in that mode; this layer still enforces 1:1 chats.
+    In the default `jid` mode groups are matched like any other chat id.
     """
     raw = runtime_config.get("whitelist_phones")
-    whitelist = _parse_whitelist(raw) if raw else frozenset()
-    if not whitelist:
+    if not raw:
         return True
-    phone = whatsapp_jid.split("@")[0]
-    return phone in whitelist or whatsapp_jid in whitelist
+    if settings.group_gating == "membership" and is_group_jid(whatsapp_jid):
+        return True
+    return is_whitelisted(_parse_whitelist(raw), whatsapp_jid, phone)
+
+
+@router.post("/chat/link-phone", response_model=CommandResponse, tags=["Chat"])
+@limiter.limit(f"{settings.rate_limit_expensive}/minute")
+async def link_phone(
+    request: Request, link_request: LinkPhoneRequest, db: Session = Depends(get_db)
+):
+    """Auto-link a Telegram account to a WhatsApp one via a shared phone number.
+
+    Called by the Telegram client when a user taps the `request_contact`
+    keyboard button (`/linkphone`). Every authorization rule — including the
+    `contact_user_id == sender_user_id` anti-hijack check — lives in
+    `services.autolink`; this route only gates and resolves the caller's row.
+    """
+    # Reject groups BEFORE touching the DB: under GROUP_GATING=membership
+    # `_is_whitelisted` admits every group JID, and `get_or_create_user` below
+    # would happily resolve — or create — a row for the group.
+    if is_group_jid(link_request.whatsapp_jid):
+        logger.warning(f"Blocked link-phone for a group JID: {link_request.whatsapp_jid}")
+        return CommandResponse(
+            is_command=True, response="Account linking only works in a private chat."
+        )
+
+    if not _is_whitelisted(link_request.whatsapp_jid):
+        logger.warning(f"Blocked non-whitelisted link-phone: {link_request.whatsapp_jid}")
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    user = get_or_create_user(db, link_request.whatsapp_jid, "private")
+    result = try_autolink(
+        db,
+        user,
+        link_request.phone,
+        link_request.contact_user_id,
+        link_request.sender_user_id,
+    )
+    return CommandResponse(is_command=True, response=result.message or "")
 
 
 async def get_stream_job_status(redis, job_id: str) -> str:
@@ -111,7 +188,7 @@ async def save_message_only(request: SaveMessageRequest, db: Session = Depends(g
     """
     logger.info(f"Saving message from {request.whatsapp_jid} (no response)")
 
-    if not _is_whitelisted(request.whatsapp_jid):
+    if not _is_whitelisted(request.whatsapp_jid, request.phone):
         logger.warning(f"Blocked non-whitelisted JID: {request.whatsapp_jid}")
         raise HTTPException(status_code=403, detail="Not authorized")
 
@@ -144,6 +221,7 @@ async def save_message_only(request: SaveMessageRequest, db: Session = Depends(g
             embedding=user_embedding,
             phone=request.phone,
             whatsapp_lid=request.whatsapp_lid,
+            name=_display_name(request),
         )
 
         return {"success": True}
@@ -204,7 +282,7 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
         f"Received request from {chat_request.whatsapp_jid}: {chat_request.message[:50]}... (has_image={has_image})"
     )
 
-    if not _is_whitelisted(chat_request.whatsapp_jid):
+    if not _is_whitelisted(chat_request.whatsapp_jid, chat_request.phone):
         logger.warning(f"Blocked non-whitelisted JID: {chat_request.whatsapp_jid}")
         raise HTTPException(status_code=403, detail="Not authorized")
 
@@ -216,11 +294,12 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
             chat_request.conversation_type,
             phone=chat_request.phone,
             whatsapp_lid=chat_request.whatsapp_lid,
+            name=_display_name(chat_request),
         )
 
         # /link and /unlink need an async Redis client, so they're handled
         # here rather than inside the sync `parse_and_execute`.
-        cleaned_message = strip_leading_mentions(chat_request.message)
+        cleaned_message = normalize_command(chat_request.message)
         link_parts = cleaned_message.split()
         link_command = link_parts[0].lower() if link_parts else ""
 
@@ -273,6 +352,11 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
                         f"On {other}, send `/link {code}` within 10 minutes.\n\n"
                         "Note: any prior conversation history on the other platform will be discarded."
                     )
+                    if platform == "telegram":
+                        response_text += (
+                            "\n\nTip: on Telegram you can also send `/linkphone` and share "
+                            "your number instead of using a code."
+                        )
             logger.info(f"Command executed for {chat_request.whatsapp_jid}: {link_command}")
             return CommandResponse(is_command=True, response=response_text)
 
@@ -324,6 +408,7 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
             chat_request.conversation_type,
             phone=chat_request.phone,
             whatsapp_lid=chat_request.whatsapp_lid,
+            name=_display_name(chat_request),
         )
 
         # Generate embedding for user message
@@ -351,6 +436,7 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
             embedding=user_embedding,
             phone=chat_request.phone,
             whatsapp_lid=chat_request.whatsapp_lid,
+            name=_display_name(chat_request),
         )
 
         # Add message to user's Redis Stream for sequential processing
@@ -428,7 +514,7 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
                     original_filename=chat_request.document_filename,
                     file_size_bytes=file_size,
                     mime_type=chat_request.document_mimetype,
-                    status="pending",
+                    status="queued",
                     whatsapp_jid=chat_request.whatsapp_jid,
                     expires_at=expires_at,
                     is_conversation_scoped=True,
@@ -487,7 +573,7 @@ async def get_job_status(request: Request, job_id: str):
     """
     try:
         async with get_redis_client() as redis_client:
-            # Infer status from Redis data (no arq)
+            # Infer status from Redis data (job metadata + chunks)
             status = await get_stream_job_status(redis_client, job_id)
 
             # Get chunks
@@ -539,7 +625,7 @@ async def chat(request: Request, chat_request: ChatRequest, db: Session = Depend
     """
     logger.info(f"Received chat request from {chat_request.whatsapp_jid}")
 
-    if not _is_whitelisted(chat_request.whatsapp_jid):
+    if not _is_whitelisted(chat_request.whatsapp_jid, chat_request.phone):
         logger.warning(f"Blocked non-whitelisted JID: {chat_request.whatsapp_jid}")
         raise HTTPException(status_code=403, detail="Not authorized")
 
@@ -582,6 +668,7 @@ async def chat(request: Request, chat_request: ChatRequest, db: Session = Depend
             embedding=user_embedding,
             phone=chat_request.phone,
             whatsapp_lid=chat_request.whatsapp_lid,
+            name=_display_name(chat_request),
         )
 
         # Prepare agent dependencies for semantic search tool (dependency injection)
@@ -591,6 +678,7 @@ async def chat(request: Request, chat_request: ChatRequest, db: Session = Depend
             chat_request.conversation_type,
             phone=chat_request.phone,
             whatsapp_lid=chat_request.whatsapp_lid,
+            name=_display_name(chat_request),
         )
 
         # Initialize embedding service following Pydantic AI best practices
@@ -614,12 +702,15 @@ async def chat(request: Request, chat_request: ChatRequest, db: Session = Depend
                 http_client=http_client,
                 whatsapp_client=whatsapp_client,
                 current_message_id=chat_request.whatsapp_message_id,
+                client_id=chat_request.client_id,
             )
 
             # Get AI response (using formatted content) - consume stream into complete response
             ai_response = ""
             async for token in get_ai_response(content, message_history, agent_deps=agent_deps):
                 ai_response += token
+            # Same backstop as streams/processor.py: the model drifts into Markdown.
+            ai_response = markdown_to_whatsapp(ai_response)
 
         # Generate embedding for assistant response using embedding service
         assistant_embedding = None
@@ -641,6 +732,13 @@ async def chat(request: Request, chat_request: ChatRequest, db: Session = Depend
 
         return ChatResponse(response=ai_response)
 
+    except MODEL_ERRORS as e:
+        # Same classification as streams/processor.py: the model chain failed
+        # (transient provider outage, both DeepSeek and Gemini down, exhausted
+        # retries). 503 tells the caller it is retryable; nothing is saved as the
+        # assistant turn and no provider detail leaks into the response.
+        logger.error(f"AI model error in /chat: {e}", exc_info=True)
+        raise HTTPException(status_code=503, detail="AI model temporarily unavailable") from e
     except Exception as e:
         logger.error(f"Error processing chat: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")

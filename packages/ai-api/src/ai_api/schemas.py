@@ -12,6 +12,10 @@ class ChatRequest(BaseModel):
     )
     sender_jid: str | None = Field(None, description="Sender JID in group chats")
     sender_name: str | None = Field(None, description="Sender name in group chats")
+    profile_name: str | None = Field(
+        None,
+        description="Display name of the conversation (contact's pushName, or group subject)",
+    )
     whatsapp_message_id: str | None = Field(None, description="WhatsApp message ID for reactions")
     image_data: str | None = Field(None, description="Base64-encoded image data for vision")
     image_mimetype: str | None = Field(None, description="Image MIME type (e.g., image/jpeg)")
@@ -45,6 +49,10 @@ class SaveMessageRequest(BaseModel):
     )
     sender_jid: str | None = Field(None, description="Sender JID in group chats")
     sender_name: str | None = Field(None, description="Sender name in group chats")
+    profile_name: str | None = Field(
+        None,
+        description="Display name of the conversation (contact's pushName, or group subject)",
+    )
     whatsapp_message_id: str | None = Field(None, description="WhatsApp message ID for reactions")
     phone: str | None = Field(None, description="E.164 phone number (e.g., +5491126726818)")
     whatsapp_lid: str | None = Field(None, description="WhatsApp LID if known")
@@ -106,6 +114,25 @@ class CommandResponse(BaseModel):
 
     is_command: bool = Field(True, description="Always true for command responses")
     response: str = Field(..., description="Command result message")
+
+
+class LinkPhoneRequest(BaseModel):
+    """Telegram phone-sharing auto-link request (POST /chat/link-phone).
+
+    `contact_user_id` is the `user_id` on the shared `Contact`, and
+    `sender_user_id` is `ctx.from.id`. The server requires them to be equal —
+    a user can share anyone's contact card, and a card for someone else carries
+    that person's id, so this is what shows the phone belongs to the sender.
+    """
+
+    whatsapp_jid: str = Field(..., description="Telegram JID of the caller (tg:<chat_id>)")
+    phone: str | None = Field(None, description="Phone number from the shared contact")
+    contact_user_id: int | None = Field(
+        None, description="Telegram user_id carried on the shared contact card"
+    )
+    sender_user_id: int | None = Field(
+        None, description="Telegram user_id of the sender (ctx.from.id)"
+    )
 
 
 class PreferencesResponse(BaseModel):
@@ -179,6 +206,8 @@ class UserSummary(BaseModel):
 
     whatsapp_jid: str
     name: str | None = None
+    phone: str | None = None
+    whatsapp_lid: str | None = None
     conversation_type: str
     message_count: int
     last_message_at: datetime | None = None
@@ -229,3 +258,10 @@ class WhatsAppStatusResponse(BaseModel):
     connected: bool = Field(..., description="True when the session is linked")
     qr: str | None = Field(None, description="Raw pairing QR payload; present only while 'qr'")
     qr_generated_at: str | None = Field(None, description="ISO timestamp the QR was issued")
+
+
+class WhatsAppLogoutResponse(BaseModel):
+    """Result of forcing a Baileys logout / re-pair."""
+
+    success: bool = Field(..., description="True when the logout + re-init completed")
+    detail: str = Field(..., description="Human-readable status message")

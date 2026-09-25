@@ -66,4 +66,18 @@ describe('passesWhitelist (Telegram)', () => {
     expect(passesWhitelist(-1009999999999)).toBe(false);
     expect(passesWhitelist(99)).toBe(false);
   });
+
+  // A phone-shaped entry lives in a separate set that the Telegram path never
+  // consults, so it can never admit a chat whose id happens to have the same
+  // digits. Mirrors test_bare_chat_id_does_not_match_tg_jid in the AI API.
+  it('does NOT allow a chat from a bare number with the same digits', async () => {
+    const passesWhitelist = await loadInternalsWithWhitelist('123456789');
+    expect(passesWhitelist(123456789)).toBe(false);
+  });
+
+  it('keeps phone and tg: entries separate in a mixed whitelist', async () => {
+    const passesWhitelist = await loadInternalsWithWhitelist('4915755945319, tg:42');
+    expect(passesWhitelist(42)).toBe(true);
+    expect(passesWhitelist(4915755945319)).toBe(false);
+  });
 });

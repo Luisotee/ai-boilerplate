@@ -41,7 +41,7 @@ vi.mock('../../src/config.js', () => ({
       graphApiVersion: 'v21.0',
       graphApiBaseUrl: 'https://graph.facebook.com',
     },
-    whitelistPhones: new Set<string>(),
+    whitelistPhones: { ids: new Set<string>(), phones: new Set<string>(), size: 0 },
     aiApiUrl: 'http://localhost:8000',
     aiApiKey: 'test-key',
     logLevel: 'silent',

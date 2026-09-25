@@ -14,6 +14,8 @@ Tests cover:
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from ai_api.commands import (
     ADMIN_ONLY_COMMANDS,
     LANGUAGE_NAMES,
@@ -24,7 +26,9 @@ from ai_api.commands import (
     format_settings,
     handle_clean_command,
     is_command,
+    normalize_command,
     parse_and_execute,
+    strip_command_suffix,
     strip_leading_mentions,
 )
 
@@ -580,6 +584,90 @@ class TestParseAndExecuteClean:
                 is_group_admin=True,
             )
             mock_handle.assert_called_once()
+
+
+class TestGroupAdminFailsClosed:
+    """Admin-only commands in groups require an EXPLICIT is_group_admin=True.
+
+    Regression: the guard used to be `is_group_admin is False`, so a client that
+    omitted the field (the Telegram client never sent it) let any member run
+    `/clean all` on the group."""
+
+    @pytest.mark.parametrize("is_admin", [None, False])
+    @pytest.mark.parametrize(
+        "message", ["/clean all", "/tts on", "/stt lang en", "/settings", "/memories clear"]
+    )
+    def test_refused_unless_explicitly_admin(self, message, is_admin):
+        with patch("ai_api.commands.handle_clean_command") as mock_clean:
+            db = MagicMock()
+            result = parse_and_execute(
+                db,
+                "user-123",
+                "tg:-1001234567890",
+                message,
+                conversation_type="group",
+                is_group_admin=is_admin,
+            )
+        assert result.is_command is True
+        assert "Only group admins" in result.response_text
+        mock_clean.assert_not_called()
+        db.commit.assert_not_called()
+
+    def test_omitted_field_refused(self):
+        db = MagicMock()
+        result = parse_and_execute(
+            db, "user-123", "group@g.us", "/clean all", conversation_type="group"
+        )
+        assert "Only group admins" in result.response_text
+
+    def test_help_stays_unrestricted_in_groups(self):
+        result = parse_and_execute(
+            MagicMock(), "user-123", "group@g.us", "/help", conversation_type="group"
+        )
+        assert "Only group admins" not in result.response_text
+
+    def test_private_chat_needs_no_admin_flag(self):
+        with patch("ai_api.commands.handle_clean_command", return_value="ok") as mock_clean:
+            parse_and_execute(MagicMock(), "user-123", "123@s.whatsapp.net", "/clean")
+        mock_clean.assert_called_once()
+
+    def test_telegram_command_suffix_still_gated(self):
+        """`/clean@MyBot all` normalizes to `/clean all` and is gated the same."""
+        result = parse_and_execute(
+            MagicMock(),
+            "user-123",
+            "tg:-1001234567890",
+            "/clean@MyBot all",
+            conversation_type="group",
+            is_group_admin=None,
+        )
+        assert "Only group admins" in result.response_text
+
+
+class TestNormalizeCommand:
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("/settings@MyBot", "/settings"),
+            ("/tts@MyBot on", "/tts on"),
+            ("@MyBot /clean@MyBot data", "/clean data"),
+            ("/tts lang pt", "/tts lang pt"),
+            ("email me @someone", "email me @someone"),
+            ("hello", "hello"),
+        ],
+    )
+    def test_normalize(self, raw, expected):
+        assert normalize_command(raw) == expected
+
+    def test_strip_command_suffix_only_touches_command_token(self):
+        assert strip_command_suffix("/link@Bot 123456") == "/link 123456"
+        assert strip_command_suffix("not /a@command") == "not /a@command"
+
+    def test_suffixed_command_dispatches(self):
+        with patch("ai_api.commands.handle_clean_command", return_value="ok") as mock_clean:
+            db = MagicMock()
+            parse_and_execute(db, "user-123", "tg:123", "/clean@MyBot data")
+        mock_clean.assert_called_once_with(db, "user-123", "tg:123", level="data")
 
 
 class TestParseAndExecuteMemoriesClear:

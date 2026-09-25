@@ -55,7 +55,20 @@ REGISTRY: tuple[SettingSpec, ...] = (
         "str",
         True,
         "access",
-        "Comma-separated allowed phone numbers / group JIDs (empty = all allowed).",
+        "Comma-separated allowed entries, each matched as either a phone number "
+        "(4915755945319, +49 157 5594 5319, 4915755945319@s.whatsapp.net) or a "
+        "verbatim chat id (120363...@g.us, ...@lid, tg:123). Empty = all allowed.",
+    ),
+    SettingSpec(
+        "group_gating",
+        "str",
+        False,
+        "access",
+        "How a group gets in scope when the whitelist is set: 'jid' = the group's "
+        "own id must be listed; 'membership' = the chat client decides (Baileys: "
+        "the group has a whitelisted member; Telegram: any group) and only "
+        "whitelisted senders get replies. Shared with the TS clients; restart all.",
+        choices=("jid", "membership"),
     ),
     # --- Hot: conversation behaviour ---
     SettingSpec(
@@ -71,6 +84,23 @@ REGISTRY: tuple[SettingSpec, ...] = (
         True,
         "conversation",
         "Number of history messages loaded for group chats.",
+    ),
+    SettingSpec(
+        "bot_name",
+        "str",
+        True,
+        "conversation",
+        "Label for the bot's own messages in transcripts the agent reads back (get_chat_history).",
+    ),
+    SettingSpec(
+        "shared_group_tools_enabled",
+        "bool",
+        True,
+        "conversation",
+        "Let users, in a private chat, read (get_group_context) and post into "
+        "(send_group_message) groups they share with the bot. Sends group "
+        "transcripts to the LLM provider in private-chat context. Baileys and "
+        "Telegram only.",
     ),
     SettingSpec(
         "core_memory_max_length",
@@ -152,8 +182,26 @@ REGISTRY: tuple[SettingSpec, ...] = (
         "str",
         True,
         "model",
-        "Primary Gemini model name (e.g. gemini-2.5-flash). Free-form string; "
+        "Gemini model name (e.g. gemini-3.1-flash-lite) — the fallback when "
+        "DEEPSEEK_API_KEY is set, otherwise the only model. Free-form string; "
         "takes effect on the next message (≤ ~10s in the stream worker).",
+    ),
+    SettingSpec(
+        "deepseek_model",
+        "str",
+        True,
+        "model",
+        "DeepSeek primary model name (e.g. deepseek-flash), used only when "
+        "DEEPSEEK_API_KEY is set. deepseek-v4-pro takes no image input — image "
+        "messages would fail over to Gemini. Takes effect on the next message.",
+    ),
+    SettingSpec(
+        "deepseek_timeout_seconds",
+        "float",
+        False,
+        "model",
+        "Seconds DeepSeek may take to start answering (and max gap between chunks) "
+        "before falling back to Gemini (applied at startup).",
     ),
     # --- Hot: speech ---
     SettingSpec(
@@ -220,8 +268,46 @@ REGISTRY: tuple[SettingSpec, ...] = (
         "PostgreSQL connection string (applied at startup).",
         secret=True,
     ),
+    SettingSpec(
+        "kb_max_concurrent_processing",
+        "int",
+        False,
+        "knowledge_base",
+        "PDFs parsed at once per stream worker (read when the worker starts). "
+        "Keep low with Docling: each parse can take 1-2 GB of RAM.",
+    ),
+    SettingSpec(
+        "kb_max_pdf_retries",
+        "int",
+        False,
+        "knowledge_base",
+        "Retries for a PDF job after a timeout/network/429/5xx failure or a worker "
+        "crash mid-parse (applied at startup).",
+    ),
+    SettingSpec(
+        "kb_retry_base_delay_seconds",
+        "int",
+        False,
+        "knowledge_base",
+        "Base PDF retry backoff: base * 4**attempt seconds (applied at startup).",
+    ),
     SettingSpec("redis_host", "str", False, "infra", "Redis host (applied at startup)."),
     SettingSpec("redis_port", "int", False, "infra", "Redis port (applied at startup)."),
+    SettingSpec(
+        "logfire_token",
+        "str",
+        False,
+        "runtime",
+        "Logfire write token; blank disables tracing (applied at startup).",
+        secret=True,
+    ),
+    SettingSpec(
+        "logfire_environment",
+        "str",
+        False,
+        "runtime",
+        "Logfire environment label (applied at startup).",
+    ),
 )
 
 REGISTRY_BY_KEY: dict[str, SettingSpec] = {spec.key: spec for spec in REGISTRY}

@@ -34,6 +34,14 @@ class SuccessResponse:
     success: bool
 
 
+@dataclass
+class SharedGroup:
+    """A group shared by the bot and a requesting user."""
+
+    group_jid: str
+    subject: str
+
+
 class WhatsAppClient:
     """Async HTTP client for WhatsApp REST API."""
 
@@ -107,6 +115,75 @@ class WhatsAppClient:
             message_id=data.get("message_id"),
         )
 
+    async def get_shared_groups(
+        self,
+        jid: str | None = None,
+        lid: str | None = None,
+        phone: str | None = None,
+    ) -> list[SharedGroup]:
+        """
+        List groups shared by the bot and the requesting user (Baileys only).
+
+        At least one identifier must be provided. The identifiers must come from
+        the user's own DB record (never from user-typed text or tool arguments)
+        so a user can only ever see groups they actually belong to. Membership is
+        resolved by the Baileys client on every call.
+
+        Args:
+            jid: Requester JID (e.g. 5511…@s.whatsapp.net or …@lid)
+            lid: Requester LID (e.g. 12345@lid)
+            phone: Requester phone number (E.164)
+
+        Returns:
+            List of SharedGroup (empty if the user shares no groups with the bot)
+
+        Raises:
+            WhatsAppNotConnectedError: If the WhatsApp client is not connected
+            WhatsAppClientError: If membership could not be resolved
+        """
+        payload: dict = {}
+        if jid:
+            payload["jid"] = jid
+        if lid:
+            payload["lid"] = lid
+        if phone:
+            payload["phone"] = phone
+
+        logger.info("Fetching shared groups for requesting user")
+
+        response = await self._client.post(
+            f"{self._base_url}/whatsapp/shared-groups",
+            json=payload,
+            headers=self._get_headers(),
+        )
+        data = await self._handle_response(response)
+        return [
+            SharedGroup(group_jid=g["groupJid"], subject=g["subject"])
+            for g in data.get("groups", [])
+        ]
+
+    async def is_group_member(self, group_jid: str, user_jid: str) -> bool:
+        """
+        Check whether `user_jid` is currently in `group_jid` (Telegram only).
+
+        The Baileys client verifies membership server-side on every
+        `get_shared_groups` call, but Telegram cannot enumerate members, so its
+        shared-group list is derived from stored message authorship — which
+        never expires. This is the live check that keeps a user who was removed
+        from a group from continuing to relay messages into it.
+
+        Raises:
+            WhatsAppClientError: If the check could not be performed. Callers
+                must treat that as "not a member" — never as permission.
+        """
+        response = await self._client.post(
+            f"{self._base_url}/whatsapp/group-member",
+            json={"phoneNumber": group_jid, "userJid": user_jid},
+            headers=self._get_headers(),
+        )
+        data = await self._handle_response(response)
+        return data.get("is_member") is True
+
     async def get_whatsapp_status(self) -> dict:
         """Fetch the Baileys connection status and latest pairing QR.
 
@@ -119,6 +196,21 @@ class WhatsAppClient:
             headers=self._get_headers(),
         )
         return await self._handle_response(response)
+
+    async def logout_whatsapp(self) -> SuccessResponse:
+        """Force-logout the Baileys session and trigger a fresh pairing QR.
+
+        POSTs to ``/whatsapp/logout``. The client unlinks the device, clears the
+        stored creds, and re-initialises the connection; poll
+        ``get_whatsapp_status()`` afterward for the new QR.
+        """
+        logger.info("Forcing WhatsApp logout / re-pair")
+        response = await self._client.post(
+            f"{self._base_url}/whatsapp/logout",
+            headers=self._get_headers(),
+        )
+        data = await self._handle_response(response)
+        return SuccessResponse(success=data.get("success", False))
 
     async def send_reaction(
         self,

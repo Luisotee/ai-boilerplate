@@ -6,6 +6,8 @@ import { logger } from '../logger.js';
 import { sleep, splitResponseIntoBursts, stripSplitDelimiters } from '../utils/message-split.js';
 import { chatIdToJid, chatTypeToConversationType } from '../utils/telegram-id.js';
 import * as telegramApi from '../services/telegram-api.js';
+import { isParseEntitiesError } from '../services/telegram-api.js';
+import { waMarkupToHtml } from '../utils/wa-markup-to-html.js';
 
 interface ImageData {
   data: string;
@@ -25,6 +27,28 @@ interface HandleOptions {
   saveOnly?: boolean;
   image?: ImageData;
   document?: DocumentData;
+}
+
+/**
+ * Reply with WhatsApp markup rendered as Telegram HTML, falling back to plain
+ * text if Telegram rejects the entities.
+ *
+ * Same contract as `telegramApi.sendText`, but via `ctx.reply` so the burst
+ * delivery keeps its reply-threading. Chunks arriving here are already
+ * length-bounded by `splitResponseIntoBursts` (on the RAW text).
+ */
+async function replyWithHtmlFallback(
+  ctx: TelegramContext,
+  text: string,
+  options: Parameters<TelegramContext['reply']>[1]
+): Promise<void> {
+  try {
+    await ctx.reply(waMarkupToHtml(text), { ...options, parse_mode: 'HTML' });
+  } catch (error) {
+    if (!isParseEntitiesError(error)) throw error;
+    logger.warn({ error }, 'HTML entities rejected — resending chunk as plain text');
+    await ctx.reply(text, options);
+  }
 }
 
 /**
@@ -56,6 +80,10 @@ export async function handleTextMessage(
         ctx.from.username ||
         'Unknown'
       : 'Unknown');
+  // The group's title names the conversation (and is how the shared-group
+  // tools find it by name). A private chat is named from sender_name upstream.
+  const profileName =
+    conversationType === 'group' ? (ctx.chat as { title?: string })?.title || undefined : undefined;
 
   if (options.saveOnly) {
     logger.debug({ jid, text: text.slice(0, 50) }, 'Saving group message to history');
@@ -64,6 +92,7 @@ export async function handleTextMessage(
         conversationType,
         senderJid: options.senderJid,
         senderName,
+        profileName,
         messageId: String(messageId),
         saveOnly: true,
       });
@@ -93,6 +122,7 @@ export async function handleTextMessage(
       conversationType,
       senderJid: options.senderJid,
       senderName,
+      profileName,
       messageId: String(messageId),
       isGroupAdmin: options.isGroupAdmin,
       image: options.image,
@@ -116,7 +146,7 @@ export async function handleTextMessage(
           );
           await sleep(delay);
         }
-        await ctx.reply(chunks[i], {
+        await replyWithHtmlFallback(ctx, chunks[i], {
           reply_parameters:
             i === 0 ? { message_id: messageId, allow_sending_without_reply: true } : undefined,
         });

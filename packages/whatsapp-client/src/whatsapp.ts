@@ -1,23 +1,199 @@
 import makeWASocket, {
+  type WAMessage,
+  type WASocket,
   DisconnectReason,
   useMultiFileAuthState,
   normalizeMessageContent,
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import qrcode from 'qrcode-terminal';
+import { readdir, rm } from 'node:fs/promises';
 import { logger } from './logger.js';
 import { config } from './config.js';
-import { setBaileysSocket, setConnectionStatus, setLatestQr } from './services/baileys.js';
+import {
+  setBaileysSocket,
+  setConnectionStatus,
+  setLatestQr,
+  getLiveSocket,
+  setSocketOpen,
+  isBaileysReady,
+  clearBaileysSocket,
+} from './services/baileys.js';
+import { getWaVersionConfig } from './services/wa-version.js';
+import {
+  clearGroupCache,
+  invalidateGroup,
+  isCompleteGroupMetadata,
+  primeGroup,
+} from './services/group-cache.js';
+import { groupHasWhitelistedMember } from './services/groups.js';
 import { handleTextMessage } from './handlers/text.js';
 import { transcribeAudioMessage } from './handlers/audio.js';
 import { extractImageData } from './handlers/image.js';
 import { extractDocumentData } from './handlers/document.js';
 import { sendFailureReaction } from './utils/reactions.js';
-import { stripDeviceSuffix, isGroupChat, phoneFromJid, isLid } from './utils/jid.js';
-import { shouldRespondInGroup } from './utils/message.js';
+import {
+  stripDeviceSuffix,
+  isGroupChat,
+  isLid,
+  resolveParticipantJid,
+  resolveSenderPhone,
+} from './utils/jid.js';
+import { isWhitelisted } from './utils/whitelist.js';
+import { gateMessage, type Gate } from './utils/gating.js';
+import { isSenderGroupAdmin, shouldRespondInGroup } from './utils/message.js';
 
 const DEFAULT_IMAGE_PROMPT = 'Please describe and analyze this image';
 const DEFAULT_DOCUMENT_PROMPT = 'I have uploaded a document for you to analyze';
+
+const AUTH_DIR = 'auth_info_baileys';
+
+/**
+ * The whitelist gate for one incoming message (see utils/gating.ts).
+ *
+ * `jid` mode (default) is exactly the historical check — the conversation's own
+ * jid/phone against the whitelist — expressed through the shared truth table:
+ * a group is in scope only when listed, and then every member may address the
+ * bot. `membership` mode additionally admits a group that has a whitelisted
+ * member, but only a whitelisted SENDER may trigger a reply there.
+ *
+ * Resolves nothing it does not need: the participant identity and the
+ * membership lookup run only for a group in `membership` mode, and the lookup
+ * is skipped when the group is listed or the sender is whitelisted.
+ */
+async function resolveGate(
+  sock: WASocket,
+  msg: WAMessage,
+  whatsappJid: string,
+  isGroup: boolean,
+  phone: string | undefined
+): Promise<Gate> {
+  const wl = config.whitelistPhones;
+  const whitelistEnabled = wl.size > 0;
+  if (!whitelistEnabled) {
+    return gateMessage({
+      isGroup,
+      whitelistEnabled,
+      senderWhitelisted: true,
+      groupExplicit: false,
+      groupAllowed: true,
+    });
+  }
+
+  const chatListed = isWhitelisted(wl, whatsappJid, phone);
+  if (!isGroup || config.groupGating === 'jid') {
+    return gateMessage({
+      isGroup,
+      whitelistEnabled,
+      senderWhitelisted: chatListed,
+      groupExplicit: chatListed,
+      groupAllowed: chatListed,
+    });
+  }
+
+  // membership mode, group chat. The sender is the participant — under v7 LID
+  // addressing resolved to a phone JID where possible, and the raw (possibly
+  // LID) participant is checked too so a verbatim `…@lid` entry still works.
+  const participant = msg.key.participant ? stripDeviceSuffix(msg.key.participant) : undefined;
+  const participantJid = await resolveParticipantJid(
+    sock,
+    msg.key.participant,
+    msg.key.participantAlt
+  );
+  const senderWhitelisted =
+    (participantJid !== undefined && isWhitelisted(wl, participantJid)) ||
+    (participant !== undefined && isWhitelisted(wl, participant));
+  const groupAllowed =
+    chatListed || senderWhitelisted || (await groupHasWhitelistedMember(sock, whatsappJid, wl));
+
+  return gateMessage({
+    isGroup,
+    whitelistEnabled,
+    senderWhitelisted,
+    groupExplicit: chatListed,
+    groupAllowed,
+  });
+}
+
+/** Delete the stored Baileys creds so the next init drops back into QR (unregistered) mode.
+ *  Clears the directory contents — not the dir itself, which is the session volume mountpoint. */
+async function clearAuthState(): Promise<void> {
+  try {
+    const entries = await readdir(AUTH_DIR);
+    await Promise.all(entries.map((e) => rm(`${AUTH_DIR}/${e}`, { recursive: true, force: true })));
+    logger.info({ cleared: entries.length }, 'Cleared WhatsApp auth state');
+  } catch (err) {
+    logger.error({ err }, 'Failed to clear WhatsApp auth state');
+    throw err;
+  }
+}
+
+/**
+ * Force a WhatsApp re-pair (used by the dashboard's "unlink" action).
+ *
+ * Owns the full teardown → clear → re-init so the caller's success reflects the
+ * real outcome. First bumps the socket generation (`socketEpoch`) so any in-flight
+ * events from the current socket — notably a `creds.update` that would otherwise
+ * re-persist the creds we're about to wipe — are ignored by the guarded handlers.
+ * Then reaches the socket via `getLiveSocket()` (which sees a socket created but not
+ * yet `open`ed, i.e. the initial-pairing window), detaches its listeners, unlinks
+ * via `sock.logout()` when open (or just ends it when pre-open), and drops it. Either
+ * way the on-disk creds are wiped and the client re-initialises so a fresh pairing QR
+ * is issued; a failure to clear creds or re-init throws and surfaces to the caller.
+ *
+ * The epoch guard + tracking-at-creation close the pre-open unlink race (issue #4):
+ * an unlink during initial pairing now tears the pending socket down instead of
+ * letting it resurrect the just-wiped auth state.
+ */
+export async function logoutWhatsApp(): Promise<void> {
+  logger.info('Forcing WhatsApp logout / re-pair');
+
+  // Claim a new generation up front so the current socket's in-flight handlers go inert
+  // (belt-and-braces alongside the removeAllListeners below).
+  socketEpoch++;
+
+  // getLiveSocket() reaches a socket that is created but not yet `open` (the pairing
+  // window), so an unlink there tears it down instead of orphaning it.
+  const sock = getLiveSocket();
+  if (sock) {
+    const wasOpen = isBaileysReady();
+    sock.ev.removeAllListeners('connection.update');
+    sock.ev.removeAllListeners('creds.update');
+    if (wasOpen) {
+      try {
+        await sock.logout();
+      } catch (err) {
+        logger.warn({ err }, 'sock.logout() failed; ending the socket locally');
+        try {
+          sock.end(undefined);
+        } catch (endErr) {
+          logger.trace({ err: endErr }, 'socket.end() failed (already dead)');
+        }
+      }
+    } else {
+      // A not-yet-open socket has nothing registered server-side to unlink, and
+      // logout() on it can hang the WS — just end it locally.
+      try {
+        sock.end(undefined);
+      } catch (endErr) {
+        logger.trace({ err: endErr }, 'socket.end() failed (already dead)');
+      }
+    }
+    clearBaileysSocket();
+    clearGroupCache();
+  }
+
+  resetReconnectionState();
+  setConnectionStatus('connecting'); // don't serve a stale 'connected' between wipe and re-open
+  setLatestQr(null);
+  await clearAuthState(); // throws on FS failure → route 500 → dashboard 503
+  await initializeWhatsApp(); // awaited: single re-init owner, errors surface
+}
+
+// Monotonic socket generation. Bumped on every init and on logout; the connection
+// and creds handlers capture their generation and go inert once it's superseded, so a
+// stale socket can't clobber a newer one or re-persist auth state we've since wiped.
+let socketEpoch = 0;
 
 // Reconnection state
 let reconnectionAttempts = 0;
@@ -54,17 +230,84 @@ function resetReconnectionState(): void {
   }
 }
 
+/**
+ * Schedule a reconnection attempt with exponential backoff.
+ *
+ * Safe to call from the connection 'close' handler and from a failed re-init's
+ * `.catch`: the `isReconnecting` guard prevents double-arming the timer, and
+ * `reconnectionAttempts` is clamped at `maxAttempts` so a prolonged outage keeps
+ * retrying at the capped interval rather than giving up. Crucially, a failed
+ * attempt re-schedules itself — so an `initializeWhatsApp()` that throws *before*
+ * a socket exists (which would otherwise emit no 'close' to re-arm anything) still
+ * self-heals instead of stalling at disconnected/qr=null.
+ */
+function scheduleReconnect(): void {
+  // Check if max attempts exceeded
+  if (reconnectionAttempts >= config.reconnection.maxAttempts) {
+    // Don't give up — keep retrying at the capped backoff so a prolonged outage
+    // self-heals when connectivity returns. Clamp the counter so the delay stays
+    // pinned at maxDelayMs instead of overflowing or growing unbounded.
+    reconnectionAttempts = config.reconnection.maxAttempts;
+    logger.warn(
+      {
+        attempts: reconnectionAttempts,
+        maxAttempts: config.reconnection.maxAttempts,
+      },
+      'Max reconnection attempts reached — continuing to retry at the capped interval.'
+    );
+  }
+
+  // Prevent multiple concurrent reconnection attempts
+  if (isReconnecting) {
+    logger.debug('Reconnection already in progress, skipping');
+    return;
+  }
+
+  isReconnecting = true;
+  reconnectionAttempts++;
+
+  // Calculate backoff delay
+  const delayMs = calculateBackoffDelay(reconnectionAttempts - 1);
+
+  logger.info(
+    {
+      attempt: reconnectionAttempts,
+      maxAttempts: config.reconnection.maxAttempts,
+      delayMs: Math.round(delayMs),
+    },
+    `⏳ Reconnecting in ${Math.round(delayMs / 1000)}s...`
+  );
+
+  // Schedule reconnection with exponential backoff
+  reconnectionTimer = setTimeout(() => {
+    logger.info({ attempt: reconnectionAttempts }, 'Attempting reconnection');
+    isReconnecting = false;
+    initializeWhatsApp().catch((err) => {
+      logger.error({ err }, 'Reconnection attempt failed');
+      scheduleReconnect();
+    });
+  }, delayMs);
+}
+
 export async function initializeWhatsApp(): Promise<void> {
-  const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
+  const myEpoch = ++socketEpoch; // this socket's generation; guards below ignore stale ones
+  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+  // Spread, never `version: versionConfig.version` — an explicit undefined key would
+  // clobber Baileys' bundled default and crash the handshake. See services/wa-version.ts.
+  const versionConfig = await getWaVersionConfig();
 
   const sock = makeWASocket({
     auth: state,
+    ...versionConfig,
     logger: logger.child({ module: 'baileys' }),
     browser: ['AI Boilerplate', 'Chrome', '131.0.0'],
   });
+  // Track at creation (not on 'open') so teardown can reach a not-yet-open socket.
+  setBaileysSocket(sock);
 
   // Connection events
-  sock.ev.on('connection.update', (update) => {
+  sock.ev.on('connection.update', async (update) => {
+    if (myEpoch !== socketEpoch) return; // a newer socket has superseded this generation
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
@@ -79,65 +322,43 @@ export async function initializeWhatsApp(): Promise<void> {
     if (connection === 'close') {
       setConnectionStatus('disconnected');
       setLatestQr(null); // the socket that issued the QR is gone — don't serve a stale code
-      const shouldReconnect =
-        (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
+      clearBaileysSocket(); // the socket is dead — stop reporting "ready" until re-open
+      const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
+      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
-      logger.info(
-        {
-          shouldReconnect,
-          reconnectionAttempts,
-          statusCode: (lastDisconnect?.error as Boom)?.output?.statusCode,
-        },
-        'Connection closed'
-      );
+      if (statusCode === 405) {
+        logger.error(
+          { statusCode },
+          'WhatsApp rejected the connection (405) — usually an outdated WA Web version. ' +
+            'Retrying; if this persists, the fetched version may be stale.'
+        );
+      }
+
+      logger.info({ shouldReconnect, reconnectionAttempts, statusCode }, 'Connection closed');
 
       if (shouldReconnect) {
-        // Check if max attempts exceeded
-        if (reconnectionAttempts >= config.reconnection.maxAttempts) {
-          logger.error(
-            {
-              attempts: reconnectionAttempts,
-              maxAttempts: config.reconnection.maxAttempts,
-            },
-            '❌ Max reconnection attempts exceeded. Manual restart required.'
-          );
-          return;
-        }
-
-        // Prevent multiple concurrent reconnection attempts
-        if (isReconnecting) {
-          logger.debug('Reconnection already in progress, skipping');
-          return;
-        }
-
-        isReconnecting = true;
-        reconnectionAttempts++;
-
-        // Calculate backoff delay
-        const delayMs = calculateBackoffDelay(reconnectionAttempts - 1);
-
-        logger.info(
-          {
-            attempt: reconnectionAttempts,
-            maxAttempts: config.reconnection.maxAttempts,
-            delayMs: Math.round(delayMs),
-          },
-          `⏳ Reconnecting in ${Math.round(delayMs / 1000)}s...`
-        );
-
-        // Schedule reconnection with exponential backoff
-        reconnectionTimer = setTimeout(() => {
-          logger.info({ attempt: reconnectionAttempts }, 'Attempting reconnection');
-          isReconnecting = false;
-          initializeWhatsApp();
-        }, delayMs);
+        scheduleReconnect();
       } else {
-        logger.info('Logged out. QR code required for reconnection.');
+        // Logged out (e.g. the linked phone unlinked this device). The on-disk creds are
+        // now invalid and Baileys won't emit a fresh QR while a registered cred set exists,
+        // so wipe the auth state and re-initialise to drop back into QR mode automatically.
+        logger.info(
+          'Logged out — clearing stale credentials and re-initialising to issue a fresh QR.'
+        );
         resetReconnectionState();
+        try {
+          await clearAuthState();
+          await initializeWhatsApp();
+        } catch (err) {
+          // Don't stall at disconnected/qr=null — reschedule with backoff so a transient
+          // FS/init failure self-heals instead of needing a manual restart.
+          logger.error({ err }, 'Failed to re-initialise after logout — retrying with backoff');
+          scheduleReconnect();
+        }
       }
     } else if (connection === 'open') {
       logger.info('✅ WhatsApp connection opened successfully');
-      setBaileysSocket(sock);
+      setSocketOpen(true); // socket already tracked at creation; just mark the link open
       setConnectionStatus('connected');
       setLatestQr(null); // clear the pairing QR once linked
 
@@ -146,7 +367,38 @@ export async function initializeWhatsApp(): Promise<void> {
     }
   });
 
-  sock.ev.on('creds.update', saveCreds);
+  sock.ev.on('creds.update', async () => {
+    if (myEpoch !== socketEpoch) return; // stale socket must not re-persist wiped creds
+    await saveCreds();
+  });
+
+  // A renamed group must not keep serving its old subject as the conversation
+  // name. Deliberately NOT epoch-guarded, unlike the handlers above: those
+  // gate side effects that must not happen twice (persisting creds, serving a
+  // QR), whereas this is an idempotent cache delete whose worst outcome is one
+  // refetch. Reconnect is exactly when buffered events flush, so dropping them
+  // on a superseded generation would pin a stale name for the full TTL.
+  //
+  // Baileys also emits this event from inside `groupFetchAllParticipating()`
+  // with COMPLETE metadata for every group. That burst is fresh data, not a
+  // change: evicting on it would drop the very snapshot it belongs to (so the
+  // shared-groups lookup would refetch the whole fleet every time). Complete
+  // entries prime the cache instead — epoch-guarded, since a superseded socket
+  // may belong to a previous account.
+  sock.ev.on('groups.update', (updates) => {
+    for (const update of updates) {
+      if (!update.id) continue;
+      if (isCompleteGroupMetadata(update)) {
+        if (myEpoch === socketEpoch) primeGroup(update);
+      } else {
+        invalidateGroup(update.id);
+      }
+    }
+  });
+
+  sock.ev.on('group-participants.update', ({ id }) => {
+    invalidateGroup(id);
+  });
 
   // Message handler
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
@@ -166,29 +418,55 @@ export async function initializeWhatsApp(): Promise<void> {
         if (msg.key.fromMe || msg.key.remoteJid === 'status@broadcast') continue;
         if (!msg.key.remoteJid) continue;
 
-        // Whitelist check: skip non-whitelisted JIDs
-        if (config.whitelistPhones.size > 0) {
-          const remoteJid = msg.key.remoteJid!;
-          const phone = remoteJid.replace(/@.*$/, '');
-          if (!config.whitelistPhones.has(phone) && !config.whitelistPhones.has(remoteJid)) {
-            logger.info({ remoteJid }, 'Skipping non-whitelisted JID');
-            continue;
-          }
+        // Extract phone number and LID for user identity resolution.
+        // A LID-addressed chat carries no phone in its JID, so recover it from
+        // the message envelope (key.remoteJidAlt), falling back to Baileys'
+        // LID↔PN mapping store. Groups resolve to undefined — correct, since
+        // the User row *is* the group and has no phone of its own.
+        const whatsappJid = stripDeviceSuffix(msg.key.remoteJid!);
+        const isGroup = isGroupChat(whatsappJid);
+        const whatsappLid = isLid(whatsappJid) ? whatsappJid : undefined;
+        const phone = await resolveSenderPhone(sock, msg.key.remoteJid!, msg.key.remoteJidAlt);
+
+        // Whitelist gate. Must run AFTER resolveSenderPhone — a LID-addressed
+        // chat's JID digits are an anonymized account id, not a phone, so a
+        // bare-phone whitelist entry can only match via the resolved E.164.
+        // Must run BEFORE `sock.user!.id` below: if sock.user is unset that
+        // throws into the per-message catch, which reacts to the message —
+        // sending an outbound reaction into a chat we just blocked. It also
+        // stays ahead of every expensive step (transcription, media download).
+        // An unresolvable phone fails closed; whitelist the raw `@lid` if a
+        // contact is ever stuck behind a cold LID↔PN mapping.
+        // (GROUP_GATING=membership may fetch the group's metadata here, but
+        // only for a group with a non-whitelisted sender that is not listed.)
+        const gate = await resolveGate(sock, msg, whatsappJid, isGroup, phone);
+        if (gate.skip) {
+          logger.info(
+            {
+              remoteJid: msg.key.remoteJid,
+              whatsappJid,
+              isGroup,
+              groupGating: config.groupGating,
+              // Only meaningful for a private chat: a group has no phone of its
+              // own, so logging phoneResolved:false there would read as a
+              // resolution failure and send the operator after the wrong fix.
+              ...(isGroup ? {} : { phoneResolved: Boolean(phone) }),
+            },
+            'Skipping non-whitelisted chat'
+          );
+          continue;
         }
 
         // Normalize message content to handle wrappers (viewOnce, ephemeral, etc.)
         const normalizedMessage = normalizeMessageContent(msg.message);
 
-        // Determine if this is a group message and whether the bot should respond
-        const whatsappJid = stripDeviceSuffix(msg.key.remoteJid!);
-        const isGroup = isGroupChat(whatsappJid);
+        // Determine whether the bot should respond in a group
         const botJid = stripDeviceSuffix(sock.user!.id);
         const botLid = sock.user?.lid ? stripDeviceSuffix(sock.user.lid) : undefined;
-        const saveOnly = isGroup && !shouldRespondInGroup(msg, botJid, botLid);
-
-        // Extract phone number and LID for user identity resolution
-        const phone = phoneFromJid(whatsappJid) ?? undefined;
-        const whatsappLid = isLid(whatsappJid) ? whatsappJid : undefined;
+        // A kept group message is save-only when it isn't addressed to the bot,
+        // or (GROUP_GATING=membership) its sender may not trigger a reply.
+        const saveOnly =
+          isGroup && (gate.suppressResponse || !shouldRespondInGroup(msg, botJid, botLid));
 
         // Get text from normalized message or transcribe audio
         let text = normalizedMessage?.conversation || normalizedMessage?.extendedTextMessage?.text;
@@ -303,10 +581,7 @@ export async function initializeWhatsApp(): Promise<void> {
             try {
               const metadata = await sock.groupMetadata(whatsappJid);
               const senderJid = stripDeviceSuffix(msg.key.participant || '');
-              const participant = metadata.participants.find(
-                (p) => stripDeviceSuffix(p.id) === senderJid
-              );
-              isGroupAdmin = participant?.admin === 'admin' || participant?.admin === 'superadmin';
+              isGroupAdmin = isSenderGroupAdmin(metadata.participants, msg.key);
               logger.debug({ senderJid, isGroupAdmin }, 'Checked group admin status for command');
             } catch (error) {
               logger.warn({ error, whatsappJid }, 'Failed to check group admin status');

@@ -164,6 +164,9 @@ services:
       TELEGRAM_CLIENT_URL: http://telegram:3003
     volumes:
       - knowledge-base-data:/app/knowledge_base
+      # Docling / Hugging Face / EasyOCR / tiktoken model caches (PDF parsing runs
+      # here), so models aren't re-downloaded every time the container is recreated
+      - model-cache:/home/appuser/.cache
     depends_on:
       postgres:
         condition: service_healthy
@@ -173,6 +176,10 @@ services:
         condition: service_healthy
     networks:
       - aiagent-network
+    # The worker runs the agent AND parses every PDF (stream:pdf_processing).
+    # With INSTALL_DOCLING=true a single Docling parse can take 1-2 GB, so either
+    # keep KB_MAX_CONCURRENT_PROCESSING at 1-2 or raise this limit. An OOM kill
+    # mid-parse is recovered (the job is reclaimed and retried, then dead-lettered).
     deploy:
       resources:
         limits:
@@ -363,8 +370,16 @@ services:
       TELEGRAM_HOST: 0.0.0.0
       # Pin the in-cluster listen port (see whatsapp service above).
       TELEGRAM_PORT: 3003
+    # TELEGRAM_MODE=webhook (default): Telegram must reach /webhook through a
+    # public HTTPS URL (reverse proxy / tunnel to this port).
+    # TELEGRAM_MODE=polling: no inbound traffic from Telegram at all — the port
+    # only serves the AI API (over aiagent-network), /health and /docs.
     ports:
       - '${TELEGRAM_PORT:-3003}:3003'
+    # Polling mode drains in-flight replies on SIGTERM (up to
+    # TELEGRAM_SHUTDOWN_DRAIN_MS, default 130s) — Docker's default 10s grace
+    # period would SIGKILL them mid-reply.
+    stop_grace_period: 140s
     depends_on:
       api:
         condition: service_healthy
@@ -386,6 +401,7 @@ volumes:
   postgres-data:
   redis-data:
   knowledge-base-data:
+  model-cache:
   whatsapp-session:
   whisper-cache:
 

@@ -50,7 +50,7 @@ vi.mock('../../src/config.js', () => ({
       graphApiVersion: 'v21.0',
       graphApiBaseUrl: 'https://graph.facebook.com',
     },
-    whitelistPhones: new Set<string>(),
+    whitelistPhones: { ids: new Set<string>(), phones: new Set<string>(), size: 0 },
     aiApiUrl: 'http://localhost:8000',
     aiApiKey: 'test-key',
     logLevel: 'silent',
@@ -184,11 +184,7 @@ describe('Cloud API messaging routes — /whatsapp/*', () => {
       expect(body.message_id).toBe('wamid.sent_text_123');
       expect(mockSendText).toHaveBeenCalledOnce();
       // The route calls jidToPhone which strips @s.whatsapp.net
-      expect(mockSendText).toHaveBeenCalledWith(
-        '5511999999999',
-        'Hello Cloud',
-        undefined
-      );
+      expect(mockSendText).toHaveBeenCalledWith('5511999999999', 'Hello Cloud', undefined);
     });
 
     it('strips JID suffix when phoneNumber is a JID', async () => {
@@ -218,11 +214,9 @@ describe('Cloud API messaging routes — /whatsapp/*', () => {
       });
 
       expect(res.statusCode).toBe(200);
-      expect(mockSendText).toHaveBeenCalledWith(
-        '5511999999999',
-        'Reply text',
-        { message_id: 'wamid.original_123' }
-      );
+      expect(mockSendText).toHaveBeenCalledWith('5511999999999', 'Reply text', {
+        message_id: 'wamid.original_123',
+      });
     });
 
     it('returns 500 when graphApi.sendText throws', async () => {
@@ -289,11 +283,7 @@ describe('Cloud API messaging routes — /whatsapp/*', () => {
       expect(res.statusCode).toBe(200);
       expect(res.json()).toEqual({ success: true });
       expect(mockSendReaction).toHaveBeenCalledOnce();
-      expect(mockSendReaction).toHaveBeenCalledWith(
-        '5511999999999',
-        'MSG_123',
-        '\uD83D\uDC4D'
-      );
+      expect(mockSendReaction).toHaveBeenCalledWith('5511999999999', 'MSG_123', '\uD83D\uDC4D');
     });
 
     it('returns 500 when graphApi.sendReaction throws', async () => {

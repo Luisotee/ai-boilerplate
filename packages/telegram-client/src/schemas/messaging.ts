@@ -45,6 +45,15 @@ export const ReadyResponseSchema = z.object({
   checks: z.record(z.string(), z.string()),
 });
 
+export const GroupMemberSchema = z.object({
+  phoneNumber: z.string().describe('Group chat identifier ("tg:-100..." or a bare chat id)'),
+  userJid: z.string().describe('Member to check ("tg:<user_id>" or a bare user id)'),
+});
+
+export const GroupMemberResponseSchema = z.object({
+  is_member: z.boolean(),
+});
+
 export type SendTextRequest = z.infer<typeof SendTextSchema>;
 export type SendReactionRequest = z.infer<typeof SendReactionSchema>;
 export type TypingIndicatorRequest = z.infer<typeof TypingIndicatorSchema>;

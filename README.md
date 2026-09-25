@@ -8,7 +8,7 @@ A production-ready AI agent system that brings conversational AI to WhatsApp wit
 |-------|-------------|
 | **Client** | Node.js, TypeScript, Fastify, Baileys (WhatsApp Web), Zod |
 | **API** | Python 3.11+, FastAPI, Pydantic AI, SQLAlchemy 2.0 |
-| **AI/ML** | Google Gemini (LLM, Embeddings, TTS), Groq Whisper or self-hosted Whisper (STT), LlamaParse (PDF parsing) |
+| **AI/ML** | Google Gemini (LLM, Embeddings, TTS), optional DeepSeek (primary LLM with Gemini fallback), Groq Whisper or self-hosted Whisper (STT), LlamaParse (PDF parsing) |
 | **Database** | PostgreSQL 16 + pgvector (vector similarity search) |
 | **Infrastructure** | Docker Compose, Redis Streams, Background Workers |
 
@@ -21,7 +21,8 @@ A production-ready AI agent system that brings conversational AI to WhatsApp wit
 - Semantic search through past conversations using vector embeddings
 
 ### RAG Knowledge Base
-- PDF document upload with background processing (LlamaParse cloud API; optional local Docling fallback)
+- PDF document upload, processed by the background worker from a Redis Stream queue with retries (LlamaParse cloud API; optional local Docling fallback)
+- Duplicate uploads (same SHA-256 content) rejected with 409
 - Semantic chunking with token-aware splitting (512 tokens/chunk)
 - Vector similarity search using pgvector (3072-dim embeddings)
 - Auto-generated citations with document name, page number, and section
@@ -37,8 +38,13 @@ A production-ready AI agent system that brings conversational AI to WhatsApp wit
 - Async job queue with polling for background processing
 - Redis Streams for per-user message queuing
 
+### Telegram
+- Runs next to WhatsApp (`docker compose --profile telegram up -d`), sharing memory via `/link` or `/linkphone`
+- Webhook delivery by default; `TELEGRAM_MODE=polling` needs no public URL (handy for local development or hosts behind NAT)
+
 ### WhatsApp Integration
 - Group chat support with sender attribution and @mention handling
+- Optional shared-group tools (`SHARED_GROUP_TOOLS_ENABLED`, off by default): in a private chat, read or search a group you share with the bot, or have it post a message there on your behalf (always attributed, confirmed first; Baileys + Telegram)
 - Message reactions (status indicators)
 - Media handling: images, audio, video, documents
 - Location sharing and contact cards (vCard)
@@ -56,6 +62,10 @@ A production-ready AI agent system that brings conversational AI to WhatsApp wit
 | `/clean all` | Full reset (messages, documents, memories, preferences) |
 | `/memories` | Show saved core memories |
 | `/memories clear` | Delete all core memories |
+| `/link` | Get a code to link this account to your other platform (WhatsApp ↔ Telegram) |
+| `/link [code]` | Enter a code from the other platform to finish linking |
+| `/linkphone` | Telegram only: link by sharing your phone number (must match your WhatsApp number) |
+| `/unlink` | Unlink your accounts |
 | `/help` | Show available commands |
 
 ## Architecture
@@ -122,7 +132,7 @@ packages/
 - Node.js 18+ and pnpm
 - Python 3.11+ and uv
 - Docker and Docker Compose
-- API Keys: [Google Gemini](https://aistudio.google.com/apikey), [LlamaCloud](https://cloud.llamaindex.ai) (primary PDF parser), [Groq](https://console.groq.com/keys) (optional STT)
+- API Keys: [Google Gemini](https://aistudio.google.com/apikey), [LlamaCloud](https://cloud.llamaindex.ai) (primary PDF parser), [Groq](https://console.groq.com/keys) (optional STT) — step-by-step for every key in [docs/api-keys.md](docs/api-keys.md)
 
 ### Setup
 
@@ -132,7 +142,7 @@ cd ai-boilerplate
 ./setup.sh             # interactive: generates .env, installs deps
 ```
 
-The script checks prerequisites, creates `.env` from the template (auto-generating passwords and inter-service keys), prompts for `GEMINI_API_KEY` and any optional integrations (Meta Cloud API, Groq), then runs `pnpm install:all`.
+The script checks prerequisites, creates `.env` from the template (auto-generating passwords and inter-service keys), prompts for `GEMINI_API_KEY` and any optional integrations (DeepSeek, Meta Cloud API, Groq), then runs `pnpm install:all`.
 
 ### Run with Docker (recommended)
 
@@ -145,6 +155,16 @@ docker compose --profile dev --profile cloud up -d      # everything
 ```
 
 Profiles are opt-in: without `--profile`, Adminer, the Cloud API client, and the self-hosted Whisper server stay stopped. Infrastructure ports (`5432`, `6379`, `8080`, `8771`) bind to `127.0.0.1` only — application services (`8000`, `3001`, `3002`) remain on all interfaces so they can be reached from host tooling and the WhatsApp client.
+
+The images run as non-root users (uid 1000). **Upgrading a deployment built from the older root images?** Chown the existing Baileys session and upload volumes once, or the WhatsApp session and uploads can't be written:
+
+```bash
+docker compose build
+docker compose stop whatsapp api worker
+docker compose run --rm --no-deps --user root --entrypoint chown whatsapp -R node:node /app/packages/whatsapp-client/auth_info_baileys
+docker compose run --rm --no-deps --user root --entrypoint chown api -R appuser:appuser /app/knowledge_base
+docker compose up -d
+```
 
 ### Self-hosted STT (optional)
 
@@ -164,13 +184,28 @@ Starting the profile also launches a one-shot `whisper-init` sidecar that pulls 
 docker compose up -d postgres redis     # just infra in containers
 pnpm dev:server                          # Terminal 1: AI API
 pnpm dev:whatsapp                        # Terminal 2: WhatsApp client (scan QR)
-pnpm dev:queue                           # Terminal 3: background worker
+pnpm dev:queue                           # Terminal 3: stream worker (chat replies + PDF parsing)
 ```
 
 ### Verify
 1. Send a message to your WhatsApp number
 2. The AI agent responds with context-aware replies
 3. API docs available at http://localhost:8000/docs
+
+### LLM cost tracking (optional)
+
+To see how many input/output tokens each conversation burns and what it costs in dollars, create a free project at [logfire.pydantic.dev](https://logfire.pydantic.dev), generate a write token, and set it in `.env`:
+
+```
+LOGFIRE_TOKEN=your-write-token
+LOGFIRE_ENVIRONMENT=production
+```
+
+Restart the `api` and `worker` services. Every agent run then appears in Logfire with `gen_ai.usage.input_tokens` / `output_tokens` and an `operation.cost` value priced from the [genai-prices](https://github.com/pydantic/genai-prices) dataset — so costs stay correct even when you switch models via `PATCH /admin/settings`. Traces show up under the **`ai-api-worker`** service, since the worker is the process that runs the agent.
+
+The free tier covers 10M records/month and is hard-capped at $0 — it can never bill you; ingestion simply pauses at the limit. With `LOGFIRE_TOKEN` empty, `setup_instrumentation()` returns before touching Logfire at all — nothing is configured, imported at runtime, or sent.
+
+**Message content is deliberately not captured.** Instrumentation runs with `include_content=False`, so token counts, cost, latency, model name, and tool names are recorded but prompts and replies never leave your infrastructure. Logfire answers "what is this costing me", not "what did the bot say" — use the service logs for that.
 
 ## API Endpoints
 
@@ -190,6 +225,8 @@ pnpm dev:queue                           # Terminal 3: background worker
 | GET | `/knowledge-base/documents` | List documents (paginated) |
 | GET | `/knowledge-base/status/{id}` | Processing status |
 | DELETE | `/knowledge-base/documents/{id}` | Delete document |
+
+Bulk-load a folder of PDFs with `./upload-kb.sh /path/to/pdfs` (uses `AI_API_KEY` from the environment or `.env`; `AI_API_URL` defaults to `http://localhost:8000`). Re-running it is safe: files already in the knowledge base are rejected as duplicates.
 
 ### Speech
 | Method | Endpoint | Description |
@@ -226,15 +263,25 @@ pnpm format          # Format all code
 | Variable | Description |
 |----------|-------------|
 | `GEMINI_API_KEY` | Google Gemini API key (required) |
+| `GEMINI_MODEL` | Gemini chat model (default `gemini-3.1-flash-lite`) — the fallback when `DEEPSEEK_API_KEY` is set, otherwise the only model; any Gemini model ID, hot-swappable via `PATCH /admin/settings` |
+| `DEEPSEEK_API_KEY` | Optional. When set, DeepSeek (`DEEPSEEK_MODEL`, default `deepseek-flash`) is the primary chat model and Gemini the automatic fallback; chat content is then sent to DeepSeek's servers (China). Unset = Gemini only |
 | `LLAMA_CLOUD_API_KEY` | LlamaCloud API key for PDF parsing via LlamaParse (optional; required when `PDF_PARSER=llamaparse` or `auto` without the `[docling]` extra) |
 | `GROQ_API_KEY` | Groq API key (optional, for STT) |
+| `KB_MAX_CONCURRENT_PROCESSING` | PDFs parsed at once per stream worker (default `2`; keep low with Docling, ~1-2 GB RAM per parse) |
+| `KB_MAX_PDF_RETRIES` / `KB_RETRY_BASE_DELAY_SECONDS` | PDF job retries (default `3`) and backoff base (default `30` → 30s, 120s, 480s) |
 | `PDF_PARSER` | `auto` (default), `llamaparse`, or `docling` |
 | `LLAMAPARSE_TIER` | `cost_effective` (default), `fast`, `agentic`, or `agentic_plus` |
 | `DATABASE_URL` | PostgreSQL connection string |
 | `REDIS_URL` | Redis connection string |
 | `AI_API_URL` | AI API endpoint for WhatsApp client |
+| `WHITELIST_PHONES` | Comma-separated phones / chat ids allowed to use the bot (empty = everyone) |
+| `SHARED_GROUP_TOOLS_ENABLED` | `false` (default). When `true`, users can, in a private chat, read/search groups they share with the bot and ask it to post into one (Baileys + Telegram). Group transcripts then reach the LLM provider inside private conversations — see CLAUDE.md "Shared-group tools". Hot via `PATCH /admin/settings` |
+| `TELEGRAM_MODE` | `webhook` (default — Telegram POSTs to `/webhook`, needs a public HTTPS URL + `TELEGRAM_WEBHOOK_SECRET`) or `polling` (long polling via `@grammyjs/runner`: no public URL or tunnel; one process per bot token). Group chats need privacy mode OFF in @BotFather (`/setprivacy` → Disable; then remove and re-add the bot) |
+| `GROUP_GATING` | How a group gets in scope when the whitelist is set: `jid` (default — the group's own id must be listed) or `membership` (Baileys: any group with a whitelisted member; Telegram: any group; the bot saves all messages there but replies only to whitelisted senders). Read by the AI API and the Baileys/Telegram clients |
+| `LOGFIRE_TOKEN` | Pydantic Logfire write token for LLM token/cost tracking (optional; empty disables it) |
+| `LOGFIRE_ENVIRONMENT` | Environment label shown in the Logfire UI (default `development`) |
 
-See `packages/*/.env.example` for full configuration options.
+See `.env.example` for the full configuration and [docs/api-keys.md](docs/api-keys.md) for obtaining each external key.
 
 ## License
 

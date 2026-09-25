@@ -11,6 +11,9 @@ import { bot } from '../bot.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { fetchWithTimeout } from '../utils/fetch.js';
+import { waMarkupToHtml } from '../utils/wa-markup-to-html.js';
+import { splitByLength } from '../utils/message-split.js';
+import { buildVCard } from '../utils/vcard-builder.js';
 
 // ---------------------------------------------------------------------------
 // Reaction emoji substitution
@@ -35,17 +38,81 @@ function substituteReaction(emoji: string): string {
 // Public API
 // ---------------------------------------------------------------------------
 
+/** True for the 400 Telegram returns when parse_mode entities don't validate. */
+export function isParseEntitiesError(error: unknown): boolean {
+  return (
+    error instanceof GrammyError &&
+    error.error_code === 400 &&
+    /can't parse entities/i.test(error.description)
+  );
+}
+
+/**
+ * Send one already-length-bounded piece.
+ *
+ * A malformed entity rejects the whole message, so on `can't parse entities` we
+ * retry once as plain text: delivering the response unformatted is far better
+ * than dropping it. The converter is conservative enough that this should not
+ * fire, and it logs loudly if it does.
+ */
+async function sendOne(
+  chatId: number,
+  text: string,
+  replyParams: Record<string, unknown>
+): Promise<number> {
+  try {
+    const message = await bot.api.sendMessage(chatId, waMarkupToHtml(text), {
+      parse_mode: 'HTML',
+      ...replyParams,
+    });
+    return message.message_id;
+  } catch (error) {
+    if (!isParseEntitiesError(error)) throw error;
+    logger.warn(
+      { err: error, chatId },
+      'Telegram rejected HTML entities — retrying as plain text. ' +
+        'This means waMarkupToHtml produced unbalanced markup; the input is worth investigating.'
+    );
+    const message = await bot.api.sendMessage(chatId, text, replyParams);
+    return message.message_id;
+  }
+}
+
+/**
+ * Send `text`, translating WhatsApp markup to Telegram HTML.
+ *
+ * Splits the RAW text at Telegram's 4096-character limit before converting and
+ * sending. This path carries the AI API's server-initiated pushes (e.g. the
+ * agent's `send_whatsapp_message` tool), where an over-long message would
+ * otherwise be a 400 that the entity-parse fallback does not catch.
+ *
+ * Returns the message_id of the FIRST piece, which is the one a caller would
+ * quote or react to.
+ */
 export async function sendText(
   chatId: number,
   text: string,
   replyToMessageId?: number
 ): Promise<number> {
-  const message = await bot.api.sendMessage(chatId, text, {
-    ...(replyToMessageId && {
-      reply_parameters: { message_id: replyToMessageId, allow_sending_without_reply: true },
-    }),
-  });
-  return message.message_id;
+  const replyParams = replyToMessageId
+    ? {
+        reply_parameters: {
+          message_id: replyToMessageId,
+          allow_sending_without_reply: true,
+        },
+      }
+    : {};
+
+  const pieces = splitByLength(text);
+  let firstId: number | undefined;
+
+  for (let i = 0; i < pieces.length; i++) {
+    // Only the first piece threads the reply; the rest follow it.
+    const id = await sendOne(chatId, pieces[i], i === 0 ? replyParams : {});
+    if (i === 0) firstId = id;
+  }
+
+  return firstId as number;
 }
 
 export async function sendReaction(
@@ -157,5 +224,88 @@ export async function downloadFile(fileId: string): Promise<{ buffer: Buffer; fi
   return { buffer: Buffer.from(arrayBuffer), filePath };
 }
 
+/**
+ * Send a location.
+ *
+ * Telegram splits what WhatsApp treats as one call: `sendLocation` takes ONLY
+ * coordinates (it has no name/address parameters at all), while `sendVenue`
+ * renders a titled card and *requires* both `title` and `address`. So dispatch
+ * on what's actually present rather than dropping the labels.
+ */
+export async function sendLocation(
+  chatId: number,
+  latitude: number,
+  longitude: number,
+  name?: string,
+  address?: string
+): Promise<number> {
+  if (name && address) {
+    const venue = await bot.api.sendVenue(chatId, latitude, longitude, name, address);
+    return venue.message_id;
+  }
+  const message = await bot.api.sendLocation(chatId, latitude, longitude);
+  return message.message_id;
+}
+
+export interface ContactDetails {
+  name: string;
+  phone: string;
+  email?: string;
+  org?: string;
+}
+
+/**
+ * Send a contact card.
+ *
+ * `sendContact` accepts only phone/first/last/vcard, so email and organization
+ * are carried in a vCard — built with the same helper the WhatsApp clients use,
+ * so the three clients produce identical cards.
+ */
+export async function sendContact(chatId: number, contact: ContactDetails): Promise<number> {
+  const [firstName, ...rest] = contact.name.trim().split(/\s+/);
+  const lastName = rest.join(' ');
+  const needsVcard = Boolean(contact.email || contact.org);
+
+  const message = await bot.api.sendContact(chatId, contact.phone, firstName || contact.name, {
+    ...(lastName && { last_name: lastName }),
+    ...(needsVcard && {
+      vcard: buildVCard({
+        name: contact.name,
+        phone: contact.phone,
+        email: contact.email,
+        organization: contact.org,
+      }),
+    }),
+  });
+  return message.message_id;
+}
+
 // Exported for unit tests only.
+/**
+ * Is `userId` currently in `chatId`?
+ *
+ * This is the one membership question the Telegram Bot API *can* answer —
+ * enumerating a chat's members is impossible, so shared-group discovery is
+ * derived from stored message authorship, which never expires. Checking the
+ * specific pair right before a relay send closes that gap.
+ *
+ * `restricted` counts only while `is_member` is true: a restricted user who has
+ * since left keeps the `restricted` status with `is_member: false`. `left` and
+ * `kicked` are never members. Throws on a lookup error — the caller decides how
+ * to fail (the AI API fails closed).
+ */
+export async function isChatMember(chatId: number, userId: number): Promise<boolean> {
+  const member = await bot.api.getChatMember(chatId, userId);
+  switch (member.status) {
+    case 'creator':
+    case 'administrator':
+    case 'member':
+      return true;
+    case 'restricted':
+      return member.is_member;
+    default:
+      return false;
+  }
+}
+
 export const _internals = { substituteReaction, REACTION_MAP };

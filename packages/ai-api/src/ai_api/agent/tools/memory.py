@@ -4,6 +4,7 @@ from ...database import get_or_create_core_memory
 from ...logger import logger
 from ...runtime_config import runtime_config
 from ..core import AgentDeps, agent
+from ._db import safe_rollback
 
 
 @agent.tool
@@ -58,9 +59,10 @@ async def update_core_memory(ctx: RunContext[AgentDeps], content: str) -> str:
         return f"Core memory updated ({len(content)} characters)."
 
     except Exception as e:
+        safe_rollback(ctx.deps.db)
         logger.error(f"Error updating core memory: {str(e)}", exc_info=True)
         logger.info("=" * 80)
         logger.info("TOOL ERROR: update_core_memory")
         logger.info(f"   Error: {str(e)}")
         logger.info("=" * 80)
-        return f"Failed to update core memory: {str(e)}"
+        return "Failed to update core memory. Please try again."

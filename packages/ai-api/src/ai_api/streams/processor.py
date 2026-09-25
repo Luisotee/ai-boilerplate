@@ -1,21 +1,26 @@
 """
-Core chat processing logic extracted from arq worker.
-
-This processor can be called directly without arq job context,
-making it compatible with Redis Streams.
+Core chat processing logic, called by the Redis Streams consumer.
 """
 
 import httpx
 
 from ..agent import AgentDeps, format_message_history, get_ai_response
+from ..agent.model_chain import MODEL_ERRORS
 from ..config import get_whatsapp_api_key, get_whatsapp_client_url, settings
 from ..database import SessionLocal, get_conversation_history, save_message
 from ..embeddings import create_embedding_service
+from ..formatting import markdown_to_whatsapp
 from ..logger import logger
-from ..processing import process_pdf_document
 from ..queue.connection import get_redis_client
 from ..queue.utils import delete_job_image, get_job_image, save_job_chunk, set_job_metadata
 from ..whatsapp import WhatsAppClient, create_whatsapp_client
+from .manager import enqueue_pdf_processing
+
+#: Reply delivered when the model chain fails. English, like every user-facing
+#: string in this template. Deliberately NOT saved to conversation history.
+MODEL_ERROR_FALLBACK_TEXT = (
+    "Sorry, something went wrong while processing your message. Please try again."
+)
 
 
 async def process_chat_job_direct(
@@ -36,7 +41,7 @@ async def process_chat_job_direct(
     client_id: str | None = None,
 ) -> dict:
     """
-    Process a chat message asynchronously without arq context.
+    Process a chat message asynchronously (one Redis Streams job).
 
     This function:
     1. Retrieves conversation history from PostgreSQL
@@ -108,11 +113,13 @@ async def process_chat_job_direct(
             )
             logger.info(f"[Job {job_id}] WhatsApp client initialized")
 
-            # Step 2.6: Process document if present
+            # Step 2.6: Hand an attached PDF to the PDF stream. Parsing happens in
+            # the PDF consumer (streams/pdf_consumer.py), not inline: a Docling
+            # parse can take minutes and would block this user's whole stream.
+            # The user sees ⏳ now and ✅/❌ on the same message once it's done.
             if has_document and document_id and document_path:
-                logger.info(f"[Job {job_id}] Processing document {document_id}")
+                logger.info(f"[Job {job_id}] Enqueuing document {document_id} for processing")
 
-                # Send processing reaction
                 if whatsapp_message_id:
                     try:
                         await whatsapp_client.send_reaction(whatsapp_jid, whatsapp_message_id, "⏳")
@@ -120,41 +127,30 @@ async def process_chat_job_direct(
                     except Exception as e:
                         logger.warning(f"[Job {job_id}] Failed to send processing reaction: {e}")
 
-                # Process the PDF document
                 try:
-                    await process_pdf_document(
+                    await enqueue_pdf_processing(
+                        redis=redis,
                         document_id=document_id,
                         file_path=document_path,
                         whatsapp_jid=whatsapp_jid,
+                        job_id=job_id,
+                        whatsapp_message_id=whatsapp_message_id,
+                        client_id=client_id,
                     )
-                    logger.info(f"[Job {job_id}] Document processing completed")
-
-                    # Send success reaction
-                    if whatsapp_message_id:
-                        try:
-                            await whatsapp_client.send_reaction(
-                                whatsapp_jid, whatsapp_message_id, "✅"
-                            )
-                            logger.info(f"[Job {job_id}] Sent success reaction ✅")
-                        except Exception as e:
-                            logger.warning(f"[Job {job_id}] Failed to send success reaction: {e}")
-
+                    logger.info(f"[Job {job_id}] Document enqueued for processing")
                 except Exception as e:
-                    logger.error(f"[Job {job_id}] Document processing failed: {e}")
+                    logger.error(f"[Job {job_id}] Failed to enqueue document: {e}", exc_info=True)
 
-                    # Send failure reaction
                     if whatsapp_message_id:
                         try:
                             await whatsapp_client.send_reaction(
                                 whatsapp_jid, whatsapp_message_id, "❌"
                             )
-                            logger.info(f"[Job {job_id}] Sent failure reaction ❌")
                         except Exception as reaction_error:
                             logger.warning(
                                 f"[Job {job_id}] Failed to send failure reaction: {reaction_error}"
                             )
 
-                    # Continue to send error response to user
                     full_response = f"Sorry, I couldn't process your document '{document_filename}'. Please try uploading it again."
 
                     # Save response and return early
@@ -170,18 +166,25 @@ async def process_chat_job_direct(
                             "conversation_type": conversation_type,
                             "total_chunks": 1,
                             "user_message_id": user_message_id,
-                            "error": str(e),
+                            "error": "document_enqueue_failed",
                         },
                     )
 
                     return {
                         "success": False,
                         "job_id": job_id,
-                        "error": str(e),
+                        "error": "document_enqueue_failed",
                     }
 
-                # Update message to indicate document was processed
-                message = f"I have uploaded a document called '{document_filename}'. Please analyze it and let me know what it contains."
+                # The document is parsed asynchronously, so the agent cannot read
+                # it yet: say so, instead of asking it to analyze content it can't
+                # see (which invites a made-up summary).
+                message = (
+                    f"I have uploaded a document called '{document_filename}'. It is being "
+                    "processed in the background and is not searchable yet. Acknowledge it "
+                    "briefly: I'll see a ✅ reaction on my message when it's ready (❌ if it "
+                    "fails), and then I can ask questions about it."
+                )
 
             # Step 3: Prepare agent dependencies
             agent_deps = AgentDeps(
@@ -193,6 +196,7 @@ async def process_chat_job_direct(
                 http_client=http_client,
                 whatsapp_client=whatsapp_client,
                 current_message_id=whatsapp_message_id,
+                client_id=client_id,
             )
 
             # Step 4: Format message with sender name for group context
@@ -212,18 +216,72 @@ async def process_chat_job_direct(
                         f"[Job {job_id}] Image flag set but no image data found in Redis"
                     )
 
-            async for token in get_ai_response(
-                ai_message,
-                message_history,
-                agent_deps=agent_deps,
-                image_data=image_data,
-                image_mimetype=image_mimetype,
-            ):
-                full_response += token
+            try:
+                async for token in get_ai_response(
+                    ai_message,
+                    message_history,
+                    agent_deps=agent_deps,
+                    image_data=image_data,
+                    image_mimetype=image_mimetype,
+                ):
+                    full_response += token
+            except MODEL_ERRORS as model_error:
+                logger.error(f"[Job {job_id}] AI model error: {model_error}", exc_info=True)
+                # Deliver the fallback text as a normal COMPLETED job (no "status":
+                # "failed"): the clients treat "failed" as an exception and answer
+                # it with their OWN error text + ❌, so publishing this text AND
+                # failing the job would double both. Here the ❌ comes from us
+                # (once) and the client simply delivers the text. Nothing partial
+                # has reached the user (chunks are published only on completion).
+                # The text is NOT saved to history, so it never replays to the model
+                # as a prior assistant turn.
+                if whatsapp_message_id:
+                    try:
+                        await whatsapp_client.send_reaction(whatsapp_jid, whatsapp_message_id, "❌")
+                    except Exception as reaction_error:
+                        logger.warning(
+                            f"[Job {job_id}] Failed to send error reaction: {reaction_error}",
+                            exc_info=True,
+                        )
+
+                if has_image:
+                    await delete_job_image(redis, job_id)
+
+                await save_job_chunk(redis, job_id, 0, MODEL_ERROR_FALLBACK_TEXT)
+                chunk_index = 1
+                await set_job_metadata(
+                    redis,
+                    job_id,
+                    {
+                        "user_id": user_id,
+                        "whatsapp_jid": whatsapp_jid,
+                        "message": message,
+                        "conversation_type": conversation_type,
+                        "total_chunks": chunk_index,
+                        "db_message_id": None,
+                        "user_message_id": user_message_id,
+                        "model_error": True,
+                    },
+                )
+
+                return {
+                    "success": True,
+                    "job_id": job_id,
+                    "total_chunks": chunk_index,
+                    "response_length": len(MODEL_ERROR_FALLBACK_TEXT),
+                    "db_message_id": None,
+                    "model_error": True,
+                }
 
             # Clean up image data from Redis after processing
             if has_image:
                 await delete_job_image(redis, job_id)
+
+            # Models answer in Markdown despite the prompt. Convert before the
+            # reply is delivered, embedded or saved — saved Markdown would be
+            # replayed as history and reinforce the habit. `---` burst lines are
+            # left untouched, so the clients still split on them.
+            full_response = markdown_to_whatsapp(full_response)
 
             # Save complete response as single chunk
             await save_job_chunk(redis, job_id, 0, full_response)
@@ -291,7 +349,9 @@ async def process_chat_job_direct(
                         db,
                         whatsapp_jid,
                         "assistant",
-                        f"[Partial - Error] {full_response}",
+                        # Converted here too: an unexpected error can skip the
+                        # happy-path conversion, and this row is replayed as history.
+                        f"[Partial - Error] {markdown_to_whatsapp(full_response)}",
                         conversation_type,
                         embedding=None,
                     )

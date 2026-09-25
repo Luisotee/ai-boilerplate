@@ -1,8 +1,17 @@
+# Fallback for builders without Dockerfile-specific ignore files. With BuildKit
+# (docker compose v2), each TS client uses packages/<pkg>/Dockerfile.dockerignore
+# instead of this file; the ai-api build context is packages/ai-api (its own
+# .dockerignore).
+
 # Node
 node_modules/
-packages/whatsapp-client/node_modules/
-packages/whatsapp-client/dist/
+**/node_modules/
+**/dist/
 packages/whatsapp-client/auth_info_baileys/
+
+# Tests (not needed in Docker builds)
+packages/*/tests/
+packages/*/vitest.config.ts
 
 # Python (for ai-api build)
 packages/ai-api/.venv/
@@ -32,3 +41,6 @@ packages/*/.env.*
 # Other
 *.md
 !packages/*/README.md
+
+# Logfire local credentials (never bake a write token into an image)
+.logfire/

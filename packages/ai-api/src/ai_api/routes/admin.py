@@ -45,9 +45,11 @@ from ..schemas import (
     UpdateSettingsRequest,
     UsersResponse,
     UserSummary,
+    WhatsAppLogoutResponse,
     WhatsAppStatusResponse,
 )
 from ..whatsapp import WhatsAppClientError, create_whatsapp_client
+from ..whitelist import parse_whitelist
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
@@ -140,6 +142,30 @@ def _settings_payload(db: Session) -> SettingsResponse:
     return SettingsResponse(settings=items)
 
 
+# Free-form model names read per run by build_runtime_model() (no choices/allowlist
+# by design); a typo surfaces as an agent error on the next message, so only reject
+# obvious garbage and cap length to keep payloads sane.
+_MODEL_NAME_KEYS = ("gemini_model", "deepseek_model")
+
+
+def _validate_model_name(key: str, value: object) -> None:
+    if not isinstance(value, str) or not value.strip():
+        raise HTTPException(status_code=400, detail=f"{key} must be a non-empty string")
+    if len(value) > 200:
+        raise HTTPException(status_code=400, detail=f"{key} is too long (max 200 characters)")
+
+
+def _validate_bot_name(value: object) -> None:
+    # Labels the bot's lines in history transcripts (format_transcript): an empty
+    # name yields ": …" lines, and a newline could forge extra transcript lines.
+    if not isinstance(value, str) or not value.strip():
+        raise HTTPException(status_code=400, detail="bot_name must be a non-empty string")
+    if len(value) > 100:
+        raise HTTPException(status_code=400, detail="bot_name is too long (max 100 characters)")
+    if "\n" in value or "\r" in value:
+        raise HTTPException(status_code=400, detail="bot_name must be a single line")
+
+
 def _validate_cross_constraints(coerced: dict[str, object]) -> None:
     """Reject overrides that would violate invariants Settings checks at boot.
 
@@ -174,20 +200,37 @@ def _validate_cross_constraints(coerced: dict[str, object]) -> None:
                 status_code=400,
                 detail="Cannot set stt_provider=whisper: whisper_base_url is not set",
             )
-    if "gemini_model" in coerced:
-        # Free-form string by design (no choices/allowlist), but reject obvious
-        # garbage and cap length to keep payloads sane.
-        value = coerced["gemini_model"]
-        if not isinstance(value, str) or not value.strip():
-            raise HTTPException(
-                status_code=400,
-                detail="gemini_model must be a non-empty string",
-            )
-        if len(value) > 200:
-            raise HTTPException(
-                status_code=400,
-                detail="gemini_model is too long (max 200 characters)",
-            )
+    for model_key in _MODEL_NAME_KEYS:
+        if model_key in coerced:
+            _validate_model_name(model_key, coerced[model_key])
+    if "bot_name" in coerced:
+        _validate_bot_name(coerced["bot_name"])
+    if "whitelist_phones" in coerced:
+        # Deliberately no *format* check: entry shapes are forward-compatible
+        # (future JID schemes land in the id set and simply never match), and
+        # normalization happens read-side in parse_whitelist so /admin echoes
+        # back exactly what the operator typed.
+        value = coerced["whitelist_phones"]
+        if isinstance(value, str):
+            if len(value) > 4000:
+                raise HTTPException(
+                    status_code=400,
+                    detail="whitelist_phones is too long (max 4000 characters)",
+                )
+            # But an *empty* whitelist means "allow everyone", and an override
+            # shadows the env value across restarts (runtime_config.get prefers
+            # an existing override). So clearing a dashboard field to "revert to
+            # default" would silently disable the gate for good. Refuse, and
+            # point at the only operation that actually reverts.
+            if parse_whitelist(value).size == 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "whitelist_phones cannot be set to an empty list (that would "
+                        "allow every user). Use DELETE /admin/settings/whitelist_phones "
+                        "to revert to the WHITELIST_PHONES value from the environment."
+                    ),
+                )
 
 
 @router.get("/settings", response_model=SettingsResponse)
@@ -234,6 +277,16 @@ async def patch_settings(request: UpdateSettingsRequest, db: Session = Depends(g
 
     runtime_config.invalidate()
     logger.info("Runtime settings updated: %s", ", ".join(coerced))
+    if "whitelist_phones" in coerced:
+        # Log the parsed shape, not the raw value: an operator needs to see that
+        # the entries they typed actually landed where they expect.
+        wl = parse_whitelist(coerced["whitelist_phones"])
+        logger.info(
+            "Whitelist updated: %d entries (%d phone, %d id)",
+            wl.size,
+            len(wl.phones),
+            len(wl.ids),
+        )
     return _settings_payload(db)
 
 
@@ -290,6 +343,8 @@ async def list_users(
         UserSummary(
             whatsapp_jid=user.whatsapp_jid,
             name=user.name,
+            phone=user.phone,
+            whatsapp_lid=user.whatsapp_lid,
             conversation_type=user.conversation_type,
             message_count=message_count,
             last_message_at=last_message_at,
@@ -379,4 +434,46 @@ async def whatsapp_qr():
         connected=status == "connected",
         qr=data.get("qr"),
         qr_generated_at=data.get("qrGeneratedAt"),
+    )
+
+
+@router.post("/whatsapp/logout", response_model=WhatsAppLogoutResponse)
+async def whatsapp_logout():
+    """Force the Baileys session to log out, clear auth, and regenerate a QR.
+
+    Unlike the passive QR poll, this is an explicit action, so it surfaces failure
+    rather than degrading — and it distinguishes the two failure modes: a genuinely
+    unreachable client is a 503 (transport error), while a reachable client that
+    reports an error is a 502 (bad upstream response) carrying the real message, so
+    an operator can tell a networking problem from, say, a read-only auth volume.
+    After a success, poll ``GET /admin/whatsapp/qr`` for the fresh pairing code.
+    """
+    base_url = get_whatsapp_client_url(None)  # Baileys client (client_id=None)
+    try:
+        async with httpx.AsyncClient(timeout=settings.whatsapp_client_timeout) as http_client:
+            client = create_whatsapp_client(
+                http_client=http_client,
+                base_url=base_url,
+                api_key=get_whatsapp_api_key(None),
+            )
+            result = await client.logout_whatsapp()
+    except httpx.HTTPError as e:
+        # Transport-level failure — the client is genuinely unreachable.
+        logger.warning("WhatsApp client unreachable for logout: %s", e)
+        raise HTTPException(status_code=503, detail="WhatsApp client unreachable") from e
+    except WhatsAppClientError as e:
+        # Reachable, but the client returned an error status (e.g. a Node-side 500
+        # from a read-only auth volume). Surface it as a bad-gateway with the real
+        # message instead of masking it as "unreachable".
+        logger.warning("WhatsApp client failed to log out: %s", e)
+        raise HTTPException(status_code=502, detail=f"WhatsApp client error: {e.message}") from e
+
+    if not result.success:
+        # Reachable and 2xx, but the client reported the logout didn't take — don't
+        # pretend it worked with a 200.
+        raise HTTPException(status_code=502, detail="WhatsApp client reported logout failure")
+
+    return WhatsAppLogoutResponse(
+        success=result.success,
+        detail="Logout completed; poll the QR endpoint for the new pairing code.",
     )

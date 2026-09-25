@@ -21,8 +21,10 @@ from tests.helpers.factories import make_conversation_message, make_user
 
 
 # Patch the whitelist check so tests are not affected by env-level WHITELIST_PHONES.
-# The _is_whitelisted function reads a module-level set from config.py which may be
-# populated by the root .env file; patching it to always return True isolates tests.
+# _is_whitelisted reads the whitelist at request time via
+# runtime_config.get("whitelist_phones"), which falls back to the root .env value;
+# patching it to always return True isolates tests. TestWhitelistEnforcement below
+# deliberately does NOT patch it, and exercises the real matcher instead.
 def _patch_whitelist():
     """Return a fresh patch for the whitelist check on each use."""
     return patch("ai_api.routes.chat._is_whitelisted", return_value=True)
@@ -710,3 +712,194 @@ class TestEnqueueRegularMessage:
                 assert data["message"] == "Job queued successfully"
             finally:
                 _cleanup_overrides()
+
+
+# ---------------------------------------------------------------------------
+# POST /chat (synchronous) — model errors
+# ---------------------------------------------------------------------------
+
+
+class TestSyncChatModelErrors:
+    """A failed model chain answers 503 (retryable) without leaking provider detail;
+    anything else stays a generic 500. Neither saves an assistant turn."""
+
+    @staticmethod
+    def _failing_agent(exc):
+        async def failing(*_args, **_kwargs):
+            raise exc
+            yield  # unreachable — makes this an async generator
+
+        return failing
+
+    async def _post(self, exc):
+        mock_db = _make_mock_db()
+        mock_user = make_user(whatsapp_jid=TEST_JID)
+        with (
+            _patch_whitelist(),
+            patch("ai_api.routes.chat.get_conversation_history", return_value=[]),
+            patch("ai_api.routes.chat.get_or_create_user", return_value=mock_user),
+            patch("ai_api.routes.chat.create_embedding_service", return_value=None),
+            patch("ai_api.routes.chat.save_message") as mock_save,
+            patch("ai_api.routes.chat.get_ai_response", self._failing_agent(exc)),
+        ):
+            app = _get_app_with_db_override(mock_db)
+            try:
+                transport = ASGITransport(app=app)
+                async with AsyncClient(transport=transport, base_url="http://test") as client:
+                    response = await client.post(
+                        "/chat",
+                        json={
+                            "whatsapp_jid": TEST_JID,
+                            "message": "Hi",
+                            "conversation_type": "private",
+                        },
+                        headers=AUTH_HEADERS,
+                    )
+            finally:
+                _cleanup_overrides()
+        roles = [c.args[2] for c in mock_save.call_args_list]
+        return response, roles
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_model_error_returns_503(self, *_):
+        from pydantic_ai.exceptions import ModelHTTPError
+
+        exc = ModelHTTPError(status_code=503, model_name="gemini-x", body={"secret": "detail"})
+        response, roles = await self._post(exc)
+
+        assert response.status_code == 503
+        assert response.json()["detail"] == "AI model temporarily unavailable"
+        assert "secret" not in response.text
+        assert "assistant" not in roles
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_other_error_returns_500(self, *_):
+        response, roles = await self._post(RuntimeError("boom"))
+
+        assert response.status_code == 500
+        assert response.json()["detail"] == "Internal server error"
+        assert "assistant" not in roles
+
+
+class TestSyncChatMarkdownSanitising:
+    """The sync /chat path applies the same Markdown → WhatsApp backstop as the
+    stream processor, to both the returned and the saved reply."""
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_reply_is_converted_before_return_and_save(self, *_):
+        async def streaming(*_args, **_kwargs):
+            yield "## Result\n"
+            yield "**Yes** — see [docs](https://example.com)"
+
+        mock_db = _make_mock_db()
+        mock_user = make_user(whatsapp_jid=TEST_JID)
+        with (
+            _patch_whitelist(),
+            patch("ai_api.routes.chat.get_conversation_history", return_value=[]),
+            patch("ai_api.routes.chat.get_or_create_user", return_value=mock_user),
+            patch("ai_api.routes.chat.create_embedding_service", return_value=None),
+            patch("ai_api.routes.chat.save_message") as mock_save,
+            patch("ai_api.routes.chat.get_ai_response", streaming),
+        ):
+            app = _get_app_with_db_override(mock_db)
+            try:
+                transport = ASGITransport(app=app)
+                async with AsyncClient(transport=transport, base_url="http://test") as client:
+                    response = await client.post(
+                        "/chat",
+                        json={
+                            "whatsapp_jid": TEST_JID,
+                            "message": "Hi",
+                            "conversation_type": "private",
+                        },
+                        headers=AUTH_HEADERS,
+                    )
+            finally:
+                _cleanup_overrides()
+
+        expected = "*Result*\n*Yes* — see docs: https://example.com"
+        assert response.status_code == 200
+        assert response.json()["response"] == expected
+        saved = [c.args[3] for c in mock_save.call_args_list if c.args[2] == "assistant"]
+        assert saved == [expected]
+
+
+# ---------------------------------------------------------------------------
+# Whitelist — exercised for real (no _is_whitelisted patch)
+# ---------------------------------------------------------------------------
+
+
+class TestWhitelistEnforcement:
+    """End-to-end check of the real matcher on the route.
+
+    Under Baileys v7 the chat is LID-addressed, so `whatsapp_jid` is an
+    anonymized `@lid` whose digits are not a phone. A bare-phone whitelist entry
+    can only admit it via the `phone` field the client already sends.
+    """
+
+    PHONE = "4915755945319"
+    LID_JID = "109994229891095@lid"
+
+    @staticmethod
+    def _patch_runtime_whitelist(value: str):
+        """Route only whitelist_phones through `value`; other keys stay real."""
+        from ai_api import runtime_config as rc_module
+        from ai_api.routes.chat import _parse_whitelist
+
+        _parse_whitelist.cache_clear()
+        real_get = rc_module.runtime_config.get
+
+        def fake_get(key, *args, **kwargs):
+            if key == "whitelist_phones":
+                return value
+            return real_get(key, *args, **kwargs)
+
+        return patch("ai_api.routes.chat.runtime_config.get", side_effect=fake_get)
+
+    async def _post(self, body):
+        mock_db = _make_mock_db()
+        mock_user = make_user(whatsapp_jid=self.LID_JID)
+        with patch("ai_api.routes.chat.get_or_create_user", return_value=mock_user):
+            app = _get_app_with_db_override(mock_db)
+            try:
+                transport = ASGITransport(app=app)
+                async with AsyncClient(transport=transport, base_url="http://test") as client:
+                    return await client.post("/chat/enqueue", json=body, headers=AUTH_HEADERS)
+            finally:
+                _cleanup_overrides()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_bare_phone_admits_a_lid_chat(self, _cleanup, _redis, _init_db):
+        with self._patch_runtime_whitelist(self.PHONE):
+            response = await self._post(
+                {
+                    "whatsapp_jid": self.LID_JID,
+                    "message": "/help",
+                    "conversation_type": "private",
+                    "phone": f"+{self.PHONE}",
+                }
+            )
+        assert response.status_code == 200
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_same_chat_without_phone_is_blocked(self, _cleanup, _redis, _init_db):
+        # Fail closed when the LID<->PN mapping has not resolved yet.
+        with self._patch_runtime_whitelist(self.PHONE):
+            response = await self._post(
+                {
+                    "whatsapp_jid": self.LID_JID,
+                    "message": "/help",
+                    "conversation_type": "private",
+                }
+            )
+        assert response.status_code == 403

@@ -193,11 +193,12 @@ if [ "$SKIP_ENV" = false ]; then
   # otherwise sed substitutions silently no-op and the user ends up with a
   # half-configured .env only discovered at runtime.
   REQUIRED_KEYS=(
-    POSTGRES_PASSWORD REDIS_PASSWORD GEMINI_API_KEY AI_API_KEY
+    POSTGRES_PASSWORD REDIS_PASSWORD GEMINI_API_KEY GEMINI_MODEL AI_API_KEY
     WHATSAPP_API_KEY DATABASE_URL GROQ_API_KEY LLAMA_CLOUD_API_KEY
     META_PHONE_NUMBER_ID META_ACCESS_TOKEN META_APP_SECRET META_WEBHOOK_VERIFY_TOKEN
     STT_PROVIDER WHISPER_MODEL WHISPER_TIMEOUT_SECONDS INSTALL_DOCLING
-    TELEGRAM_BOT_TOKEN TELEGRAM_WEBHOOK_SECRET
+    TELEGRAM_BOT_TOKEN TELEGRAM_WEBHOOK_SECRET TELEGRAM_MODE
+    LOGFIRE_TOKEN LOGFIRE_ENVIRONMENT
     SERVICE_NAME COMPOSE_PROJECT_NAME
     POSTGRES_PORT REDIS_PORT ADMINER_PORT AI_API_PORT WHISPER_PORT
     WHATSAPP_API_PORT WHATSAPP_CLOUD_PORT TELEGRAM_PORT
@@ -325,6 +326,33 @@ if [ "$SKIP_ENV" = false ]; then
     print_error "Gemini API key is required"
   done
 
+  echo ""
+  echo "  Chat model. The default is Google's cheapest tier; change it any time in"
+  echo "  .env, or live via PATCH /admin/settings (no restart needed)."
+  read -rp "  GEMINI_MODEL (Enter for 'gemini-3.1-flash-lite'): " GEMINI_MODEL_IN
+  GEMINI_MODEL_IN=$(sanitize "${GEMINI_MODEL_IN:-gemini-3.1-flash-lite}")
+
+  # Optional: DeepSeek as the primary model (Gemini becomes the fallback).
+  # Deliberately NOT in REQUIRED_KEYS — without it the agent runs on Gemini alone.
+  echo ""
+  echo "  Optional: DeepSeek as the primary chat model, with Gemini as the automatic fallback."
+  echo "  Note: chat content is sent to DeepSeek's servers (China) when this is set."
+  read -rp "  Set up DeepSeek as the primary model? (y/N): " SETUP_DEEPSEEK
+  if [[ "$SETUP_DEEPSEEK" =~ ^[Yy]$ ]]; then
+    echo -e "  ${YELLOW}Get your key at: https://platform.deepseek.com/api_keys${NC}"
+    read -rsp "  DEEPSEEK_API_KEY: " DEEPSEEK_KEY
+    echo
+    DEEPSEEK_KEY=$(sanitize "$DEEPSEEK_KEY")
+    if [ -n "$DEEPSEEK_KEY" ]; then
+      sed -i "s|^DEEPSEEK_API_KEY=.*|DEEPSEEK_API_KEY=$(escape_sed "$DEEPSEEK_KEY")|" "$ENV_FILE"
+      print_success "DeepSeek configured (Gemini is the fallback)"
+    else
+      print_warning "DEEPSEEK_API_KEY left empty — agent will run on Gemini only"
+    fi
+  else
+    print_warning "Skipped DeepSeek — agent will run on Gemini only"
+  fi
+
   # Inter-service auth keys
   echo ""
   echo "  Inter-service authentication keys (used internally between services)."
@@ -351,6 +379,7 @@ if [ "$SKIP_ENV" = false ]; then
   sed -i "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$(escape_sed "$PG_PASS")|" "$ENV_FILE"
   sed -i "s|^REDIS_PASSWORD=.*|REDIS_PASSWORD=$(escape_sed "$REDIS_PASS")|" "$ENV_FILE"
   sed -i "s|^GEMINI_API_KEY=.*|GEMINI_API_KEY=$(escape_sed "$GEMINI_KEY")|" "$ENV_FILE"
+  sed -i "s|^GEMINI_MODEL=.*|GEMINI_MODEL=$(escape_sed "$GEMINI_MODEL_IN")|" "$ENV_FILE"
   sed -i "s|^AI_API_KEY=.*|AI_API_KEY=$(escape_sed "$AI_KEY")|" "$ENV_FILE"
   sed -i "s|^WHATSAPP_API_KEY=.*|WHATSAPP_API_KEY=$(escape_sed "$WA_KEY")|" "$ENV_FILE"
   sed -i "s|^DATABASE_URL=.*|DATABASE_URL=$(escape_sed "$DATABASE_URL")|" "$ENV_FILE"
@@ -409,13 +438,25 @@ if [ "$SKIP_ENV" = false ]; then
     echo
     TG_TOKEN=$(sanitize "$TG_TOKEN")
     DEFAULT_TG_SECRET=$(generate_hex_key)
-    read -rp "  TELEGRAM_WEBHOOK_SECRET (Enter to auto-generate): " TG_SECRET
-    TG_SECRET=$(sanitize "${TG_SECRET:-$DEFAULT_TG_SECRET}")
-    read -rp "  TELEGRAM_PUBLIC_WEBHOOK_URL (public https URL ending in /webhook, leave empty to skip setWebhook): " TG_URL
-    TG_URL=$(sanitize "$TG_URL")
+    echo -e "  ${YELLOW}Delivery mode: 'polling' needs no public URL (good for local/dev or a host${NC}"
+    echo -e "  ${YELLOW}behind NAT); 'webhook' needs a public HTTPS URL pointing at /webhook.${NC}"
+    read -rp "  TELEGRAM_MODE [webhook/polling] (Enter for webhook): " TG_MODE
+    TG_MODE=$(sanitize "${TG_MODE:-webhook}")
+    if [ "$TG_MODE" != "polling" ]; then
+      TG_MODE=webhook
+    fi
+    TG_SECRET="$DEFAULT_TG_SECRET"
+    TG_URL=""
+    if [ "$TG_MODE" = "webhook" ]; then
+      read -rp "  TELEGRAM_WEBHOOK_SECRET (Enter to auto-generate): " TG_SECRET
+      TG_SECRET=$(sanitize "${TG_SECRET:-$DEFAULT_TG_SECRET}")
+      read -rp "  TELEGRAM_PUBLIC_WEBHOOK_URL (public https URL ending in /webhook, leave empty to skip setWebhook): " TG_URL
+      TG_URL=$(sanitize "$TG_URL")
+    fi
 
     if [ -n "$TG_TOKEN" ]; then
       sed -i "s|^TELEGRAM_BOT_TOKEN=.*|TELEGRAM_BOT_TOKEN=$(escape_sed "$TG_TOKEN")|" "$ENV_FILE"
+      sed -i "s|^TELEGRAM_MODE=.*|TELEGRAM_MODE=$(escape_sed "$TG_MODE")|" "$ENV_FILE"
       sed -i "s|^TELEGRAM_WEBHOOK_SECRET=.*|TELEGRAM_WEBHOOK_SECRET=$(escape_sed "$TG_SECRET")|" "$ENV_FILE"
       if [ -n "$TG_URL" ]; then
         sed -i "s|^TELEGRAM_PUBLIC_WEBHOOK_URL=.*|TELEGRAM_PUBLIC_WEBHOOK_URL=$(escape_sed "$TG_URL")|" "$ENV_FILE"
@@ -535,6 +576,31 @@ if [ "$SKIP_ENV" = false ]; then
     else
       print_warning "Skipped self-hosted Whisper — enable later by uncommenting WHISPER_BASE_URL in .env"
     fi
+  fi
+
+  # ── Optional: Logfire (LLM cost tracking) ─────────────
+  echo ""
+  echo "  Logfire tracks how many tokens each conversation uses and what it costs."
+  echo "  Free tier: 10M records/month, hard-capped at \$0 — it can never bill you."
+  echo "  Message content is NOT sent: token counts, cost and latency only."
+  read -rp "  Set up Logfire for LLM cost tracking? (y/N): " SETUP_LOGFIRE
+  if [[ "$SETUP_LOGFIRE" =~ ^[Yy]$ ]]; then
+    echo -e "  ${YELLOW}Create a project and write token at: https://logfire.pydantic.dev${NC}"
+    read -rsp "  LOGFIRE_TOKEN: " LOGFIRE_KEY
+    echo
+    LOGFIRE_KEY=$(sanitize "$LOGFIRE_KEY")
+    if [ -n "$LOGFIRE_KEY" ]; then
+      sed -i "s|^LOGFIRE_TOKEN=.*|LOGFIRE_TOKEN=$(escape_sed "$LOGFIRE_KEY")|" "$ENV_FILE"
+      read -rp "  LOGFIRE_ENVIRONMENT (Enter for 'development'): " LOGFIRE_ENV
+      LOGFIRE_ENV=$(sanitize "${LOGFIRE_ENV:-development}")
+      sed -i "s|^LOGFIRE_ENVIRONMENT=.*|LOGFIRE_ENVIRONMENT=$(escape_sed "$LOGFIRE_ENV")|" "$ENV_FILE"
+      print_success "Logfire configured (environment: $LOGFIRE_ENV)"
+      echo "  Traces appear under the 'ai-api-worker' service — that's the process running the agent."
+    else
+      print_warning "LOGFIRE_TOKEN left empty — cost tracking stays disabled"
+    fi
+  else
+    print_warning "Skipped Logfire — set LOGFIRE_TOKEN in .env later to enable cost tracking"
   fi
 fi
 

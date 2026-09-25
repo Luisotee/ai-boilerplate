@@ -56,7 +56,9 @@ async function transcribeAudio(
   mimetype: string,
   filename: string
 ): Promise<string> {
-  const blob = new Blob([buffer], { type: mimetype });
+  // Copy into a plain Uint8Array: a Node Buffer may be backed by a SharedArrayBuffer,
+  // which the DOM BlobPart type rejects (same as the Cloud/Telegram clients).
+  const blob = new Blob([new Uint8Array(buffer)], { type: mimetype });
   const formData = new FormData();
   formData.append('file', blob, filename);
 

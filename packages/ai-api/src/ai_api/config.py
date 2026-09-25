@@ -27,7 +27,18 @@ class Settings(BaseSettings):
     # Required
     database_url: str
     gemini_api_key: str
-    gemini_model: str = "gemini-2.5-flash"  # primary LLM; overridable at runtime via /admin
+    # Gemini: the fallback when DEEPSEEK_API_KEY is set, otherwise the only model.
+    # Overridable at runtime via /admin.
+    gemini_model: str = "gemini-3.1-flash-lite"
+
+    # DeepSeek primary model (optional — when set, the agent runs DeepSeek first and
+    # falls back to Gemini via FallbackModel; when unset, it runs on Gemini alone)
+    deepseek_api_key: str | None = None
+    deepseek_model: str = "deepseek-flash"
+    # httpx read timeout (max gap between bytes) AND the wall-clock limit on
+    # receiving the first chunk (agent/model_chain.py GuardedModel) — NOT a cap on
+    # the whole reply. Short so a hung DeepSeek rolls over to Gemini.
+    deepseek_timeout_seconds: float = Field(30, gt=0)
 
     # API Authentication
     ai_api_key: str  # Required — app fails to start if not set
@@ -40,7 +51,17 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     # User Whitelist
-    whitelist_phones: str = ""  # Comma-separated phone numbers/group JIDs (empty = all allowed)
+    # Comma-separated entries, each matched as either a phone number or a
+    # verbatim chat id (group JID, @lid, tg:<chat_id>). Empty = all allowed.
+    whitelist_phones: str = ""
+    # How a GROUP gets in scope when the whitelist is set (shared with the TS
+    # clients via the root .env):
+    #   jid        - the group's own chat id must be listed (historical behaviour)
+    #   membership - the chat client decides (Baileys: the group has a
+    #                whitelisted member; Telegram: any group), and replies only
+    #                to whitelisted senders. This API then admits every group
+    #                JID, because it cannot see group membership.
+    group_gating: Literal["jid", "membership"] = "jid"
 
     # CORS
     cors_origins: str = ""  # Comma-separated allowed origins
@@ -56,9 +77,8 @@ class Settings(BaseSettings):
     redis_password: str | None = None
 
     # Queue
-    arq_max_jobs: int = 50
-    arq_job_timeout: int = 120
-    arq_poll_delay: float = 0.1
+    # TTL (seconds) of job metadata in Redis. Keeps its legacy ARQ_KEEP_RESULT
+    # env name from the retired arq worker so existing overrides still apply.
     arq_keep_result: int = 3600
     queue_chunk_ttl: int = 3600
     queue_per_user_max_jobs: int = 1
@@ -66,6 +86,16 @@ class Settings(BaseSettings):
     # History
     history_limit_private: int = 20
     history_limit_group: int = 30
+    # How the bot's own lines are labelled in transcripts the agent reads back
+    # (get_chat_history). Overridable at runtime via /admin.
+    bot_name: str = "Assistant"
+
+    # Shared-group tools (get_group_context / send_group_message): let a user,
+    # in a PRIVATE chat, read and post into groups they share with the bot.
+    # Off by default: it moves group transcripts into private-chat model
+    # context (and so to the LLM provider in a new context) and lets the bot
+    # post into groups on a member's behalf. Overridable at runtime via /admin.
+    shared_group_tools_enabled: bool = False
 
     # Token Management
     max_context_tokens: int = 50000
@@ -83,6 +113,17 @@ class Settings(BaseSettings):
     kb_search_limit: int = 5
     kb_similarity_threshold: float = 0.7
     kb_max_chunk_tokens: int = 512
+
+    # PDF Processing Queue (stream:pdf_processing, consumed by the stream worker)
+    # Max PDFs parsed at once PER WORKER PROCESS. Each Docling parse can take
+    # 1-2 GB of RAM, so keep this low on small hosts (the worker container is
+    # capped at 2G by default). LlamaParse runs in the cloud and is cheap locally.
+    kb_max_concurrent_processing: int = Field(2, ge=1)
+    # Retries after a retriable failure (timeouts, network, HTTP 429/5xx), and
+    # re-deliveries of a job whose worker died mid-parse. 0 disables retrying.
+    kb_max_pdf_retries: int = Field(3, ge=0)
+    # Exponential backoff base: delay = base * 4**attempt (30s, 120s, 480s).
+    kb_retry_base_delay_seconds: int = Field(30, ge=0)
 
     # PDF Processing Timeouts
     # Outer wrapper for the entire pipeline. Must be > llamaparse_timeout_seconds
@@ -156,6 +197,11 @@ class Settings(BaseSettings):
     db_pool_recycle: int = 3600
     db_pool_pre_ping: bool = True
     db_echo_pool: bool = False
+
+    # Observability — Logfire is disabled entirely unless a write token is set.
+    # Read once at startup by instrument.py; changing them needs a restart.
+    logfire_token: str | None = None
+    logfire_environment: str = "development"
 
     model_config = SettingsConfigDict(
         env_file=get_env_files(),
