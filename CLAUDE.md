@@ -172,7 +172,7 @@ cd packages/ai-api && uv run pytest tests/unit  # AI API unit tests only
   docker exec -i aiagent-postgres psql -U aiagent -d aiagent \
     < packages/ai-api/docs/migrations/<file>.sql
   ```
-  (`aiagent-postgres` is the compose `container_name`; substitute your `POSTGRES_USER` / `POSTGRES_DB` if you changed the defaults.) Current migrations: `2026-09-21-kb-file-hash.sql`
+  (`aiagent-postgres` is the compose `container_name`, `${SERVICE_NAME}-postgres`; substitute `<SERVICE_NAME>-postgres` and your `POSTGRES_USER` / `POSTGRES_DB` if you changed the defaults.) Current migrations: `2026-09-21-kb-file-hash.sql`
 - **Knowledge-base dedup**: `knowledge_base_documents.file_hash` (SHA-256 hex of the uploaded bytes, indexed, computed while streaming the upload to disk). `POST /knowledge-base/upload` answers **409** when identical content is already in the KB; the batch route rejects that file (and a repeat of an earlier file in the same batch) while accepting the rest. Only global documents with a status other than `failed` count — conversation-scoped chat PDFs never block an upload, and a failed document can be re-uploaded. Rows from before the migration have `file_hash = NULL` and never match. Both upload routes are `@limiter.exempt` (bulk loads via `./upload-kb.sh <dir>`, which posts a folder of PDFs to the batch route with `AI_API_KEY` from the env or `.env`); they stay behind `X-API-Key`
 - Models: `database.py` (users, messages, preferences, core_memories, bot_prompt, runtime_settings) + `kb_models.py` (documents, chunks)
 - **Core memories**: one markdown document per user (`core_memories` table), injected into the prompt via `@agent.instructions inject_core_memory` in `agent/core.py`
