@@ -254,7 +254,7 @@ pnpm format          # Format all code
 
 ### Database Access
 - **Adminer GUI:** http://localhost:8080 (postgres / aiagent / changeme)
-- **Direct:** `docker exec -it aiagent-postgres psql -U aiagent -d aiagent`
+- **Direct:** `docker exec -it aiagent-postgres psql -U aiagent -d aiagent` (the container is `<SERVICE_NAME>-postgres`; substitute yours if you changed `SERVICE_NAME`)
 
 ## Configuration
 
