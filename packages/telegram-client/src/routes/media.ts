@@ -31,6 +31,7 @@ export async function registerMediaRoutes(app: FastifyInstance) {
         response: {
           200: MediaResponseSchema,
           400: ErrorResponseSchema,
+          403: ErrorResponseSchema,
           500: ErrorResponseSchema,
           503: ErrorResponseSchema,
         },
@@ -72,6 +73,7 @@ export async function registerMediaRoutes(app: FastifyInstance) {
         response: {
           200: MediaResponseSchema,
           400: ErrorResponseSchema,
+          403: ErrorResponseSchema,
           500: ErrorResponseSchema,
           503: ErrorResponseSchema,
         },

@@ -595,7 +595,16 @@ class TestGroupAdminFailsClosed:
 
     @pytest.mark.parametrize("is_admin", [None, False])
     @pytest.mark.parametrize(
-        "message", ["/clean all", "/tts on", "/stt lang en", "/settings", "/memories clear"]
+        "message",
+        [
+            "/clean all",
+            "/tts on",
+            "/stt lang en",
+            "/settings",
+            "/memories clear",
+            "/broadcast off",
+            "/broadcast",
+        ],
     )
     def test_refused_unless_explicitly_admin(self, message, is_admin):
         with patch("ai_api.commands.handle_clean_command") as mock_clean:
@@ -696,3 +705,59 @@ class TestParseAndExecuteMemoriesClear:
 
         assert result.is_command is True
         assert "Likes pizza" in result.response_text
+
+
+class TestBroadcastCommand:
+    """`/broadcast [on|off]` flips users.broadcast_opt_out (not a preference)."""
+
+    def _db(self, opt_out=False):
+        db = MagicMock()
+        user = MagicMock()
+        user.broadcast_opt_out = opt_out
+        db.get.return_value = user
+        return db, user
+
+    def test_off_opts_out(self):
+        db, user = self._db(opt_out=False)
+        result = parse_and_execute(db, "user-123", "123@s.whatsapp.net", "/broadcast off")
+        assert user.broadcast_opt_out is True
+        db.commit.assert_called_once()
+        assert "won't receive" in result.response_text
+
+    def test_on_opts_back_in(self):
+        db, user = self._db(opt_out=True)
+        result = parse_and_execute(db, "user-123", "123@s.whatsapp.net", "/broadcast ON")
+        assert user.broadcast_opt_out is False
+        assert "receive update announcements again" in result.response_text
+
+    def test_no_change_no_commit(self):
+        db, _ = self._db(opt_out=True)
+        parse_and_execute(db, "user-123", "123@s.whatsapp.net", "/broadcast off")
+        db.commit.assert_not_called()
+
+    def test_status_without_argument(self):
+        db, _ = self._db(opt_out=True)
+        result = parse_and_execute(db, "user-123", "123@s.whatsapp.net", "/broadcast")
+        assert "currently off" in result.response_text
+
+    def test_group_admin_can_opt_the_group_out(self):
+        db, user = self._db(opt_out=False)
+        parse_and_execute(
+            db,
+            "user-123",
+            "group@g.us",
+            "@bot /broadcast off",
+            conversation_type="group",
+            is_group_admin=True,
+        )
+        assert user.broadcast_opt_out is True
+
+    def test_settings_shows_announcement_status(self):
+        db, _ = self._db(opt_out=True)
+        with patch("ai_api.commands.get_or_create_preferences") as prefs:
+            prefs.return_value = MagicMock(tts_enabled=False, tts_language="en", stt_language=None)
+            result = parse_and_execute(db, "user-123", "123@s.whatsapp.net", "/settings")
+        assert "Update announcements: off" in result.response_text
+
+    def test_listed_in_help(self):
+        assert "/broadcast off" in _get_help_text()

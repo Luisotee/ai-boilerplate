@@ -1087,3 +1087,56 @@ async def test_whatsapp_logout_requires_auth(*_):
             mock_batch.assert_called_once()
         finally:
             _cleanup()
+
+
+class TestBroadcastSettingsValidation:
+    """The broadcast worker reads these per send; PATCH rejects unusable values."""
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_rejects_bad_values(self, *_):
+        bad = [
+            {"broadcast_send_window": "9am-5pm"},
+            {"broadcast_timezone": "Mars/Olympus"},
+            {"broadcast_batch_size": 0},
+            {"broadcast_daily_limit": -1},
+            {"broadcast_min_delay_seconds": 90, "broadcast_max_delay_seconds": 30},
+            {"broadcast_footer": "x" * 501},
+        ]
+        app = _app_with_db(_make_mock_db())
+        try:
+            async with _client(app) as client:
+                for overrides in bad:
+                    resp = await client.patch(
+                        "/admin/settings", json={"overrides": overrides}, headers=AUTH_HEADERS
+                    )
+                    assert resp.status_code == 400, overrides
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_accepts_valid_values(self, *_):
+        app = _app_with_db(_make_mock_db())
+        try:
+            with patch("ai_api.routes.admin.set_setting_overrides_batch") as mock_set:
+                async with _client(app) as client:
+                    resp = await client.patch(
+                        "/admin/settings",
+                        json={
+                            "overrides": {
+                                "broadcast_send_window": "22:00-06:00",
+                                "broadcast_timezone": "America/Sao_Paulo",
+                                "broadcast_min_delay_seconds": 5,
+                                "broadcast_max_delay_seconds": 10,
+                                "broadcast_footer": "",
+                            }
+                        },
+                        headers=AUTH_HEADERS,
+                    )
+            assert resp.status_code == 200
+            mock_set.assert_called_once()
+        finally:
+            _cleanup()

@@ -97,6 +97,23 @@ class Settings(BaseSettings):
     # post into groups on a member's behalf. Overridable at runtime via /admin.
     shared_group_tools_enabled: bool = False
 
+    # Broadcasts (POST /admin/broadcasts, sent by the stream worker). All hot via
+    # /admin. The Baileys pacing is the anti-ban layer: a bulk send to every chat
+    # the account ever talked to is exactly what WhatsApp's spam detection looks
+    # for, so it is deliberately slow, jittered, capped and confined to daytime.
+    broadcast_footer: str = (
+        "_Don't want these updates? Just ask me to stop them, or send /broadcast off._"
+    )
+    broadcast_min_delay_seconds: int = Field(20, ge=0)
+    broadcast_max_delay_seconds: int = Field(60, ge=0)
+    broadcast_batch_size: int = Field(15, ge=1)
+    broadcast_batch_pause_seconds: int = Field(600, ge=0)
+    # Baileys messages per rolling 24h, across all broadcasts. 0 = no cap.
+    broadcast_daily_limit: int = Field(150, ge=0)
+    # "HH:MM-HH:MM" in broadcast_timezone (may wrap midnight); empty = any time.
+    broadcast_send_window: str = "09:00-21:00"
+    broadcast_timezone: str = "UTC"
+
     # Token Management
     max_context_tokens: int = 50000
     min_recent_messages: int = 5

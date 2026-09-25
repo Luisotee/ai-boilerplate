@@ -15,9 +15,9 @@ import { logger } from '../logger.js';
  * admin being told to retry; the cost of a false positive is a wiped group
  * transcript.
  *
- * Callers should invoke this lazily — only for group messages that actually
- * look like a command — so ordinary chatter costs no Bot API call. This mirrors
- * the Baileys client, which only fetches `groupMetadata` for slash commands.
+ * Callers should invoke this lazily — only for group messages addressed to the
+ * bot (commands, and plain requests an agent tool may act on) — so un-addressed
+ * chatter costs no Bot API call.
  */
 export async function isSenderGroupAdmin(ctx: TelegramContext): Promise<boolean> {
   const chatId = ctx.chat?.id;
@@ -34,18 +34,4 @@ export async function isSenderGroupAdmin(ctx: TelegramContext): Promise<boolean>
     );
     return false;
   }
-}
-
-/**
- * Does this text look like a slash command?
- *
- * Mirrors the AI API's `is_command`, which strips leading @mentions before
- * testing for a leading `/`. Used to decide whether an admin lookup is worth a
- * round trip.
- */
-export function looksLikeCommand(text: string): boolean {
-  return text
-    .replace(/^(@\S+\s*)+/, '')
-    .trimStart()
-    .startsWith('/');
 }

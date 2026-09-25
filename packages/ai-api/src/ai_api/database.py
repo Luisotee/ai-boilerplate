@@ -8,12 +8,14 @@ from sqlalchemy import (
     Column,
     DateTime,
     ForeignKey,
+    Integer,
     String,
     Text,
+    UniqueConstraint,
     create_engine,
     text,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, sessionmaker
 
@@ -50,6 +52,14 @@ class User(Base):
     name = Column(String, nullable=True)
     conversation_type = Column(String, nullable=False, index=True)  # 'private' or 'group'
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    # Broadcasts (services/broadcast.py). Opted in by default; on a group row this
+    # is the group's own flag. Lives here rather than on conversation_preferences
+    # so `/clean all` (which resets preferences) never silently re-subscribes.
+    broadcast_opt_out = Column(Boolean, default=False, server_default=text("false"), nullable=False)
+    # Chat client the user last wrote through ('baileys' | 'cloud' | 'telegram').
+    # Set on every enqueue; NULL on rows from before it existed. Decides which
+    # platform a broadcast reaches the user on.
+    last_client_id = Column(String(16), nullable=True)
 
     # Relationships
     messages = relationship(
@@ -161,6 +171,67 @@ class RuntimeSetting(Base):
     key = Column(String, primary_key=True)
     value = Column(Text, nullable=False)  # JSON-encoded scalar
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class Broadcast(Base):
+    """One operator broadcast (changelog/announcement) sent to many chats.
+
+    Created by ``POST /admin/broadcasts`` and sent by the stream worker
+    (``streams/broadcast_consumer.py``). ``status`` and ``audience`` are closed
+    enums mirrored by FleetView's Zod schemas: adding a value breaks it.
+    """
+
+    __tablename__ = "broadcasts"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    text = Column(Text, nullable=False)
+    footer = Column(Text, nullable=False, default="")  # snapshot at creation
+    audience = Column(String(16), nullable=False)  # 'private' | 'groups' | 'all'
+    platforms = Column(JSONB, nullable=False)  # ["baileys", "cloud", "telegram"] subset
+    # 'queued' | 'running' | 'paused' | 'completed' | 'cancelled'
+    status = Column(String(16), nullable=False, index=True, default="queued")
+    pause_reason = Column(String(64), nullable=True)
+    idempotency_key = Column(String(128), unique=True, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+
+    recipients = relationship(
+        "BroadcastRecipient",
+        back_populates="broadcast",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class BroadcastRecipient(Base):
+    """One chat a broadcast is delivered to, snapshotted when it is created."""
+
+    __tablename__ = "broadcast_recipients"
+    __table_args__ = (
+        UniqueConstraint("broadcast_id", "user_id", name="uq_broadcast_recipient_user"),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    broadcast_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("broadcasts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    # SET NULL: a user deleted later (e.g. a /link orphan) must not break history.
+    user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    platform = Column(String(16), nullable=False)  # 'baileys' | 'cloud' | 'telegram'
+    address = Column(String, nullable=False)  # JID handed to the client's send-text
+    # 'pending' | 'sent' | 'failed' | 'skipped'
+    status = Column(String(16), nullable=False, index=True, default="pending")
+    attempts = Column(Integer, nullable=False, default=0)
+    error_code = Column(String(64), nullable=True)
+    sent_at = Column(DateTime, nullable=True, index=True)
+
+    broadcast = relationship("Broadcast", back_populates="recipients")
 
 
 def init_db():
