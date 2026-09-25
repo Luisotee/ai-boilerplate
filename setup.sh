@@ -199,7 +199,7 @@ if [ "$SKIP_ENV" = false ]; then
     STT_PROVIDER WHISPER_MODEL WHISPER_TIMEOUT_SECONDS INSTALL_DOCLING
     TELEGRAM_BOT_TOKEN TELEGRAM_WEBHOOK_SECRET TELEGRAM_MODE
     LOGFIRE_TOKEN LOGFIRE_ENVIRONMENT
-    SERVICE_NAME COMPOSE_PROJECT_NAME
+    SERVICE_NAME
     POSTGRES_PORT REDIS_PORT ADMINER_PORT AI_API_PORT WHISPER_PORT
     WHATSAPP_API_PORT WHATSAPP_CLOUD_PORT TELEGRAM_PORT
     WHATSAPP_CLIENT_URL WHATSAPP_CLOUD_CLIENT_URL TELEGRAM_CLIENT_URL
@@ -230,7 +230,6 @@ if [ "$SKIP_ENV" = false ]; then
     print_error "Invalid name — must start with a letter/digit and contain only a-z 0-9 _ -"
   done
   sed -i "s|^SERVICE_NAME=.*|SERVICE_NAME=$(escape_sed "$SERVICE_NAME")|" "$ENV_FILE"
-  sed -i "s|^COMPOSE_PROJECT_NAME=.*|COMPOSE_PROJECT_NAME=$(escape_sed "$SERVICE_NAME")|" "$ENV_FILE"
   print_success "Service name set to '$SERVICE_NAME'"
 
   # ── Port conflict detection ───────────────────────────
