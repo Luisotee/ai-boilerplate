@@ -201,6 +201,14 @@ cd packages/ai-api && uv run pytest tests/unit  # AI API unit tests only
 
 **ALWAYS use the `docs-fetcher` subagent before writing or modifying code that touches any external library, SDK, API, or framework.** Do not rely on training data for API signatures, method names, or behavior — fetch current documentation first. This applies to Baileys, Pydantic AI, FastAPI, Fastify, Meta Cloud API, Gemini, pgvector, SQLAlchemy, Zod, Redis, Docling, Groq, and any other dependency. Launch `docs-fetcher` in parallel with your planning or exploration to avoid blocking.
 
+## Related Projects
+
+Sibling repos under `/home/ubuntu/projects/`, each with its own `CLAUDE.md` (authoritative for that repo; this file's rules don't carry over). Explore them via the read-only subagents rather than reading them inline:
+
+- **curupira-bot** (`curupira-explorer`): fork for fire alerts. Users subscribe to municipalities in Brazil (`fire_poller/`, fire-alert tools); the persona is "Curupira". Features often start here and get ported back to the boilerplate (the shared-group tools, `get_chat_history`)
+- **castanha-bot** (`castanha-explorer`): fork for Brazil-nut supply-chain prices. It integrates the external *cadeia-produtiva* platform (`cadeia` tools), sends a weekly recap and uses Portuguese commands (`/regiao`). It has no Telegram client
+- **fleetview** (`fleetview-explorer`): Next.js 16 dashboard, not a fork. It is the control plane for the whole bot fleet and keeps an encrypted registry of bots (base URL + `X-API-Key`). It calls each bot's `/admin/*`, `/health` and `/knowledge-base/*` server-side, for health, conversations, KB, prompt, settings and WhatsApp QR pairing. **Its Zod schemas mirror `routes/admin.py`, `schemas.py` and the `runtime_config.py` REGISTRY strictly** (only health is lenient). Renaming or removing a field, route or setting attribute (`hot`/`secret`/`choices`) therefore breaks the dashboard for every bot. So does a new value in a closed enum: setting `type`, KB status, QR `status`, `conversation_type`. Check `fleetview-explorer` before you change that contract. A new field is safe (unknown keys are stripped, not rejected)
+
 ## Guidelines
 
 - Use `pnpm add` / `uv add` for dependencies — NEVER edit package.json/pyproject.toml directly
