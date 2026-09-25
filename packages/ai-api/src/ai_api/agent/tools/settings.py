@@ -6,7 +6,7 @@ from ...commands import (
     format_settings,
     handle_clean_command,
 )
-from ...database import get_or_create_preferences
+from ...database import get_or_create_preferences, is_group_jid
 from ...logger import logger
 from ..core import AgentDeps, agent
 from ._db import safe_rollback
@@ -208,7 +208,8 @@ async def clean_user_data(
     "reset my account", "start over").
 
     WARNING: This is a destructive action. If the user's intent is ambiguous,
-    ask for confirmation before calling this tool.
+    ask for confirmation before calling this tool. In a group chat it clears the
+    whole group's data and only a group admin may do it.
 
     Args:
         ctx: Run context with database and user info
@@ -225,6 +226,16 @@ async def clean_user_data(
     logger.info(f"   User ID: {ctx.deps.user_id}")
     logger.info(f"   Level: {level}")
     logger.info("=" * 80)
+
+    # Same rule as the /clean command (ADMIN_ONLY_COMMANDS): in a group, wiping
+    # the shared transcript is admin-only and FAILS CLOSED — anything but an
+    # explicit True (unknown, lookup failed, older client) is refused. Without
+    # this, any member could ask the bot in plain words to clean the group.
+    if is_group_jid(ctx.deps.whatsapp_jid) and ctx.deps.is_group_admin is not True:
+        logger.info("❌ clean_user_data refused: sender is not a confirmed group admin")
+        return (
+            "Only a group admin can delete this group's data. An admin can ask me, or send /clean."
+        )
 
     try:
         result = handle_clean_command(

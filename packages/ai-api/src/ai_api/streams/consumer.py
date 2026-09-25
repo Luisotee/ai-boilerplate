@@ -163,6 +163,10 @@ async def process_single_message(user_id: str, message_id: str, data: dict):
         # Extract optional client ID (for multi-client routing)
         client_id = safe_decode(data.get(b"client_id"))
 
+        # Extract optional group-admin flag (absent = unknown, treated as not admin)
+        is_group_admin_raw = safe_decode(data.get(b"is_group_admin"))
+        is_group_admin = None if is_group_admin_raw is None else is_group_admin_raw == "true"
+
         # Call core processor function
         await process_chat_job_direct(
             user_id=safe_decode(data[b"user_id"]),
@@ -180,6 +184,7 @@ async def process_single_message(user_id: str, message_id: str, data: dict):
             document_filename=document_filename,
             sender_name=sender_name,
             client_id=client_id,
+            is_group_admin=is_group_admin,
         )
 
     except Exception as e:

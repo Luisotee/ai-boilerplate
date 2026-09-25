@@ -13,7 +13,7 @@ vi.mock('../../src/logger.js', () => ({
 }));
 
 import { bot } from '../../src/bot.js';
-import { isSenderGroupAdmin, looksLikeCommand } from '../../src/services/group-admin.js';
+import { isSenderGroupAdmin } from '../../src/services/group-admin.js';
 import type { TelegramContext } from '../../src/bot.js';
 
 function ctx(chatId?: number, userId?: number): TelegramContext {
@@ -51,23 +51,5 @@ describe('isSenderGroupAdmin', () => {
     await expect(isSenderGroupAdmin(ctx(undefined, 5))).resolves.toBe(false);
     await expect(isSenderGroupAdmin(ctx(-100, undefined))).resolves.toBe(false);
     expect(spy).not.toHaveBeenCalled();
-  });
-});
-
-describe('looksLikeCommand', () => {
-  it('detects a leading slash', () => {
-    expect(looksLikeCommand('/clean all')).toBe(true);
-    expect(looksLikeCommand('/settings@MyBot')).toBe(true);
-  });
-
-  it('skips leading @mentions like the AI API does', () => {
-    expect(looksLikeCommand('@MyBot /clean all')).toBe(true);
-    expect(looksLikeCommand('@a @b   /help')).toBe(true);
-  });
-
-  it('rejects ordinary text', () => {
-    expect(looksLikeCommand('good morning')).toBe(false);
-    expect(looksLikeCommand('a/b path')).toBe(false);
-    expect(looksLikeCommand('')).toBe(false);
   });
 });

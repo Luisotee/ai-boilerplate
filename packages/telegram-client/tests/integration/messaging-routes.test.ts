@@ -8,6 +8,7 @@
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterAll } from 'vitest';
 import type { FastifyInstance } from 'fastify';
+import { GrammyError } from 'grammy';
 
 // ---------------------------------------------------------------------------
 // Mocks — must be declared before any import that transitively loads them.
@@ -176,6 +177,47 @@ describe('Telegram messaging routes — /whatsapp/*', () => {
 
       expect(res.statusCode).toBe(500);
       expect(res.json()).toEqual({ error: 'grammY boom' });
+    });
+
+    it('returns 403 when the user blocked the bot (so broadcasts stop retrying)', async () => {
+      markBotReady();
+      mockSendText.mockRejectedValueOnce(
+        new GrammyError(
+          'Call to sendMessage failed',
+          { ok: false, error_code: 403, description: 'Forbidden: bot was blocked by the user' },
+          'sendMessage',
+          {}
+        )
+      );
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/whatsapp/send-text',
+        payload: { phoneNumber: 'tg:12345', text: 'Hi' },
+      });
+
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toEqual({ error: 'Forbidden: bot was blocked by the user' });
+    });
+
+    it('keeps other Bot API errors (e.g. 400) as 500', async () => {
+      markBotReady();
+      mockSendText.mockRejectedValueOnce(
+        new GrammyError(
+          'Call to sendMessage failed',
+          { ok: false, error_code: 400, description: 'Bad Request: chat not found' },
+          'sendMessage',
+          {}
+        )
+      );
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/whatsapp/send-text',
+        payload: { phoneNumber: 'tg:12345', text: 'Hi' },
+      });
+
+      expect(res.statusCode).toBe(500);
     });
   });
 

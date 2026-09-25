@@ -65,6 +65,7 @@ A production-ready AI agent system that brings conversational AI to WhatsApp wit
 | `/link` | Get a code to link this account to your other platform (WhatsApp ↔ Telegram) |
 | `/link [code]` | Enter a code from the other platform to finish linking |
 | `/linkphone` | Telegram only: link by sharing your phone number (must match your WhatsApp number) |
+| `/broadcast off\|on` | Stop / resume operator announcements (in groups: admins only) |
 | `/unlink` | Unlink your accounts |
 | `/help` | Show available commands |
 
@@ -228,6 +229,19 @@ The free tier covers 10M records/month and is hard-capped at $0 — it can never
 
 Bulk-load a folder of PDFs with `./upload-kb.sh /path/to/pdfs` (uses `AI_API_KEY` from the environment or `.env`; `AI_API_URL` defaults to `http://localhost:8000`). Re-running it is safe: files already in the knowledge base are rejected as duplicates.
 
+### Broadcasts (admin)
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/admin/broadcasts/platforms` | Which chat clients are reachable |
+| POST | `/admin/broadcasts/preview` | Recipient counts per platform, nothing created |
+| POST | `/admin/broadcasts` | Create + queue a broadcast (`text`, `audience`, `platforms`, `idempotency_key`) |
+| GET | `/admin/broadcasts` | List broadcasts with delivery counts |
+| GET | `/admin/broadcasts/{id}` | One broadcast's progress (poll this) |
+| GET | `/admin/broadcasts/{id}/recipients` | Per-chat delivery status |
+| POST | `/admin/broadcasts/{id}/pause` · `/resume` · `/cancel` | Control a running broadcast |
+
+Broadcasts go to every chat the bot has talked to that hasn't opted out (users send `/broadcast off` or just ask the bot; each message carries an opt-out footer). On Baileys they are deliberately slow (random 20–60s gaps, a 10-minute pause every 15 messages, 150/day, 09:00–21:00) to avoid a WhatsApp ban; tune via `BROADCAST_*`.
+
 ### Speech
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -278,6 +292,7 @@ pnpm format          # Format all code
 | `SHARED_GROUP_TOOLS_ENABLED` | `false` (default). When `true`, users can, in a private chat, read/search groups they share with the bot and ask it to post into one (Baileys + Telegram). Group transcripts then reach the LLM provider inside private conversations — see CLAUDE.md "Shared-group tools". Hot via `PATCH /admin/settings` |
 | `TELEGRAM_MODE` | `webhook` (default — Telegram POSTs to `/webhook`, needs a public HTTPS URL + `TELEGRAM_WEBHOOK_SECRET`) or `polling` (long polling via `@grammyjs/runner`: no public URL or tunnel; one process per bot token). Group chats need privacy mode OFF in @BotFather (`/setprivacy` → Disable; then remove and re-add the bot) |
 | `GROUP_GATING` | How a group gets in scope when the whitelist is set: `jid` (default — the group's own id must be listed) or `membership` (Baileys: any group with a whitelisted member; Telegram: any group; the bot saves all messages there but replies only to whitelisted senders). Read by the AI API and the Baileys/Telegram clients |
+| `BROADCAST_*` | Broadcast footer and Baileys anti-ban pacing (delays, batch pause, daily cap, send window, time zone). Hot via `PATCH /admin/settings` |
 | `LOGFIRE_TOKEN` | Pydantic Logfire write token for LLM token/cost tracking (optional; empty disables it) |
 | `LOGFIRE_ENVIRONMENT` | Environment label shown in the Logfire UI (default `development`) |
 

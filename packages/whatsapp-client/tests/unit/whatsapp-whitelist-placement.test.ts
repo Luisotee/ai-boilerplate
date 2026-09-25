@@ -54,6 +54,11 @@ vi.mock('../../src/services/wa-version.js', () => ({
 // NOT mocked — resolveSenderPhone is the thing whose ordering is under test.
 vi.mock('../../src/handlers/text.js', () => ({ handleTextMessage: vi.fn() }));
 vi.mock('../../src/utils/reactions.js', () => ({ sendFailureReaction: vi.fn() }));
+// The admin lookup for addressed group messages also reads group metadata;
+// stubbed so the `groupMetadata` assertions below keep measuring the GATE alone.
+vi.mock('../../src/services/group-admin.js', () => ({
+  resolveSenderGroupAdmin: vi.fn().mockResolvedValue(undefined),
+}));
 
 const PHONE = '4915755945319';
 const OK_LID = '109994229891095@lid';

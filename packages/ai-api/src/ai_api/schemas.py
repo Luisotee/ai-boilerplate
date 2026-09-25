@@ -265,3 +265,131 @@ class WhatsAppLogoutResponse(BaseModel):
 
     success: bool = Field(..., description="True when the logout + re-init completed")
     detail: str = Field(..., description="Human-readable status message")
+
+
+# --- Broadcasts (/admin/broadcasts) ---
+# The Literal enums below are a FleetView contract: its Zod schemas mirror them
+# as closed enums, so adding a value breaks the dashboard. New fields are safe.
+
+BroadcastAudience = Literal["private", "groups", "all"]
+BroadcastPlatform = Literal["baileys", "cloud", "telegram"]
+BroadcastStatus = Literal["queued", "running", "paused", "completed", "cancelled"]
+BroadcastRecipientStatus = Literal["pending", "sent", "failed", "skipped"]
+
+
+class BroadcastPreviewRequest(BaseModel):
+    """Who a broadcast would reach, without creating it."""
+
+    audience: BroadcastAudience = Field(
+        "private", description="'private' (1:1 chats), 'groups', or 'all'"
+    )
+    platforms: list[BroadcastPlatform] | None = Field(
+        None,
+        min_length=1,
+        description="Platforms to send through; omitted = every reachable chat client",
+    )
+
+
+class BroadcastCreateRequest(BroadcastPreviewRequest):
+    """Create (and queue) a broadcast."""
+
+    text: str = Field(..., min_length=1, max_length=4000, description="Message text")
+    idempotency_key: str | None = Field(
+        None,
+        min_length=1,
+        max_length=128,
+        description="Repeat-safe key: re-sending it returns the existing broadcast",
+    )
+
+
+class BroadcastPlatformPreview(BaseModel):
+    platform: BroadcastPlatform
+    recipients: int = Field(..., description="Chats that would be sent to on this platform")
+    skipped_cloud_window: int = Field(
+        0, description="Cloud API chats skipped: last message older than the 24h window"
+    )
+
+
+class BroadcastPreviewResponse(BaseModel):
+    audience: BroadcastAudience
+    platforms: list[BroadcastPlatform]
+    total_recipients: int = Field(..., description="Chats that would be sent to")
+    per_platform: list[BroadcastPlatformPreview]
+    opted_out: int
+    not_whitelisted: int
+    no_selected_platform: int = Field(
+        ..., description="Chats with no route through the selected platforms"
+    )
+    skipped_cloud_window: int
+    estimated_baileys_seconds: int = Field(
+        ..., description="Rough time to finish the Baileys lane under the current pacing"
+    )
+
+
+class BroadcastPlatformAvailability(BaseModel):
+    platform: BroadcastPlatform
+    reachable: bool
+
+
+class BroadcastPlatformsResponse(BaseModel):
+    platforms: list[BroadcastPlatformAvailability]
+
+
+class BroadcastCounts(BaseModel):
+    total: int = 0
+    pending: int = 0
+    sent: int = 0
+    failed: int = 0
+    skipped: int = 0
+
+
+class BroadcastPlatformCounts(BroadcastCounts):
+    platform: BroadcastPlatform
+
+
+class BroadcastResponse(BaseModel):
+    id: str
+    text: str
+    footer: str
+    audience: BroadcastAudience
+    platforms: list[BroadcastPlatform]
+    status: BroadcastStatus
+    pause_reason: str | None = Field(
+        None,
+        description="Why it paused: 'manual', 'consecutive_failures', 'client_disconnected'",
+    )
+    created_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    counts: BroadcastCounts
+    per_platform: list[BroadcastPlatformCounts]
+
+
+class BroadcastsResponse(BaseModel):
+    broadcasts: list[BroadcastResponse]
+    total: int
+    limit: int
+    offset: int
+
+
+class BroadcastRecipientItem(BaseModel):
+    address: str
+    name: str | None = None
+    platform: BroadcastPlatform
+    status: BroadcastRecipientStatus
+    error_code: str | None = Field(
+        None,
+        description=(
+            "Failure/skip reason, e.g. not_on_whatsapp, blocked, invalid_address, "
+            "http_500, transport_error, opted_out, cloud_window, user_deleted"
+        ),
+    )
+    attempts: int
+    sent_at: datetime | None = None
+
+
+class BroadcastRecipientsResponse(BaseModel):
+    recipients: list[BroadcastRecipientItem]
+    total: int
+    limit: int
+    offset: int

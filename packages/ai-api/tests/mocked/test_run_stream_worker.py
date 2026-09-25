@@ -1,4 +1,4 @@
-"""The stream worker runs the chat AND PDF consumers, and exits if either stops."""
+"""The stream worker runs the chat, PDF and broadcast consumers, and exits if any stops."""
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -6,6 +6,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from ai_api.scripts import run_stream_worker
+
+
+async def _idle_consumer(_redis):
+    await asyncio.sleep(3600)
+
+
+@pytest.fixture(autouse=True)
+def idle_broadcast_consumer():
+    """Keep the real broadcast consumer (Redis lease + DB polling) out of these tests."""
+    with patch.object(run_stream_worker, "run_broadcast_consumer", _idle_consumer):
+        yield
 
 
 @pytest.mark.asyncio
@@ -62,3 +73,22 @@ async def test_pdf_consumer_receives_the_shared_redis_client():
         assert await asyncio.wait_for(run_stream_worker.main(), timeout=5) == 1
 
     assert seen == {"chat": fake_redis, "pdf": fake_redis}
+
+
+@pytest.mark.asyncio
+async def test_broadcast_consumer_crash_stops_the_worker():
+    async def broadcast_consumer(_redis):
+        raise RuntimeError("boom")
+
+    fake_redis = MagicMock()
+    fake_redis.aclose = AsyncMock()
+    with (
+        patch.object(run_stream_worker, "setup_instrumentation"),
+        patch.object(run_stream_worker, "Redis", return_value=fake_redis),
+        patch.object(run_stream_worker, "run_stream_consumer", _idle_consumer),
+        patch.object(run_stream_worker, "run_pdf_consumer", _idle_consumer),
+        patch.object(run_stream_worker, "run_broadcast_consumer", broadcast_consumer),
+    ):
+        code = await asyncio.wait_for(run_stream_worker.main(), timeout=5)
+
+    assert code == 1

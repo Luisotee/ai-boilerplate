@@ -48,6 +48,7 @@ from ..schemas import (
     WhatsAppLogoutResponse,
     WhatsAppStatusResponse,
 )
+from ..services.broadcast import parse_send_window, parse_timezone
 from ..whatsapp import WhatsAppClientError, create_whatsapp_client
 from ..whitelist import parse_whitelist
 
@@ -166,6 +167,44 @@ def _validate_bot_name(value: object) -> None:
         raise HTTPException(status_code=400, detail="bot_name must be a single line")
 
 
+_BROADCAST_NON_NEGATIVE = (
+    "broadcast_min_delay_seconds",
+    "broadcast_max_delay_seconds",
+    "broadcast_batch_pause_seconds",
+    "broadcast_daily_limit",
+)
+
+
+def _validate_broadcast_settings(coerced: dict[str, object], effective) -> None:
+    """The broadcast worker reads these per send; reject values it can't use."""
+    for key in _BROADCAST_NON_NEGATIVE:
+        if key in coerced and coerced[key] < 0:
+            raise HTTPException(status_code=400, detail=f"{key} must be >= 0")
+    if "broadcast_batch_size" in coerced and coerced["broadcast_batch_size"] < 1:
+        raise HTTPException(status_code=400, detail="broadcast_batch_size must be >= 1")
+    if (
+        "broadcast_min_delay_seconds" in coerced or "broadcast_max_delay_seconds" in coerced
+    ) and effective("broadcast_min_delay_seconds") > effective("broadcast_max_delay_seconds"):
+        raise HTTPException(
+            status_code=400,
+            detail="broadcast_min_delay_seconds must not exceed broadcast_max_delay_seconds",
+        )
+    if "broadcast_send_window" in coerced:
+        try:
+            parse_send_window(coerced["broadcast_send_window"])
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+    if "broadcast_timezone" in coerced:
+        try:
+            parse_timezone(coerced["broadcast_timezone"])
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+    if "broadcast_footer" in coerced and len(coerced["broadcast_footer"]) > 500:
+        raise HTTPException(
+            status_code=400, detail="broadcast_footer is too long (max 500 characters)"
+        )
+
+
 def _validate_cross_constraints(coerced: dict[str, object]) -> None:
     """Reject overrides that would violate invariants Settings checks at boot.
 
@@ -205,6 +244,7 @@ def _validate_cross_constraints(coerced: dict[str, object]) -> None:
             _validate_model_name(model_key, coerced[model_key])
     if "bot_name" in coerced:
         _validate_bot_name(coerced["bot_name"])
+    _validate_broadcast_settings(coerced, effective)
     if "whitelist_phones" in coerced:
         # Deliberately no *format* check: entry shapes are forward-compatible
         # (future JID schemes land in the id set and simply never match), and
