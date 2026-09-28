@@ -184,6 +184,11 @@ async def consume_link_code(
     # keeps the route-scoped session clean for any downstream work.
     try:
         whatsapp_user.telegram_jid = telegram_jid_value
+        # An opt-out on either side survives the merge: /broadcast off on
+        # Telegram followed by /link must not re-subscribe the person.
+        whatsapp_user.broadcast_opt_out = bool(
+            whatsapp_user.broadcast_opt_out or telegram_user.broadcast_opt_out
+        )
         db.delete(telegram_user)  # cascade clears messages/prefs/core_memory
         db.commit()
     except Exception as exc:

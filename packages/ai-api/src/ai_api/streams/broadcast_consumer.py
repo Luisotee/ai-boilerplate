@@ -7,21 +7,31 @@ is paused/resumed/cancelled by the admin API simply by changing its status.
 
 - **One sender fleet-wide.** A Redis lease (``broadcast:lock``) makes sure only
   one worker process sends: two senders would double the rate on the single
-  WhatsApp account the pacing is protecting.
-- **One lane per platform**, concurrently, so Telegram finishes in minutes while
-  Baileys crawls. Every lane re-reads the broadcast status before each send
-  (and while sleeping), so pause/cancel take effect before the next message.
+  WhatsApp account the pacing is protecting. If the lease can't be renewed for
+  long enough that it might have expired, sending stops (``_heartbeat``).
+- **A supervisor, one lane per platform** (``run_broadcast``). Lanes run
+  concurrently, so Telegram finishes in minutes while Baileys crawls. Every
+  tick the supervisor stops everything once the broadcast isn't running, and
+  (re)starts a lane for each platform that still has pending recipients — so a
+  lane that exited during a pause/resume, or crashed, comes back. Lanes also
+  re-read the status before each send and while sleeping.
 - **Baileys anti-ban pacing** (all hot settings, re-read every message): a
   jittered delay between messages, a longer pause after every batch, a rolling
   24h cap across broadcasts, a daytime send window, and a "typing…" indicator
-  before each message. A run of failures pauses the broadcast — a failure spike
-  is often the first sign of a restriction.
+  before each message. Where the lane is in that schedule is rebuilt from
+  ``broadcast_recipients.sent_at`` when it starts (``resume_pacing``), so a
+  resume, lease handover or worker restart never skips a gap or a batch pause.
+  A run of failures pauses the broadcast — a failure spike is often the first
+  sign of a restriction. Pauses are broadcast-wide: every lane stops.
 - **Delivery results**: sent → saved to the chat's history as an assistant
   message (so a reply like "what's this?" has context). 404 (not on WhatsApp)
-  and 403 (Telegram: blocked / deactivated; the chat is also opted out) fail
-  for good. A disconnected client (503) keeps the recipient pending and, after
-  ``DISCONNECT_PAUSE_AFTER``, pauses the broadcast. Anything else is retried
-  up to ``MAX_ATTEMPTS`` times.
+  and 403 (Telegram: blocked, deactivated or kicked) fail for good — the chat
+  is NOT opted out, since the same user row may also be reachable elsewhere
+  (a /link-merged user) and a group may re-add the bot. A disconnected client
+  (503) keeps the recipient pending and, after ``DISCONNECT_PAUSE_AFTER``,
+  pauses the broadcast. Anything else is retried up to ``MAX_ATTEMPTS`` times.
+- **Status writes are conditional** (``UPDATE … WHERE status = …``), so a
+  cancel from the admin API is never overwritten by the worker.
 
 A crash between a successful send and recording it re-sends that one message
 after a restart. That is the accepted cost of not holding a DB transaction
@@ -40,6 +50,16 @@ import httpx
 from redis.asyncio import Redis
 from sqlalchemy import func
 
+from ..broadcast_pacing import (
+    PacingSettings,
+    batch_pause,
+    jittered_delay,
+    parse_send_window,
+    parse_timezone,
+    resume_pacing,
+    seconds_until_window,
+    typing_seconds,
+)
 from ..config import get_whatsapp_api_key, get_whatsapp_client_url, settings
 from ..database import (
     Broadcast,
@@ -54,14 +74,8 @@ from ..services.broadcast import (
     SKIP_CLOUD_WINDOW,
     SKIP_OPTED_OUT,
     SKIP_USER_DELETED,
-    batch_pause,
     in_cloud_window,
-    jittered_delay,
-    parse_send_window,
-    parse_timezone,
     render_message,
-    seconds_until_window,
-    typing_seconds,
 )
 from ..whatsapp import (
     WhatsAppClient,
@@ -75,7 +89,8 @@ LOCK_KEY = "broadcast:lock"
 LOCK_TTL_SECONDS = 60
 HEARTBEAT_SECONDS = 20
 IDLE_POLL_SECONDS = 10
-#: Longest single sleep, so a pause/cancel is noticed while waiting.
+#: Supervisor tick, and the longest single sleep inside a lane, so a
+#: pause/cancel is noticed while waiting.
 SLEEP_SLICE_SECONDS = 15.0
 
 MAX_ATTEMPTS = 3
@@ -120,6 +135,29 @@ async def release_lock(redis: Redis, token: str) -> None:
         logger.warning("Broadcast: failed to release the sender lock", exc_info=True)
 
 
+async def _heartbeat(redis: Redis, token: str) -> None:
+    """Keep the lease alive; returns (ending the run) once it may be lost.
+
+    A failed renewal isn't fatal on its own (a Redis blip), but once the next
+    renewal would land after the lease could have expired, another worker may
+    take it — so stop sending BEFORE that can happen, not after.
+    """
+    loop = asyncio.get_running_loop()
+    last_ok = loop.time()
+    while True:
+        await asyncio.sleep(HEARTBEAT_SECONDS)
+        try:
+            if not await acquire_lock(redis, token):
+                logger.error("Broadcast: sender lock taken by another worker")
+                return
+            last_ok = loop.time()
+        except Exception:
+            logger.warning("Broadcast: lock heartbeat failed", exc_info=True)
+            if loop.time() - last_ok + HEARTBEAT_SECONDS >= LOCK_TTL_SECONDS:
+                logger.error("Broadcast: cannot renew the sender lock; stopping sends")
+                return
+
+
 # --- DB helpers (sync; run through asyncio.to_thread) -----------------------
 
 
@@ -138,31 +176,40 @@ def _next_active_broadcast_id() -> uuid.UUID | None:
         db.close()
 
 
-def _start_broadcast(broadcast_id: uuid.UUID) -> tuple[str, str, list[str]] | None:
-    """Mark it running; return (message, status, platforms with pending work)."""
+def _set_status_if(broadcast_id: uuid.UUID, expected: str, values: dict) -> bool:
+    """``UPDATE broadcasts SET … WHERE id = :id AND status = :expected``."""
+    db = SessionLocal()
+    try:
+        updated = (
+            db.query(Broadcast)
+            .filter(Broadcast.id == broadcast_id, Broadcast.status == expected)
+            .update(values, synchronize_session=False)
+        )
+        db.commit()
+        return bool(updated)
+    finally:
+        db.close()
+
+
+def _start_broadcast(broadcast_id: uuid.UUID) -> str | None:
+    """queued → running (conditionally); return the text to send, or None."""
     db = SessionLocal()
     try:
         broadcast = db.get(Broadcast, broadcast_id)
-        if broadcast is None or broadcast.status not in ("queued", "running"):
+        if broadcast is None:
             return None
-        if broadcast.status == "queued" or broadcast.started_at is None:
-            # A broadcast paused before it ever started resumes as "running".
-            broadcast.status = "running"
-            broadcast.started_at = broadcast.started_at or _utcnow()
-            db.commit()
-        platforms = [
-            p
-            for (p,) in db.query(BroadcastRecipient.platform)
-            .filter(
-                BroadcastRecipient.broadcast_id == broadcast_id,
-                BroadcastRecipient.status == "pending",
-            )
-            .distinct()
-            .all()
-        ]
-        return render_message(broadcast.text, broadcast.footer), broadcast.status, platforms
+        text = render_message(broadcast.text, broadcast.footer)
+        started_at = broadcast.started_at
+        status = broadcast.status
     finally:
         db.close()
+    now = _utcnow()
+    if status == "queued":
+        _set_status_if(broadcast_id, "queued", {"status": "running", "started_at": now})
+    elif status == "running" and started_at is None:
+        # Paused before it ever started, then resumed straight to running.
+        _set_status_if(broadcast_id, "running", {"started_at": now})
+    return text if _broadcast_status(broadcast_id) == "running" else None
 
 
 def _broadcast_status(broadcast_id: uuid.UUID) -> str | None:
@@ -174,41 +221,34 @@ def _broadcast_status(broadcast_id: uuid.UUID) -> str | None:
         db.close()
 
 
-def _pause_broadcast(broadcast_id: uuid.UUID, reason: str) -> None:
+def _pending_platforms(broadcast_id: uuid.UUID) -> set[str]:
     db = SessionLocal()
     try:
-        broadcast = db.get(Broadcast, broadcast_id)
-        if broadcast and broadcast.status == "running":
-            broadcast.status = "paused"
-            broadcast.pause_reason = reason
-            db.commit()
-            logger.warning("Broadcast %s paused: %s", broadcast_id, reason)
-    finally:
-        db.close()
-
-
-def _finish_if_done(broadcast_id: uuid.UUID) -> None:
-    """Complete a still-running broadcast once nothing is pending."""
-    db = SessionLocal()
-    try:
-        broadcast = db.get(Broadcast, broadcast_id)
-        if broadcast is None or broadcast.status != "running":
-            return
-        pending = (
-            db.query(func.count(BroadcastRecipient.id))
+        return {
+            p
+            for (p,) in db.query(BroadcastRecipient.platform)
             .filter(
                 BroadcastRecipient.broadcast_id == broadcast_id,
                 BroadcastRecipient.status == "pending",
             )
-            .scalar()
-        )
-        if pending == 0:
-            broadcast.status = "completed"
-            broadcast.finished_at = _utcnow()
-            db.commit()
-            logger.info("Broadcast %s completed", broadcast_id)
+            .distinct()
+            .all()
+        }
     finally:
         db.close()
+
+
+def _pause_broadcast(broadcast_id: uuid.UUID, reason: str) -> None:
+    if _set_status_if(broadcast_id, "running", {"status": "paused", "pause_reason": reason}):
+        logger.warning("Broadcast %s paused: %s", broadcast_id, reason)
+
+
+def _finish_if_done(broadcast_id: uuid.UUID) -> None:
+    """Complete a still-running broadcast once nothing is pending."""
+    if _pending_platforms(broadcast_id):
+        return
+    if _set_status_if(broadcast_id, "running", {"status": "completed", "finished_at": _utcnow()}):
+        logger.info("Broadcast %s completed", broadcast_id)
 
 
 @dataclass(frozen=True)
@@ -217,14 +257,6 @@ class _Claimed:
     user_id: uuid.UUID
     address: str
     attempts: int
-
-
-def _last_inbound_at(db, user_id) -> datetime | None:
-    return (
-        db.query(func.max(ConversationMessage.timestamp))
-        .filter(ConversationMessage.user_id == user_id, ConversationMessage.role == "user")
-        .scalar()
-    )
 
 
 def _next_recipient(broadcast_id: uuid.UUID, platform: str) -> _Claimed | None:
@@ -254,9 +286,7 @@ def _next_recipient(broadcast_id: uuid.UUID, platform: str) -> _Claimed | None:
                 reason = SKIP_USER_DELETED
             elif user.broadcast_opt_out:
                 reason = SKIP_OPTED_OUT
-            elif platform == "cloud" and not in_cloud_window(
-                _last_inbound_at(db, user.id), _utcnow()
-            ):
+            elif platform == "cloud" and not in_cloud_window(user.cloud_last_inbound_at, _utcnow()):
                 reason = SKIP_CLOUD_WINDOW
             if reason is None:
                 return _Claimed(rec.id, rec.user_id, rec.address, rec.attempts)
@@ -272,9 +302,7 @@ def _record(
     *,
     status: str | None,
     error_code: str | None = None,
-    count_attempt: bool = True,
     history_text: str | None = None,
-    opt_out: bool = False,
 ) -> int:
     """Store a delivery outcome; returns the recipient's attempt count."""
     db = SessionLocal()
@@ -282,8 +310,7 @@ def _record(
         rec = db.get(BroadcastRecipient, recipient_id)
         if rec is None:
             return 0
-        if count_attempt:
-            rec.attempts += 1
+        rec.attempts += 1
         if status:
             rec.status = status
         rec.error_code = error_code
@@ -291,14 +318,39 @@ def _record(
             rec.sent_at = _utcnow()
         if rec.user_id and history_text is not None:
             db.add(ConversationMessage(user_id=rec.user_id, role="assistant", content=history_text))
-        if rec.user_id and opt_out:
-            user = db.get(User, rec.user_id)
-            if user:
-                user.broadcast_opt_out = True
         db.commit()
         return rec.attempts
     finally:
         db.close()
+
+
+def _recent_baileys_sends(limit: int) -> list[datetime]:
+    """Latest Baileys ``sent_at`` values, newest first, across all broadcasts."""
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(BroadcastRecipient.sent_at)
+            .filter(
+                BroadcastRecipient.platform == "baileys",
+                BroadcastRecipient.sent_at.isnot(None),
+            )
+            .order_by(BroadcastRecipient.sent_at.desc())
+            .limit(max(1, limit))
+            .all()
+        )
+        return [sent_at for (sent_at,) in rows]
+    finally:
+        db.close()
+
+
+def _pacing_settings() -> PacingSettings:
+    """Current pacing settings (may refresh runtime_config from the DB)."""
+    return PacingSettings(
+        min_delay_seconds=runtime_config.get("broadcast_min_delay_seconds"),
+        max_delay_seconds=runtime_config.get("broadcast_max_delay_seconds"),
+        batch_size=runtime_config.get("broadcast_batch_size"),
+        batch_pause_seconds=runtime_config.get("broadcast_batch_pause_seconds"),
+    )
 
 
 def _baileys_cap_wait_seconds() -> float:
@@ -325,6 +377,8 @@ def _baileys_cap_wait_seconds() -> float:
 
 
 def _window_wait_seconds() -> float:
+    # config.py and PATCH /admin/settings both reject bad values, so these
+    # fallbacks only guard against a value corrupted in the DB by hand.
     try:
         window = parse_send_window(runtime_config.get("broadcast_send_window"))
     except ValueError:
@@ -336,6 +390,11 @@ def _window_wait_seconds() -> float:
         logger.error("Broadcast: invalid broadcast_timezone; using UTC")
         tz = UTC
     return seconds_until_window(window, datetime.now(tz))
+
+
+def _baileys_wait_seconds() -> float:
+    """How long the Baileys lane must wait before it may send (window + daily cap)."""
+    return max(_window_wait_seconds(), _baileys_cap_wait_seconds())
 
 
 # --- Lanes ------------------------------------------------------------------
@@ -386,12 +445,22 @@ async def run_lane(
     disconnected_since: datetime | None = None
     logger.info("Broadcast %s: %s lane started", broadcast_id, platform)
 
+    if platform == "baileys":
+        # Pick up the schedule where the last Baileys lane left it.
+        pacing = await asyncio.to_thread(_pacing_settings)
+        recent = await asyncio.to_thread(_recent_baileys_sends, pacing.batch_size)
+        sent_in_batch, wait = resume_pacing(recent, _utcnow(), rng, pacing)
+        if wait > 0:
+            logger.info("Broadcast %s: baileys lane resuming in %.0fs", broadcast_id, wait)
+            if not await _sleep_while_running(broadcast_id, wait):
+                return
+
     while True:
         if await asyncio.to_thread(_broadcast_status, broadcast_id) != "running":
             return
 
         if platform == "baileys":
-            wait = max(_window_wait_seconds(), await asyncio.to_thread(_baileys_cap_wait_seconds))
+            wait = await asyncio.to_thread(_baileys_wait_seconds)
             if wait > 0:
                 logger.info("Broadcast %s: baileys lane waiting %.0fs", broadcast_id, wait)
                 if not await _sleep_while_running(broadcast_id, wait):
@@ -424,11 +493,9 @@ async def run_lane(
         except WhatsAppClientError as e:
             disconnected_since = None
             if e.status_code == 403:
-                # Telegram: the user blocked the bot or deleted their account.
-                # Opt them out so no future broadcast tries again.
-                await asyncio.to_thread(
-                    _record, rec.id, status="failed", error_code="blocked", opt_out=True
-                )
+                # Telegram: blocked, deactivated, or the bot left the group.
+                # Deliberately no opt-out (see the module docstring).
+                await asyncio.to_thread(_record, rec.id, status="failed", error_code="blocked")
                 continue
             if e.status_code == 400:
                 await asyncio.to_thread(
@@ -453,16 +520,12 @@ async def run_lane(
             return
 
         if platform == "baileys":
-            batch_size = max(1, runtime_config.get("broadcast_batch_size"))
-            if sent_in_batch >= batch_size:
+            pacing = await asyncio.to_thread(_pacing_settings)
+            if sent_in_batch >= max(1, pacing.batch_size):
                 sent_in_batch = 0
-                pause = batch_pause(rng, runtime_config.get("broadcast_batch_pause_seconds"))
+                pause = batch_pause(rng, pacing.batch_pause_seconds)
             else:
-                pause = jittered_delay(
-                    rng,
-                    runtime_config.get("broadcast_min_delay_seconds"),
-                    runtime_config.get("broadcast_max_delay_seconds"),
-                )
+                pause = jittered_delay(rng, pacing.min_delay_seconds, pacing.max_delay_seconds)
             if consecutive_failures:
                 pause += 30.0 * 2 ** (consecutive_failures - 1)
         else:
@@ -492,55 +555,74 @@ async def _record_transient(broadcast_id: uuid.UUID, rec: _Claimed, error_code: 
 # --- Orchestration ----------------------------------------------------------
 
 
-async def run_broadcast(redis: Redis, token: str, broadcast_id: uuid.UUID) -> None:
-    """Run every lane of one broadcast while holding the lease."""
-    started = await asyncio.to_thread(_start_broadcast, broadcast_id)
-    if started is None:
-        return
-    text, _status, platforms = started
-    logger.info("Broadcast %s running on %s", broadcast_id, ", ".join(platforms) or "no lanes")
+async def run_broadcast(
+    redis: Redis,
+    token: str,
+    broadcast_id: uuid.UUID,
+    *,
+    tick: float = SLEEP_SLICE_SECONDS,
+) -> None:
+    """Supervise one broadcast's lanes while holding the lease.
 
+    Each tick: stop if the broadcast isn't running or the lease is lost;
+    otherwise make sure every platform with pending recipients has a live lane.
+    That (re)starts lanes that exited during a pause/resume or crashed — a
+    crashed lane waits one tick before its restart so a persistent bug can't
+    spin.
+    """
+    text = await asyncio.to_thread(_start_broadcast, broadcast_id)
+    if text is None:
+        return
+    logger.info("Broadcast %s running", broadcast_id)
+
+    loop = asyncio.get_running_loop()
+    lanes: dict[str, asyncio.Task] = {}
+    retry_after: dict[str, float] = {}
     async with httpx.AsyncClient(timeout=settings.whatsapp_client_timeout) as http:
-        lanes = [
-            asyncio.create_task(run_lane(broadcast_id, p, text, http), name=f"broadcast-{p}")
-            for p in platforms
-        ]
         heartbeat = asyncio.create_task(_heartbeat(redis, token), name="broadcast-heartbeat")
         try:
-            running = set(lanes)
-            while running:
-                done, _ = await asyncio.wait(
-                    {heartbeat, *running}, return_when=asyncio.FIRST_COMPLETED
-                )
-                if heartbeat in done:
+            while True:
+                if heartbeat.done():
                     logger.error("Broadcast %s: lost the sender lock; stopping", broadcast_id)
                     break
-                running -= done
-        finally:
-            for task in (*lanes, heartbeat):
-                task.cancel()
-            results = await asyncio.gather(*lanes, heartbeat, return_exceptions=True)
-            for task, result in zip(lanes, results, strict=False):
-                if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
-                    logger.error(
-                        "Broadcast %s: lane %s crashed",
-                        broadcast_id,
-                        task.get_name(),
-                        exc_info=result,
+                if await asyncio.to_thread(_broadcast_status, broadcast_id) != "running":
+                    break
+
+                for platform, task in list(lanes.items()):
+                    if not task.done():
+                        continue
+                    del lanes[platform]
+                    if not task.cancelled() and task.exception() is not None:
+                        logger.error(
+                            "Broadcast %s: %s lane crashed; restarting",
+                            broadcast_id,
+                            platform,
+                            exc_info=task.exception(),
+                        )
+                        retry_after[platform] = loop.time() + tick
+
+                pending = await asyncio.to_thread(_pending_platforms, broadcast_id)
+                if not pending and not lanes:
+                    break
+                for platform in sorted(pending - lanes.keys()):
+                    if loop.time() < retry_after.get(platform, 0.0):
+                        continue
+                    lanes[platform] = asyncio.create_task(
+                        run_lane(broadcast_id, platform, text, http),
+                        name=f"broadcast-{platform}",
                     )
 
+                await asyncio.wait(
+                    {heartbeat, *lanes.values()},
+                    timeout=tick,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+        finally:
+            for task in (*lanes.values(), heartbeat):
+                task.cancel()
+            await asyncio.gather(*lanes.values(), heartbeat, return_exceptions=True)
+
     await asyncio.to_thread(_finish_if_done, broadcast_id)
-
-
-async def _heartbeat(redis: Redis, token: str) -> None:
-    """Keep the lease alive; returns (ending the run) once it is lost."""
-    while True:
-        await asyncio.sleep(HEARTBEAT_SECONDS)
-        try:
-            if not await acquire_lock(redis, token):
-                return
-        except Exception:
-            logger.warning("Broadcast: lock heartbeat failed", exc_info=True)
 
 
 async def run_broadcast_consumer(redis: Redis) -> None:

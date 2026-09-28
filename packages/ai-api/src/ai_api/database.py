@@ -58,8 +58,15 @@ class User(Base):
     broadcast_opt_out = Column(Boolean, default=False, server_default=text("false"), nullable=False)
     # Chat client the user last wrote through ('baileys' | 'cloud' | 'telegram').
     # Set on every enqueue; NULL on rows from before it existed. Decides which
-    # platform a broadcast reaches the user on.
+    # platform a broadcast tries first for a /link-merged user.
     last_client_id = Column(String(16), nullable=True)
+    # WhatsApp client the user last wrote through ('baileys' | 'cloud'); kept
+    # separately so a merged Cloud user who last wrote on Telegram is still
+    # reached through Cloud. NULL = Baileys.
+    whatsapp_client_id = Column(String(16), nullable=True)
+    # Last inbound Cloud API message (naive UTC): the exact input for Meta's
+    # 24h free-form window. NULL = never wrote via Cloud since this existed.
+    cloud_last_inbound_at = Column(DateTime, nullable=True)
 
     # Relationships
     messages = relationship(

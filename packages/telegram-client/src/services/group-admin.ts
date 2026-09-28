@@ -1,13 +1,18 @@
 import { bot, type TelegramContext } from '../bot.js';
 import { logger } from '../logger.js';
 
+/** Longest an admin lookup may hold up a reply; a timeout counts as not-admin. */
+export const ADMIN_LOOKUP_TIMEOUT_MS = 3_000;
+
 /**
  * Whether the sender of this update is an admin of the group it came from.
+ * Bounded by `ADMIN_LOOKUP_TIMEOUT_MS` (a timeout is "not an admin").
  *
- * The AI API restricts `/clean`, `/tts`, `/stt`, `/settings` and `/memories` in
- * groups to admins and FAILS CLOSED: anything other than an explicit `true` is
- * refused. So this must return a real boolean — omitting the field would lock
- * genuine admins out of every admin command.
+ * The AI API restricts `/clean`, `/tts`, `/stt`, `/settings`, `/memories` and
+ * `/broadcast` (and the group-changing agent tools) in groups to admins and
+ * FAILS CLOSED: anything other than an explicit `true` is refused. So this
+ * must return a real boolean — omitting the field would lock genuine admins
+ * out of every admin command.
  *
  * **Fails closed.** If `getChatMember` errors (network, bot removed from the
  * group, rate limit) we report "not an admin" rather than letting a destructive
@@ -24,8 +29,19 @@ export async function isSenderGroupAdmin(ctx: TelegramContext): Promise<boolean>
   const userId = ctx.from?.id;
   if (chatId === undefined || userId === undefined) return false;
 
+  let timer: NodeJS.Timeout | undefined;
   try {
-    const member = await bot.api.getChatMember(chatId, userId);
+    const timeout = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), ADMIN_LOOKUP_TIMEOUT_MS);
+    });
+    const member = await Promise.race([bot.api.getChatMember(chatId, userId), timeout]);
+    if (member === null) {
+      logger.warn(
+        { chatId, userId },
+        'Group admin lookup timed out — treating sender as non-admin'
+      );
+      return false;
+    }
     return member.status === 'creator' || member.status === 'administrator';
   } catch (err) {
     logger.warn(
@@ -33,5 +49,7 @@ export async function isSenderGroupAdmin(ctx: TelegramContext): Promise<boolean>
       'Could not resolve group admin status — treating sender as non-admin'
     );
     return false;
+  } finally {
+    clearTimeout(timer);
   }
 }

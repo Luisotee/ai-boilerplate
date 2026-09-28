@@ -10,6 +10,8 @@ is the only route to a merge.
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from ai_api.services.autolink import (
     ERROR_ALREADY_LINKED,
     ERROR_AMBIGUOUS,
@@ -186,6 +188,17 @@ class TestAutolinkHappyPath:
         # The Telegram orphan is dropped; cascade clears its messages/prefs.
         db.delete.assert_called_once_with(caller)
         assert db.commit.called
+
+    @pytest.mark.parametrize(
+        "wa_out,tg_out,expected", [(False, True, True), (True, False, True), (False, False, False)]
+    )
+    def test_broadcast_opt_out_survives_the_merge(self, wa_out, tg_out, expected):
+        """/broadcast off on Telegram, then /linkphone, must not re-subscribe."""
+        wa, caller = _wa_user(), _tg_user()
+        wa.broadcast_opt_out, caller.broadcast_opt_out = wa_out, tg_out
+
+        assert try_autolink(_db([wa]), caller, "5511987654321", SENDER_ID, SENDER_ID).success
+        assert wa.broadcast_opt_out is expected
 
     def test_reports_how_many_messages_were_discarded(self):
         """The merge is irreversible and silent about data loss unless we say

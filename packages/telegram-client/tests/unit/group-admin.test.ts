@@ -13,7 +13,7 @@ vi.mock('../../src/logger.js', () => ({
 }));
 
 import { bot } from '../../src/bot.js';
-import { isSenderGroupAdmin } from '../../src/services/group-admin.js';
+import { ADMIN_LOOKUP_TIMEOUT_MS, isSenderGroupAdmin } from '../../src/services/group-admin.js';
 import type { TelegramContext } from '../../src/bot.js';
 
 function ctx(chatId?: number, userId?: number): TelegramContext {
@@ -51,5 +51,17 @@ describe('isSenderGroupAdmin', () => {
     await expect(isSenderGroupAdmin(ctx(undefined, 5))).resolves.toBe(false);
     await expect(isSenderGroupAdmin(ctx(-100, undefined))).resolves.toBe(false);
     expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('fails closed (not admin) when getChatMember hangs past the timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      spy.mockReturnValue(new Promise(() => {}) as never);
+      const result = isSenderGroupAdmin(ctx(-100, 5));
+      await vi.advanceTimersByTimeAsync(ADMIN_LOOKUP_TIMEOUT_MS);
+      await expect(result).resolves.toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

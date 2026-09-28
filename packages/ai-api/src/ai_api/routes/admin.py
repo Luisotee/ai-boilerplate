@@ -17,6 +17,7 @@ from sqlalchemy import func, nullslast, or_
 from sqlalchemy.orm import Session
 
 from ..agent.core import DEFAULT_SYSTEM_PROMPT
+from ..broadcast_pacing import parse_send_window, parse_timezone
 from ..config import get_whatsapp_api_key, get_whatsapp_client_url, settings
 from ..database import (
     ConversationMessage,
@@ -48,7 +49,6 @@ from ..schemas import (
     WhatsAppLogoutResponse,
     WhatsAppStatusResponse,
 )
-from ..services.broadcast import parse_send_window, parse_timezone
 from ..whatsapp import WhatsAppClientError, create_whatsapp_client
 from ..whitelist import parse_whitelist
 

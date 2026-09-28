@@ -6,6 +6,8 @@ from typing import Literal
 from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .broadcast_pacing import parse_send_window, parse_timezone
+
 
 def get_env_files() -> tuple[Path, ...]:
     """Return env files: root .env first, then local .env.local for overrides."""
@@ -255,6 +257,19 @@ class Settings(BaseSettings):
                 "STT_PROVIDER=whisper but WHISPER_BASE_URL is not set. Start the "
                 "self-hosted container (`docker compose --profile whisper up -d`) "
                 "and set WHISPER_BASE_URL."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_broadcast_pacing(self) -> "Settings":
+        # The worker would otherwise meet a typo only at send time, log it and
+        # send at ANY hour — silently weakening the Baileys anti-ban pacing.
+        # PATCH /admin/settings validates overrides the same way.
+        parse_send_window(self.broadcast_send_window)
+        parse_timezone(self.broadcast_timezone)
+        if self.broadcast_min_delay_seconds > self.broadcast_max_delay_seconds:
+            raise ValueError(
+                "BROADCAST_MIN_DELAY_SECONDS must not exceed BROADCAST_MAX_DELAY_SECONDS"
             )
         return self
 

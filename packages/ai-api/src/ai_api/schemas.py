@@ -293,7 +293,12 @@ class BroadcastPreviewRequest(BaseModel):
 class BroadcastCreateRequest(BroadcastPreviewRequest):
     """Create (and queue) a broadcast."""
 
-    text: str = Field(..., min_length=1, max_length=4000, description="Message text")
+    text: str = Field(
+        ...,
+        min_length=1,
+        max_length=3500,
+        description="Message text (with the ≤500-char footer it stays under Telegram's 4096 cap)",
+    )
     idempotency_key: str | None = Field(
         None,
         min_length=1,

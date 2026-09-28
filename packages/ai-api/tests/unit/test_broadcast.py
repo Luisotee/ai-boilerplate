@@ -1,25 +1,34 @@
-"""Pure broadcast decisions: routing, audience plan, footer, pacing (services/broadcast.py)."""
+"""Pure broadcast decisions: routing, audience plan, footer (services/broadcast.py)
+and the anti-ban pacing math (broadcast_pacing.py)."""
 
 import random
 from datetime import datetime, time, timedelta
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
+from pydantic import ValidationError
 
-from ai_api.services.broadcast import (
-    SKIP_CLOUD_WINDOW,
-    Route,
+from ai_api.broadcast_pacing import (
+    PacingSettings,
     batch_pause,
-    candidate_routes,
-    choose_route,
     estimate_baileys_seconds,
     jittered_delay,
     parse_send_window,
     parse_timezone,
-    plan_broadcast,
-    render_message,
+    resume_pacing,
     seconds_until_window,
     typing_seconds,
+)
+from ai_api.services.broadcast import (
+    NO_PLATFORM,
+    NOT_WHITELISTED,
+    SKIP_CLOUD_WINDOW,
+    Route,
+    candidate_routes,
+    choose_route,
+    plan_broadcast,
+    render_message,
     whitelist_filter,
 )
 
@@ -27,11 +36,17 @@ NOW = datetime(2026, 9, 25, 12, 0, 0)
 ALL = ("baileys", "cloud", "telegram")
 
 
+def allow_all(_user, _route):
+    return True
+
+
 def user(
     jid="5511999999999@s.whatsapp.net",
     *,
     telegram_jid=None,
     last_client_id=None,
+    whatsapp_client_id=None,
+    cloud_last_inbound_at=None,
     opt_out=False,
     conversation_type="private",
     phone=None,
@@ -44,10 +59,18 @@ def user(
         whatsapp_lid=lid,
         telegram_jid=telegram_jid,
         last_client_id=last_client_id,
+        whatsapp_client_id=whatsapp_client_id,
+        cloud_last_inbound_at=cloud_last_inbound_at,
         broadcast_opt_out=opt_out,
         conversation_type=conversation_type,
         phone=phone,
     )
+
+
+def cloud_user(**kw):
+    kw.setdefault("whatsapp_client_id", "cloud")
+    kw.setdefault("last_client_id", "cloud")
+    return user(**kw)
 
 
 class TestCandidateRoutes:
@@ -55,11 +78,11 @@ class TestCandidateRoutes:
         assert candidate_routes(user("tg:42")) == [Route("telegram", "tg:42")]
 
     def test_legacy_whatsapp_row_defaults_to_baileys(self):
-        u = user(last_client_id=None)
+        u = user()
         assert candidate_routes(u) == [Route("baileys", u.whatsapp_jid)]
 
     def test_cloud_user(self):
-        u = user(last_client_id="cloud")
+        u = cloud_user()
         assert candidate_routes(u) == [Route("cloud", u.whatsapp_jid)]
 
     def test_linked_user_prefers_last_used_platform(self):
@@ -72,53 +95,62 @@ class TestCandidateRoutes:
             Route("baileys", tg_last.whatsapp_jid),
         ]
 
+    def test_linked_cloud_user_who_last_wrote_on_telegram_stays_on_cloud(self):
+        """Review finding: this user used to be routed to Baileys."""
+        u = user(telegram_jid="tg:7", last_client_id="telegram", whatsapp_client_id="cloud")
+        assert candidate_routes(u) == [Route("telegram", "tg:7"), Route("cloud", u.whatsapp_jid)]
+
 
 class TestChooseRoute:
     def test_uses_preferred_route(self):
-        route, reason = choose_route(user(telegram_jid="tg:7"), ALL, None, NOW)
+        route, reason = choose_route(user(telegram_jid="tg:7"), ALL, allow_all, NOW)
         assert route.platform == "baileys" and reason is None
 
     def test_linked_user_falls_back_to_other_selected_identity(self):
         u = user(telegram_jid="tg:7", last_client_id="baileys")
-        route, reason = choose_route(u, ["telegram"], None, NOW)
+        route, reason = choose_route(u, ["telegram"], allow_all, NOW)
         assert route == Route("telegram", "tg:7") and reason is None
 
     def test_no_selected_platform(self):
-        assert choose_route(user("tg:42"), ["baileys"], None, NOW) == (None, None)
+        assert choose_route(user("tg:42"), ["baileys"], allow_all, NOW) == (None, NO_PLATFORM)
 
-    def test_cloud_inside_window(self):
-        u = user(last_client_id="cloud")
-        route, reason = choose_route(u, ALL, NOW - timedelta(hours=2), NOW)
-        assert route.platform == "cloud" and reason is None
+    def test_cloud_window_uses_last_cloud_message(self):
+        inside = cloud_user(cloud_last_inbound_at=NOW - timedelta(hours=2))
+        assert choose_route(inside, ALL, allow_all, NOW)[1] is None
 
-    def test_cloud_outside_window_is_skipped(self):
-        u = user(last_client_id="cloud")
-        route, reason = choose_route(u, ALL, NOW - timedelta(hours=30), NOW)
+        outside = cloud_user(cloud_last_inbound_at=NOW - timedelta(hours=30))
+        route, reason = choose_route(outside, ALL, allow_all, NOW)
         assert route.platform == "cloud" and reason == SKIP_CLOUD_WINDOW
 
     def test_cloud_never_wrote_is_skipped(self):
-        route, reason = choose_route(user(last_client_id="cloud"), ALL, None, NOW)
-        assert reason == SKIP_CLOUD_WINDOW
+        assert choose_route(cloud_user(), ALL, allow_all, NOW)[1] == SKIP_CLOUD_WINDOW
 
     def test_cloud_outside_window_falls_back_to_telegram(self):
-        u = user(last_client_id="cloud", telegram_jid="tg:7")
-        route, reason = choose_route(u, ALL, NOW - timedelta(days=3), NOW)
+        u = cloud_user(telegram_jid="tg:7", cloud_last_inbound_at=NOW - timedelta(days=3))
+        route, reason = choose_route(u, ALL, allow_all, NOW)
         assert route == Route("telegram", "tg:7") and reason is None
+
+    def test_whitelist_is_checked_per_route(self):
+        """A user whitelisted only as tg:7 must not be messaged on WhatsApp."""
+        u = user(telegram_jid="tg:7", last_client_id="baileys")
+        allowed = whitelist_filter("tg:7", "jid")
+        assert choose_route(u, ALL, allowed, NOW) == (Route("telegram", "tg:7"), None)
+        assert choose_route(u, ["baileys"], allowed, NOW) == (None, NOT_WHITELISTED)
 
 
 class TestPlanBroadcast:
     def test_counts_every_exclusion(self):
-        rows = [
-            (user(uid="a"), None),
-            (user(uid="b", opt_out=True), None),
-            (user(uid="c", jid="tg:5"), None),  # telegram not selected
-            (user(uid="d", last_client_id="cloud"), NOW - timedelta(days=2)),
-            (user(uid="e", jid="blocked@s.whatsapp.net"), None),
+        users = [
+            user(uid="a"),
+            user(uid="b", opt_out=True),
+            user(uid="c", jid="tg:5"),  # telegram not selected
+            cloud_user(uid="d", cloud_last_inbound_at=NOW - timedelta(days=2)),
+            user(uid="e", jid="blocked@s.whatsapp.net"),
         ]
         plan = plan_broadcast(
-            rows,
+            users,
             ["baileys", "cloud"],
-            allowed=lambda u: u.whatsapp_jid != "blocked@s.whatsapp.net",
+            allowed=lambda u, _r: u.whatsapp_jid != "blocked@s.whatsapp.net",
             now=NOW,
         )
         assert [r.user_id for r in plan.pending()] == ["a"]
@@ -131,19 +163,27 @@ class TestPlanBroadcast:
 
 class TestWhitelistFilter:
     def test_empty_whitelist_allows_everyone(self):
-        assert whitelist_filter("", "jid")(user()) is True
+        u = user()
+        assert whitelist_filter("", "jid")(u, candidate_routes(u)[0]) is True
 
-    def test_matches_phone_lid_or_telegram_identity(self):
-        allowed = whitelist_filter("5511999999999,tg:7", "jid")
-        assert allowed(user()) is True
-        assert allowed(user("123@lid", phone="+5511999999999")) is True
-        assert allowed(user("5500000000000@s.whatsapp.net", telegram_jid="tg:7")) is True
-        assert allowed(user("5500000000000@s.whatsapp.net")) is False
+    def test_whatsapp_route_matches_phone_or_lid(self):
+        allowed = whitelist_filter("5511999999999", "jid")
+        assert allowed(user(), Route("baileys", "5511999999999@s.whatsapp.net")) is True
+        lid_user = user("123@lid", phone="+5511999999999")
+        assert allowed(lid_user, Route("baileys", "123@lid")) is True
+        stranger = user("5500000000000@s.whatsapp.net")
+        assert allowed(stranger, Route("baileys", stranger.whatsapp_jid)) is False
+
+    def test_telegram_route_only_matches_its_own_id(self):
+        allowed = whitelist_filter("5511999999999", "jid")
+        linked = user(telegram_jid="tg:7")
+        assert allowed(linked, Route("telegram", "tg:7")) is False
 
     def test_membership_mode_admits_groups(self):
         group = user("120363@g.us", conversation_type="group")
-        assert whitelist_filter("5511999999999", "membership")(group) is True
-        assert whitelist_filter("5511999999999", "jid")(group) is False
+        route = Route("baileys", "120363@g.us")
+        assert whitelist_filter("5511999999999", "membership")(group, route) is True
+        assert whitelist_filter("5511999999999", "jid")(group, route) is False
 
 
 class TestRenderMessage:
@@ -168,17 +208,32 @@ class TestSendWindow:
 
     def test_inside_and_outside(self):
         window = (time(9), time(21))
-        assert seconds_until_window(window, datetime(2026, 1, 1, 12)) == 0
-        assert seconds_until_window(window, datetime(2026, 1, 1, 8)) == 3600
+        utc = ZoneInfo("UTC")
+        assert seconds_until_window(window, datetime(2026, 1, 1, 12, tzinfo=utc)) == 0
+        assert seconds_until_window(window, datetime(2026, 1, 1, 8, tzinfo=utc)) == 3600
         # 22:00 → opens tomorrow at 09:00
-        assert seconds_until_window(window, datetime(2026, 1, 1, 22)) == 11 * 3600
-        assert seconds_until_window(None, datetime(2026, 1, 1, 3)) == 0
+        assert seconds_until_window(window, datetime(2026, 1, 1, 22, tzinfo=utc)) == 11 * 3600
+        assert seconds_until_window(None, datetime(2026, 1, 1, 3, tzinfo=utc)) == 0
 
     def test_wrapping_window(self):
         window = (time(22), time(6))
-        assert seconds_until_window(window, datetime(2026, 1, 1, 23)) == 0
-        assert seconds_until_window(window, datetime(2026, 1, 1, 5)) == 0
-        assert seconds_until_window(window, datetime(2026, 1, 1, 12)) == 10 * 3600
+        utc = ZoneInfo("UTC")
+        assert seconds_until_window(window, datetime(2026, 1, 1, 23, tzinfo=utc)) == 0
+        assert seconds_until_window(window, datetime(2026, 1, 1, 5, tzinfo=utc)) == 0
+        assert seconds_until_window(window, datetime(2026, 1, 1, 12, tzinfo=utc)) == 10 * 3600
+
+    def test_real_seconds_across_spring_forward(self):
+        """Review finding: same-zone subtraction gave wall-clock time (11h here)."""
+        ny = ZoneInfo("America/New_York")
+        # 2026-03-08 02:00 EST → 03:00 EDT. 22:00 EST (03:00 UTC) → 09:00 EDT (13:00 UTC).
+        wait = seconds_until_window((time(9), time(21)), datetime(2026, 3, 7, 22, tzinfo=ny))
+        assert wait == 10 * 3600
+
+    def test_real_seconds_across_fall_back(self):
+        ny = ZoneInfo("America/New_York")
+        # 2026-11-01 02:00 EDT → 01:00 EST: the night is an hour longer.
+        wait = seconds_until_window((time(9), time(21)), datetime(2026, 10, 31, 22, tzinfo=ny))
+        assert wait == 12 * 3600
 
     def test_timezone(self):
         assert parse_timezone("America/Sao_Paulo").key == "America/Sao_Paulo"
@@ -221,3 +276,64 @@ class TestPacing:
         always = estimate_baileys_seconds(100, daily_limit=0, window=None, **common)
         half = estimate_baileys_seconds(100, daily_limit=0, window=(time(8), time(20)), **common)
         assert half == pytest.approx(always * 2, rel=0.01)
+
+
+class TestResumePacing:
+    """A restarted Baileys lane must pick up the schedule, not start fresh."""
+
+    SETTINGS = PacingSettings(
+        min_delay_seconds=20, max_delay_seconds=60, batch_size=3, batch_pause_seconds=600
+    )
+
+    def sends(self, *seconds_ago):
+        return [NOW - timedelta(seconds=s) for s in seconds_ago]
+
+    def test_no_history_sends_now(self):
+        assert resume_pacing([], NOW, random.Random(1), self.SETTINGS) == (0, 0.0)
+
+    def test_mid_batch_waits_out_the_jittered_gap(self):
+        count, wait = resume_pacing(self.sends(5, 40), NOW, random.Random(1), self.SETTINGS)
+        assert count == 2
+        assert 15 <= wait <= 55  # a 20-60s gap, 5s of it already elapsed
+
+    def test_full_batch_waits_out_the_batch_pause(self):
+        count, wait = resume_pacing(self.sends(5, 40, 80), NOW, random.Random(1), self.SETTINGS)
+        assert count == 0
+        assert 415 <= wait <= 775  # 600s ±30%, minus 5s elapsed
+
+    def test_long_gap_before_counts_as_a_finished_batch(self):
+        # The previous send was 900s before the latest: a batch pause happened.
+        count, _ = resume_pacing(self.sends(5, 905, 940), NOW, random.Random(1), self.SETTINGS)
+        assert count == 1
+
+    def test_idle_long_enough_starts_fresh(self):
+        assert resume_pacing(self.sends(500), NOW, random.Random(1), self.SETTINGS) == (0, 0.0)
+
+    def test_gap_already_elapsed_sends_now(self):
+        _, wait = resume_pacing(self.sends(70), NOW, random.Random(1), self.SETTINGS)
+        assert wait == 0.0
+
+
+class TestBootValidation:
+    """A bad value in .env must stop the process, not silently disable the window."""
+
+    @pytest.mark.parametrize(
+        "env",
+        [
+            {"BROADCAST_SEND_WINDOW": "9am-5pm"},
+            {"BROADCAST_TIMEZONE": "Mars/Olympus"},
+            {"BROADCAST_MIN_DELAY_SECONDS": "90", "BROADCAST_MAX_DELAY_SECONDS": "30"},
+        ],
+    )
+    def test_rejects_bad_env(self, monkeypatch, env):
+        from ai_api.config import Settings
+
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        with pytest.raises(ValidationError):
+            Settings()
+
+    def test_accepts_defaults(self):
+        from ai_api.config import Settings
+
+        assert Settings().broadcast_timezone == "UTC"

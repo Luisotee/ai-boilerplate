@@ -3,7 +3,7 @@
 from pydantic_ai import RunContext
 
 from ...commands import set_broadcast_opt_out
-from ...database import User
+from ...database import User, is_group_jid
 from ...logger import logger
 from ..core import AgentDeps, agent
 from ._db import safe_rollback
@@ -36,7 +36,9 @@ async def set_broadcast_subscription(ctx: RunContext[AgentDeps], subscribed: boo
         user = deps.db.get(User, deps.user_id)
         if user is None:
             return "Failed to update the announcement setting. Please try again."
-        if user.conversation_type == "group" and deps.is_group_admin is not True:
+        # Same group test as clean_user_data: the conversation's own JID.
+        is_group = is_group_jid(deps.whatsapp_jid)
+        if is_group and deps.is_group_admin is not True:
             # Fail closed: unknown admin status is "not an admin".
             return (
                 "Only a group admin can turn announcements on or off for this group. "
@@ -46,7 +48,7 @@ async def set_broadcast_subscription(ctx: RunContext[AgentDeps], subscribed: boo
         previous = set_broadcast_opt_out(deps.db, deps.user_id, opt_out=not subscribed)
         if previous is None:
             return "Failed to update the announcement setting. Please try again."
-        target = "this group" if user.conversation_type == "group" else "you"
+        target = "this group" if is_group else "you"
         if subscribed:
             if previous is False:
                 return f"Announcements were already on for {target}; nothing changed."

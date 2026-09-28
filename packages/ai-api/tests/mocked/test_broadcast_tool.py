@@ -10,6 +10,9 @@ from ai_api.agent.tools.broadcast import set_broadcast_subscription
 def _ctx(conversation_type="private", is_group_admin=None, opt_out=False):
     ctx = MagicMock()
     ctx.deps.user_id = "user-123"
+    ctx.deps.whatsapp_jid = (
+        "120363012345678@g.us" if conversation_type == "group" else "123@s.whatsapp.net"
+    )
     ctx.deps.is_group_admin = is_group_admin
     user = MagicMock()
     user.conversation_type = conversation_type

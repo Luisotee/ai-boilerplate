@@ -235,6 +235,30 @@ class TestConsumeLinkCodeHappyPath:
         assert await redis.get(f"link:code:{code}") is None
         assert await redis.get(f"link:user:{whatsapp_id}") is None
 
+    @pytest.mark.parametrize(
+        "wa_out,tg_out,expected", [(False, True, True), (True, False, True), (False, False, False)]
+    )
+    async def test_broadcast_opt_out_survives_the_merge(self, redis, wa_out, tg_out, expected):
+        """/broadcast off on Telegram, then /link, must not re-subscribe the person."""
+        whatsapp_id, telegram_id = str(uuid.uuid4()), str(uuid.uuid4())
+        code = await generate_link_code(redis, whatsapp_id, "whatsapp")
+
+        whatsapp_user = MagicMock(whatsapp_jid="555@s.whatsapp.net", telegram_jid=None)
+        whatsapp_user.id = uuid.UUID(whatsapp_id)
+        whatsapp_user.broadcast_opt_out = wa_out
+        telegram_user = MagicMock(whatsapp_jid="tg:42", telegram_jid=None)
+        telegram_user.id = uuid.UUID(telegram_id)
+        telegram_user.broadcast_opt_out = tg_out
+
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.side_effect = [
+            whatsapp_user,
+            telegram_user,
+        ]
+        result = await consume_link_code(db, redis, code, telegram_id, "telegram")
+        assert result.success is True
+        assert whatsapp_user.broadcast_opt_out is expected
+
     async def test_telegram_initiates_link_with_whatsapp(self, redis):
         """Reverse direction: code generated on Telegram side."""
         whatsapp_id = str(uuid.uuid4())

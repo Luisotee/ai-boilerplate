@@ -1,4 +1,4 @@
--- Broadcasts: per-chat opt-out flag and last-used chat client on `users`.
+-- Broadcasts: per-chat opt-out flag and chat-client routing columns on `users`.
 --
 -- There is no Alembic in this project: `init_db()` runs
 -- `Base.metadata.create_all()`, which creates missing *tables* but never adds
@@ -11,15 +11,17 @@
 --   docker exec -i aiagent-postgres psql -U aiagent -d aiagent \
 --     < packages/ai-api/docs/migrations/2026-09-25-broadcast.sql
 --
--- Safe to re-run (both statements are IF NOT EXISTS).
+-- Safe to re-run (every statement is IF NOT EXISTS).
 --
 -- Apply it BEFORE deploying the new API image: the `User` model now selects
--- both columns, so every user lookup fails until they exist.
+-- these columns, so every user lookup fails until they exist.
 --
 -- `broadcast_opt_out` defaults to false: every existing chat is opted IN, and
 -- users opt out with `/broadcast off` or by asking the bot.
--- `last_client_id` stays NULL on existing rows until the user next writes; a
--- NULL row is treated as Telegram for a `tg:` JID and as Baileys otherwise.
+-- The routing columns stay NULL on existing rows until the user next writes:
+-- `last_client_id` (platform last used), `whatsapp_client_id` (NULL = Baileys)
+-- and `cloud_last_inbound_at` (NULL = outside the Cloud 24h window, so Cloud
+-- chats are skipped until they write again).
 
 BEGIN;
 
@@ -28,5 +30,11 @@ ALTER TABLE users
 
 ALTER TABLE users
   ADD COLUMN IF NOT EXISTS last_client_id VARCHAR(16);
+
+ALTER TABLE users
+  ADD COLUMN IF NOT EXISTS whatsapp_client_id VARCHAR(16);
+
+ALTER TABLE users
+  ADD COLUMN IF NOT EXISTS cloud_last_inbound_at TIMESTAMP WITHOUT TIME ZONE;
 
 COMMIT;

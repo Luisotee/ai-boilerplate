@@ -8,18 +8,28 @@ Creating a broadcast only snapshots its recipients (``services/broadcast.py``
 decides who and on which platform); the stream worker's broadcast consumer
 (``streams/broadcast_consumer.py``) does the sending, paced per platform. The
 routes here change a broadcast's status; the worker notices before its next
-send. Only one broadcast may be queued or running at a time: they share the
-same WhatsApp account and the same daily cap.
+send.
+
+Only one broadcast may be queued or running at a time: they share the same
+WhatsApp account and the same daily cap. That rule is enforced under a
+transaction-scoped Postgres advisory lock (``_lock_active``), so two
+concurrent creates (a double-click, two operators) or a create racing a resume
+can never both commit an active broadcast. Every status change is a
+conditional ``UPDATE … WHERE status IN (…)``, so it can't overwrite a change
+the worker (or another request) made in between.
 """
 
 import uuid
+from collections import defaultdict
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
-from sqlalchemy import func
+from fastapi.concurrency import run_in_threadpool
+from sqlalchemy import func, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ..broadcast_pacing import estimate_baileys_seconds, parse_send_window
 from ..config import settings
 from ..database import Broadcast, BroadcastRecipient, User, get_db
 from ..deps import limiter
@@ -44,9 +54,7 @@ from ..services.broadcast import (
     PLATFORMS,
     SKIP_CLOUD_WINDOW,
     BroadcastPlan,
-    audience_rows,
-    estimate_baileys_seconds,
-    parse_send_window,
+    audience_users,
     plan_broadcast,
     probe_platforms,
     whitelist_filter,
@@ -55,11 +63,22 @@ from ..services.broadcast import (
 router = APIRouter(prefix="/admin/broadcasts", tags=["Admin", "Broadcasts"])
 
 _ACTIVE = ("queued", "running")
+#: Target status -> the verb used in 409 messages ("Cannot pause a … that is …").
+_ACTION = {"paused": "pause", "running": "resume", "cancelled": "cancel"}
 _RECIPIENT_STATUSES = ("pending", "sent", "failed", "skipped")
+
+#: pg_advisory_xact_lock key serialising "is a broadcast active?" + the write
+#: that makes one active. Any constant works; it only has to be unique to this.
+BROADCAST_LOCK_KEY = 0x62726F6164  # "broad"
 
 
 def _utcnow() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
+
+
+def _lock_active(db: Session) -> None:
+    """Serialise the active-broadcast check with its write (released at commit/rollback)."""
+    db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": BROADCAST_LOCK_KEY})
 
 
 async def _resolve_platforms(requested: list[str] | None) -> list[str]:
@@ -81,8 +100,9 @@ async def _resolve_platforms(requested: list[str] | None) -> list[str]:
 
 
 def _plan(db: Session, audience: str, platforms: list[str]) -> BroadcastPlan:
+    """Resolve the audience (sync DB work: call it through the threadpool)."""
     allowed = whitelist_filter(runtime_config.get("whitelist_phones"), settings.group_gating)
-    return plan_broadcast(audience_rows(db, audience), platforms, allowed, _utcnow())
+    return plan_broadcast(audience_users(db, audience), platforms, allowed, _utcnow())
 
 
 def _estimate(plan: BroadcastPlan, text_length: int = 280) -> int:
@@ -102,17 +122,32 @@ def _estimate(plan: BroadcastPlan, text_length: int = 280) -> int:
     )
 
 
-def _broadcast_payload(db: Session, broadcast: Broadcast) -> BroadcastResponse:
+def _count_rows(db: Session, broadcast_ids: list) -> dict:
+    """``broadcast_id -> [(platform, status, count)]`` for many broadcasts in ONE query."""
+    if not broadcast_ids:
+        return {}
     rows = (
         db.query(
+            BroadcastRecipient.broadcast_id,
             BroadcastRecipient.platform,
             BroadcastRecipient.status,
             func.count(BroadcastRecipient.id),
         )
-        .filter(BroadcastRecipient.broadcast_id == broadcast.id)
-        .group_by(BroadcastRecipient.platform, BroadcastRecipient.status)
+        .filter(BroadcastRecipient.broadcast_id.in_(broadcast_ids))
+        .group_by(
+            BroadcastRecipient.broadcast_id,
+            BroadcastRecipient.platform,
+            BroadcastRecipient.status,
+        )
         .all()
     )
+    grouped: dict = defaultdict(list)
+    for broadcast_id, platform, status, count in rows:
+        grouped[broadcast_id].append((platform, status, count))
+    return grouped
+
+
+def _payload(broadcast: Broadcast, rows) -> BroadcastResponse:
     totals = BroadcastCounts()
     per_platform = {p: BroadcastPlatformCounts(platform=p) for p in broadcast.platforms}
     for platform, status, count in rows:
@@ -137,6 +172,10 @@ def _broadcast_payload(db: Session, broadcast: Broadcast) -> BroadcastResponse:
     )
 
 
+def _broadcast_payload(db: Session, broadcast: Broadcast) -> BroadcastResponse:
+    return _payload(broadcast, _count_rows(db, [broadcast.id]).get(broadcast.id, []))
+
+
 def _get_or_404(db: Session, broadcast_id: uuid.UUID) -> Broadcast:
     broadcast = db.get(Broadcast, broadcast_id)
     if broadcast is None:
@@ -144,11 +183,19 @@ def _get_or_404(db: Session, broadcast_id: uuid.UUID) -> Broadcast:
     return broadcast
 
 
+def _find_by_key(db: Session, key: str | None) -> Broadcast | None:
+    if not key:
+        return None
+    return db.query(Broadcast).filter(Broadcast.idempotency_key == key).first()
+
+
 def _ensure_none_active(db: Session, exclude: uuid.UUID | None = None) -> None:
+    """409 if another broadcast is active. Call after ``_lock_active``."""
     query = db.query(Broadcast).filter(Broadcast.status.in_(_ACTIVE))
     if exclude is not None:
         query = query.filter(Broadcast.id != exclude)
     if query.first() is not None:
+        db.rollback()  # release the advisory lock before answering
         raise HTTPException(
             status_code=409,
             detail="Another broadcast is already queued or running; pause or cancel it first",
@@ -173,7 +220,7 @@ async def broadcast_platforms():
 async def preview_broadcast(request: BroadcastPreviewRequest, db: Session = Depends(get_db)):
     """Count who a broadcast would reach, per platform. Creates nothing."""
     platforms = await _resolve_platforms(request.platforms)
-    plan = _plan(db, request.audience, platforms)
+    plan = await run_in_threadpool(_plan, db, request.audience, platforms)
     per_platform = [
         BroadcastPlatformPreview(
             platform=p,
@@ -195,38 +242,27 @@ async def preview_broadcast(request: BroadcastPreviewRequest, db: Session = Depe
     )
 
 
-@router.post("", response_model=BroadcastResponse, status_code=201)
-async def create_broadcast(
-    request: BroadcastCreateRequest, response: Response, db: Session = Depends(get_db)
-):
-    """Snapshot the recipients and queue the broadcast for the worker (201).
-
-    Re-sending the same ``idempotency_key`` returns the broadcast it created
-    with a 200 (so a timed-out request is safe to retry), whatever its state.
-    """
-    if request.idempotency_key:
-        existing = (
-            db.query(Broadcast).filter(Broadcast.idempotency_key == request.idempotency_key).first()
-        )
-        if existing is not None:
-            response.status_code = 200
-            return _broadcast_payload(db, existing)
-
-    if not request.text.strip():
-        raise HTTPException(status_code=400, detail="Broadcast text cannot be blank")
-    _ensure_none_active(db)
-    platforms = await _resolve_platforms(request.platforms)
-    plan = _plan(db, request.audience, platforms)
-
-    broadcast = Broadcast(
-        text=request.text.strip(),
-        footer=(runtime_config.get("broadcast_footer") or "").strip(),
-        audience=request.audience,
-        platforms=platforms,
-        status="queued",
-        idempotency_key=request.idempotency_key,
-    )
+def _create_locked(
+    db: Session, request: BroadcastCreateRequest, platforms: list[str]
+) -> tuple[BroadcastResponse, bool]:
+    """Lock, re-check, snapshot and insert in one transaction. Returns (payload, created)."""
     try:
+        _lock_active(db)
+        existing = _find_by_key(db, request.idempotency_key)
+        if existing is not None:
+            db.rollback()
+            return _broadcast_payload(db, existing), False
+        _ensure_none_active(db)
+        plan = _plan(db, request.audience, platforms)
+
+        broadcast = Broadcast(
+            text=request.text.strip(),
+            footer=(runtime_config.get("broadcast_footer") or "").strip(),
+            audience=request.audience,
+            platforms=platforms,
+            status="queued",
+            idempotency_key=request.idempotency_key,
+        )
         db.add(broadcast)
         db.flush()
         db.add_all(
@@ -241,18 +277,14 @@ async def create_broadcast(
             for r in plan.recipients
         )
         db.commit()
+    except HTTPException:
+        raise
     except IntegrityError as e:
-        # A concurrent request with the same idempotency key won the race.
+        # Backstop for the idempotency-key unique constraint.
         db.rollback()
-        if request.idempotency_key:
-            existing = (
-                db.query(Broadcast)
-                .filter(Broadcast.idempotency_key == request.idempotency_key)
-                .first()
-            )
-            if existing is not None:
-                response.status_code = 200
-                return _broadcast_payload(db, existing)
+        existing = _find_by_key(db, request.idempotency_key)
+        if existing is not None:
+            return _broadcast_payload(db, existing), False
         logger.error("Error creating broadcast: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error") from e
     except Exception as e:
@@ -268,7 +300,32 @@ async def create_broadcast(
         ",".join(platforms),
         len(plan.pending()),
     )
-    return _broadcast_payload(db, broadcast)
+    return _broadcast_payload(db, broadcast), True
+
+
+@router.post("", response_model=BroadcastResponse, status_code=201)
+async def create_broadcast(
+    request: BroadcastCreateRequest, response: Response, db: Session = Depends(get_db)
+):
+    """Snapshot the recipients and queue the broadcast for the worker (201).
+
+    Re-sending the same ``idempotency_key`` returns the broadcast it created
+    with a 200 (so a timed-out request is safe to retry), whatever its state.
+    """
+    # Fast path: a replay needs neither reachable clients nor the lock.
+    existing = _find_by_key(db, request.idempotency_key)
+    if existing is not None:
+        response.status_code = 200
+        return _broadcast_payload(db, existing)
+
+    if not request.text.strip():
+        raise HTTPException(status_code=400, detail="Broadcast text cannot be blank")
+    # Probe the clients BEFORE taking the lock: it's up to 3s of network I/O.
+    platforms = await _resolve_platforms(request.platforms)
+    payload, created = await run_in_threadpool(_create_locked, db, request, platforms)
+    if not created:
+        response.status_code = 200
+    return payload
 
 
 @router.get("", response_model=BroadcastsResponse)
@@ -279,9 +336,12 @@ async def list_broadcasts(
 ):
     """Broadcasts, newest first, with delivery counts."""
     total = db.query(Broadcast).count()
-    rows = db.query(Broadcast).order_by(Broadcast.created_at.desc()).limit(limit).offset(offset)
+    page = (
+        db.query(Broadcast).order_by(Broadcast.created_at.desc()).limit(limit).offset(offset).all()
+    )
+    counts = _count_rows(db, [b.id for b in page])
     return BroadcastsResponse(
-        broadcasts=[_broadcast_payload(db, b) for b in rows],
+        broadcasts=[_payload(b, counts.get(b.id, [])) for b in page],
         total=total,
         limit=limit,
         offset=offset,
@@ -303,7 +363,10 @@ async def list_recipients(
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """Per-chat delivery rows, optionally filtered by status."""
+    """Per-chat delivery rows, optionally filtered by status.
+
+    Ordered by the immutable row id, so pages don't shift while it is sending.
+    """
     _get_or_404(db, broadcast_id)
     query = (
         db.query(BroadcastRecipient, User.name)
@@ -313,7 +376,7 @@ async def list_recipients(
     if status:
         query = query.filter(BroadcastRecipient.status == status)
     total = query.count()
-    rows = query.order_by(BroadcastRecipient.sent_at.desc().nullslast(), BroadcastRecipient.id)
+    rows = query.order_by(BroadcastRecipient.id).limit(limit).offset(offset).all()
     return BroadcastRecipientsResponse(
         recipients=[
             BroadcastRecipientItem(
@@ -325,7 +388,7 @@ async def list_recipients(
                 attempts=rec.attempts,
                 sent_at=rec.sent_at,
             )
-            for rec, name in rows.limit(limit).offset(offset).all()
+            for rec, name in rows
         ],
         total=total,
         limit=limit,
@@ -341,23 +404,44 @@ def _transition(
     *,
     pause_reason: str | None = None,
 ) -> BroadcastResponse:
+    """Conditionally move a broadcast to ``to``; 409 if it isn't in ``allowed_from``.
+
+    The write is ``UPDATE … WHERE status IN allowed_from``: if the worker (or
+    another request) changed the status since we read it, nothing is written
+    and the caller gets a 409 with the current status instead of overwriting it.
+    """
     broadcast = _get_or_404(db, broadcast_id)
     if broadcast.status not in allowed_from:
         raise HTTPException(
-            status_code=409, detail=f"Cannot {to} a broadcast that is {broadcast.status}"
+            status_code=409, detail=f"Cannot {_ACTION[to]} a broadcast that is {broadcast.status}"
         )
-    if to == "running":
-        _ensure_none_active(db, exclude=broadcast.id)
+    values: dict = {"status": to, "pause_reason": pause_reason}
+    if to == "cancelled":
+        values["finished_at"] = _utcnow()
     try:
-        broadcast.status = to
-        broadcast.pause_reason = pause_reason
-        if to == "cancelled":
-            broadcast.finished_at = _utcnow()
+        if to == "running":
+            _lock_active(db)
+            _ensure_none_active(db, exclude=broadcast.id)
+        updated = (
+            db.query(Broadcast)
+            .filter(Broadcast.id == broadcast_id, Broadcast.status.in_(allowed_from))
+            .update(values, synchronize_session=False)
+        )
+        if not updated:
+            db.rollback()
+            db.refresh(broadcast)
+            raise HTTPException(
+                status_code=409,
+                detail=f"Cannot {_ACTION[to]} a broadcast that is {broadcast.status}",
+            )
         db.commit()
+    except HTTPException:
+        raise
     except Exception as e:
         db.rollback()
         logger.error("Error updating broadcast %s: %s", broadcast_id, e, exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error") from e
+    db.refresh(broadcast)
     logger.info("Broadcast %s -> %s", broadcast_id, to)
     return _broadcast_payload(db, broadcast)
 

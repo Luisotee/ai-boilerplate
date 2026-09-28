@@ -2,6 +2,8 @@
 
 The DB is a MagicMock (as in test_admin_routes.py); chat-client reachability
 and the audience query are patched so each test controls who is in the bot.
+The real SQL (advisory lock, conditional updates, grouped counts) is exercised
+against Postgres separately — see the PR's verification notes.
 """
 
 import uuid
@@ -28,25 +30,28 @@ RUNTIME = {
 }
 
 
-def user(jid, *, uid=None, client=None, opt_out=False, telegram_jid=None, kind="private"):
+def user(jid, *, cloud_at=None, opt_out=False, telegram_jid=None, kind="private"):
+    cloud = cloud_at is not None
     return SimpleNamespace(
-        id=uid or uuid.uuid4(),
+        id=uuid.uuid4(),
         whatsapp_jid=jid,
         whatsapp_lid=None,
         telegram_jid=telegram_jid,
-        last_client_id=client,
+        last_client_id="cloud" if cloud else None,
+        whatsapp_client_id="cloud" if cloud else None,
+        cloud_last_inbound_at=cloud_at if cloud_at is not False else None,
         broadcast_opt_out=opt_out,
         conversation_type=kind,
         phone=None,
     )
 
 
-ROWS = [
-    (user("5511900000001@s.whatsapp.net"), NOW - timedelta(days=90)),
-    (user("5511900000002@s.whatsapp.net", opt_out=True), NOW),
-    (user("tg:42"), None),
-    (user("5511900000003@s.whatsapp.net", client="cloud"), NOW - timedelta(hours=1)),
-    (user("5511900000004@s.whatsapp.net", client="cloud"), NOW - timedelta(days=5)),
+USERS = [
+    user("5511900000001@s.whatsapp.net"),
+    user("5511900000002@s.whatsapp.net", opt_out=True),
+    user("tg:42"),
+    user("5511900000003@s.whatsapp.net", cloud_at=NOW - timedelta(hours=1)),
+    user("5511900000004@s.whatsapp.net", cloud_at=NOW - timedelta(days=5)),
 ]
 
 
@@ -67,12 +72,26 @@ def broadcast(status="running", **overrides):
     return SimpleNamespace(**values)
 
 
-def make_db(*, first=None, count_rows=()):
+def make_db(*, first=None, count_rows=(), target=None, updated=1):
+    """A mock session.
+
+    ``first``: what "find by idempotency key" / "is one active?" return.
+    ``count_rows``: grouped (broadcast_id, platform, status, count) rows.
+    ``target`` + ``updated``: the conditional UPDATE applies its values to
+    ``target`` and reports ``updated`` rows (0 = someone changed it first).
+    """
     db = MagicMock()
     chain = db.query.return_value.filter.return_value
     chain.first.return_value = first
     chain.filter.return_value.first.return_value = first
     chain.group_by.return_value.all.return_value = list(count_rows)
+
+    def update(values, synchronize_session=None):
+        if updated and target is not None:
+            target.__dict__.update(values)
+        return updated
+
+    chain.update.side_effect = update
     added = []
 
     def flush():
@@ -84,6 +103,10 @@ def make_db(*, first=None, count_rows=()):
     db.flush.side_effect = flush
     db.added = added
     return db
+
+
+def advisory_lock_taken(db) -> bool:
+    return any("pg_advisory_xact_lock" in str(c.args[0]) for c in db.execute.call_args_list)
 
 
 @pytest.fixture
@@ -117,8 +140,8 @@ def reachable(mapping=ALL_UP):
     return patch("ai_api.routes.broadcasts.probe_platforms", AsyncMock(return_value=mapping))
 
 
-def audience(rows=ROWS):
-    return patch("ai_api.routes.broadcasts.audience_rows", return_value=list(rows))
+def audience(users=USERS):
+    return patch("ai_api.routes.broadcasts.audience_users", return_value=list(users))
 
 
 class TestPlatforms:
@@ -198,7 +221,7 @@ class TestPreview:
 
 
 class TestCreate:
-    async def test_snapshots_recipients_and_queues(self, client_for):
+    async def test_snapshots_recipients_and_queues_under_the_lock(self, client_for):
         db = make_db()
         with reachable(), audience():
             async with client_for(db) as c:
@@ -213,6 +236,7 @@ class TestCreate:
         assert data["text"] == "Voice replies are here!"
         assert data["footer"] == RUNTIME["broadcast_footer"]
         assert data["platforms"] == ["baileys", "cloud", "telegram"]
+        assert advisory_lock_taken(db)
 
         recipients = list(db.add_all.call_args.args[0])
         by_status = sorted((r.platform, r.status, r.error_code) for r in recipients)
@@ -244,9 +268,12 @@ class TestCreate:
             async with client_for(db) as c:
                 resp = await c.post("/admin/broadcasts", json={"text": "Hi"}, headers=AUTH)
         assert resp.status_code == 409
+        # The check ran under the lock, and the lock was released (rollback).
+        assert advisory_lock_taken(db)
+        db.rollback.assert_called()
         db.add.assert_not_called()
 
-    @pytest.mark.parametrize("text", ["", "x" * 4001])
+    @pytest.mark.parametrize("text", ["", "x" * 3501])
     async def test_text_validation(self, client_for, text):
         async with client_for(make_db()) as c:
             resp = await c.post("/admin/broadcasts", json={"text": text}, headers=AUTH)
@@ -263,9 +290,9 @@ class TestReadAndTransitions:
         b = broadcast("running")
         db = make_db(
             count_rows=[
-                ("baileys", "sent", 3),
-                ("baileys", "pending", 5),
-                ("telegram", "failed", 1),
+                (b.id, "baileys", "sent", 3),
+                (b.id, "baileys", "pending", 5),
+                (b.id, "telegram", "failed", 1),
             ]
         )
         db.get.return_value = b
@@ -277,6 +304,22 @@ class TestReadAndTransitions:
         per = {p["platform"]: p for p in data["per_platform"]}
         assert per["baileys"]["sent"] == 3 and per["telegram"]["failed"] == 1
 
+    async def test_list_counts_every_broadcast_in_one_query(self, client_for):
+        first, second = broadcast("completed"), broadcast("running")
+        db = make_db(
+            count_rows=[(first.id, "baileys", "sent", 2), (second.id, "telegram", "pending", 4)]
+        )
+        db.query.return_value.count.return_value = 2
+        page = db.query.return_value.order_by.return_value.limit.return_value.offset.return_value
+        page.all.return_value = [first, second]
+        async with client_for(db) as c:
+            resp = await c.get("/admin/broadcasts", headers=AUTH)
+        assert resp.status_code == 200
+        counts = [b["counts"] for b in resp.json()["broadcasts"]]
+        assert counts[0]["sent"] == 2 and counts[1]["pending"] == 4
+        grouped = db.query.return_value.filter.return_value.group_by
+        assert grouped.call_count == 1  # not one count query per broadcast
+
     async def test_unknown_broadcast_404(self, client_for):
         db = make_db()
         db.get.return_value = None
@@ -286,7 +329,7 @@ class TestReadAndTransitions:
 
     async def test_pause_running(self, client_for):
         b = broadcast("running")
-        db = make_db()
+        db = make_db(target=b)
         db.get.return_value = b
         async with client_for(db) as c:
             resp = await c.post(f"/admin/broadcasts/{b.id}/pause", headers=AUTH)
@@ -294,18 +337,19 @@ class TestReadAndTransitions:
         assert resp.json()["status"] == "paused"
         assert resp.json()["pause_reason"] == "manual"
 
-    async def test_resume_paused(self, client_for):
+    async def test_resume_paused_takes_the_lock(self, client_for):
         b = broadcast("paused", pause_reason="consecutive_failures")
-        db = make_db(first=None)
+        db = make_db(first=None, target=b)
         db.get.return_value = b
         async with client_for(db) as c:
             resp = await c.post(f"/admin/broadcasts/{b.id}/resume", headers=AUTH)
         assert resp.json()["status"] == "running"
         assert resp.json()["pause_reason"] is None
+        assert advisory_lock_taken(db)
 
     async def test_resume_blocked_by_another_active_broadcast(self, client_for):
         b = broadcast("paused")
-        db = make_db(first=broadcast("queued"))
+        db = make_db(first=broadcast("queued"), target=b)
         db.get.return_value = b
         async with client_for(db) as c:
             resp = await c.post(f"/admin/broadcasts/{b.id}/resume", headers=AUTH)
@@ -314,19 +358,30 @@ class TestReadAndTransitions:
 
     async def test_cancel(self, client_for):
         b = broadcast("paused")
-        db = make_db()
+        db = make_db(target=b)
         db.get.return_value = b
         async with client_for(db) as c:
             resp = await c.post(f"/admin/broadcasts/{b.id}/cancel", headers=AUTH)
         assert resp.json()["status"] == "cancelled"
         assert b.finished_at is not None
 
+    async def test_transition_lost_to_a_concurrent_change_is_409(self, client_for):
+        """The worker completed it between our read and our write: don't overwrite."""
+        b = broadcast("running")
+        db = make_db(target=b, updated=0)
+        db.get.return_value = b
+        async with client_for(db) as c:
+            resp = await c.post(f"/admin/broadcasts/{b.id}/pause", headers=AUTH)
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == "Cannot pause a broadcast that is running"
+        db.commit.assert_not_called()
+
     @pytest.mark.parametrize(
         "status,action", [("completed", "cancel"), ("running", "resume"), ("cancelled", "pause")]
     )
     async def test_invalid_transitions_409(self, client_for, status, action):
         b = broadcast(status)
-        db = make_db()
+        db = make_db(target=b)
         db.get.return_value = b
         async with client_for(db) as c:
             resp = await c.post(f"/admin/broadcasts/{b.id}/{action}", headers=AUTH)

@@ -4,7 +4,11 @@ vi.mock('../../src/logger.js', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), trace: vi.fn() },
 }));
 
-import { looksLikeCommand, resolveSenderGroupAdmin } from '../../src/services/group-admin.js';
+import {
+  ADMIN_LOOKUP_TIMEOUT_MS,
+  looksLikeCommand,
+  resolveSenderGroupAdmin,
+} from '../../src/services/group-admin.js';
 import { clearGroupCache } from '../../src/services/group-cache.js';
 
 const GROUP = '120363012345678@g.us';
@@ -69,4 +73,20 @@ describe('resolveSenderGroupAdmin', () => {
       resolveSenderGroupAdmin(sock, GROUP, { participant: ADMIN }, 'stop the updates')
     ).resolves.toBeUndefined();
   });
+
+  it.each(['/clean all', 'stop the updates'])(
+    'fails closed (undefined) when the lookup hangs past the timeout: %s',
+    async (text) => {
+      vi.useFakeTimers();
+      try {
+        const sock = makeSock();
+        sock.groupMetadata.mockReturnValue(new Promise(() => {}));
+        const result = resolveSenderGroupAdmin(sock, GROUP, { participant: ADMIN }, text);
+        await vi.advanceTimersByTimeAsync(ADMIN_LOOKUP_TIMEOUT_MS);
+        await expect(result).resolves.toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+  );
 });
