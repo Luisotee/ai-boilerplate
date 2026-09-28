@@ -172,10 +172,14 @@ describe('group admin gating', () => {
     expect(sendMessageToAI.mock.calls[0][2]).toMatchObject({ isGroupAdmin: true });
   });
 
-  it('does NOT look up admin status for ordinary chatter', async () => {
-    const { bot, isSenderGroupAdmin } = await freshDispatch();
-    await bot.handleUpdate(groupText('@MyBot good morning', mention('MyBot')));
-    expect(isSenderGroupAdmin).not.toHaveBeenCalled();
+  it('resolves admin status for an addressed non-command message', async () => {
+    // Agent tools that change a group's settings ("@MyBot stop the
+    // announcements") need it too, and the AI API fails closed without it.
+    const { bot, sendMessageToAI, isSenderGroupAdmin } = await freshDispatch();
+    isSenderGroupAdmin.mockResolvedValue(true);
+    await bot.handleUpdate(groupText('@MyBot stop the announcements', mention('MyBot')));
+    expect(isSenderGroupAdmin).toHaveBeenCalledTimes(1);
+    expect(sendMessageToAI.mock.calls[0][2]).toMatchObject({ isGroupAdmin: true });
   });
 
   it('does NOT look up admin status in private chats', async () => {

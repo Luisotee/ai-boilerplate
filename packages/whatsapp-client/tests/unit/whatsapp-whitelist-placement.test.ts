@@ -54,6 +54,11 @@ vi.mock('../../src/services/wa-version.js', () => ({
 // NOT mocked — resolveSenderPhone is the thing whose ordering is under test.
 vi.mock('../../src/handlers/text.js', () => ({ handleTextMessage: vi.fn() }));
 vi.mock('../../src/utils/reactions.js', () => ({ sendFailureReaction: vi.fn() }));
+// The admin lookup for addressed group messages also reads group metadata;
+// stubbed so the `groupMetadata` assertions below keep measuring the GATE alone.
+vi.mock('../../src/services/group-admin.js', () => ({
+  resolveSenderGroupAdmin: vi.fn().mockResolvedValue(undefined),
+}));
 
 const PHONE = '4915755945319';
 const OK_LID = '109994229891095@lid';
@@ -228,6 +233,9 @@ describe.each(['jid', 'membership'] as const)('GROUP_GATING=%s', (mode) => {
       expect(handleTextMessage.mock.calls[0][5]).not.toHaveProperty('saveOnly', true);
       // Whitelisted sender: in scope without a metadata fetch.
       expect(groupMetadata).not.toHaveBeenCalled();
+      // ...and an answered group message does get its admin status resolved.
+      const { resolveSenderGroupAdmin } = await import('../../src/services/group-admin.js');
+      expect(resolveSenderGroupAdmin).toHaveBeenCalledOnce();
     }
   });
 
@@ -249,6 +257,9 @@ describe.each(['jid', 'membership'] as const)('GROUP_GATING=%s', (mode) => {
 
     expect(handleTextMessage).not.toHaveBeenCalled();
     expect(userSpy).not.toHaveBeenCalled();
+    // The admin lookup (a groupMetadata round trip) sits AFTER the gate too.
+    const { resolveSenderGroupAdmin } = await import('../../src/services/group-admin.js');
+    expect(resolveSenderGroupAdmin).not.toHaveBeenCalled();
   });
 });
 

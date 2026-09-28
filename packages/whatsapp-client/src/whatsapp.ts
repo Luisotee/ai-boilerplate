@@ -27,6 +27,7 @@ import {
   primeGroup,
 } from './services/group-cache.js';
 import { groupHasWhitelistedMember } from './services/groups.js';
+import { resolveSenderGroupAdmin } from './services/group-admin.js';
 import { handleTextMessage } from './handlers/text.js';
 import { transcribeAudioMessage } from './handlers/audio.js';
 import { extractImageData } from './handlers/image.js';
@@ -41,7 +42,7 @@ import {
 } from './utils/jid.js';
 import { isWhitelisted } from './utils/whitelist.js';
 import { gateMessage, type Gate } from './utils/gating.js';
-import { isSenderGroupAdmin, shouldRespondInGroup } from './utils/message.js';
+import { shouldRespondInGroup } from './utils/message.js';
 
 const DEFAULT_IMAGE_PROMPT = 'Please describe and analyze this image';
 const DEFAULT_DOCUMENT_PROMPT = 'I have uploaded a document for you to analyze';
@@ -568,25 +569,13 @@ export async function initializeWhatsApp(): Promise<void> {
         }
 
         if (text) {
-          // Check group admin status for commands (only when needed)
-          let isGroupAdmin: boolean | undefined;
-          if (
-            isGroup &&
-            !saveOnly &&
-            text
-              .replace(/^(@\S+\s*)+/, '')
-              .trimStart()
-              .startsWith('/')
-          ) {
-            try {
-              const metadata = await sock.groupMetadata(whatsappJid);
-              const senderJid = stripDeviceSuffix(msg.key.participant || '');
-              isGroupAdmin = isSenderGroupAdmin(metadata.participants, msg.key);
-              logger.debug({ senderJid, isGroupAdmin }, 'Checked group admin status for command');
-            } catch (error) {
-              logger.warn({ error, whatsappJid }, 'Failed to check group admin status');
-            }
-          }
+          // Admin status for addressed group messages: admin commands and
+          // group-setting agent tools both fail closed without it. Saved-only
+          // chatter never pays for the lookup.
+          const isGroupAdmin =
+            isGroup && !saveOnly
+              ? await resolveSenderGroupAdmin(sock, whatsappJid, msg.key, text)
+              : undefined;
 
           await handleTextMessage(
             sock,

@@ -13,15 +13,26 @@ vi.mock('../../src/logger.js', () => ({
 }));
 
 import { bot } from '../../src/bot.js';
-import { isSenderGroupAdmin, looksLikeCommand } from '../../src/services/group-admin.js';
+import { ADMIN_LOOKUP_TIMEOUT_MS, isSenderGroupAdmin } from '../../src/services/group-admin.js';
 import type { TelegramContext } from '../../src/bot.js';
 
-function ctx(chatId?: number, userId?: number): TelegramContext {
+function ctx(chatId?: number, userId?: number, senderChatId?: number): TelegramContext {
   return {
     chat: chatId === undefined ? undefined : { id: chatId, type: 'supergroup' },
     from: userId === undefined ? undefined : { id: userId, is_bot: false, first_name: 'A' },
+    msg:
+      senderChatId === undefined
+        ? {}
+        : {
+            sender_chat: {
+              id: senderChatId,
+              type: senderChatId === chatId ? 'supergroup' : 'channel',
+            },
+          },
   } as unknown as TelegramContext;
 }
+
+const GROUP_ANONYMOUS_BOT = 1087968824;
 
 describe('isSenderGroupAdmin', () => {
   let spy: ReturnType<typeof vi.spyOn>;
@@ -52,22 +63,26 @@ describe('isSenderGroupAdmin', () => {
     await expect(isSenderGroupAdmin(ctx(-100, undefined))).resolves.toBe(false);
     expect(spy).not.toHaveBeenCalled();
   });
-});
 
-describe('looksLikeCommand', () => {
-  it('detects a leading slash', () => {
-    expect(looksLikeCommand('/clean all')).toBe(true);
-    expect(looksLikeCommand('/settings@MyBot')).toBe(true);
+  it('fails closed (not admin) when getChatMember hangs past the timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      spy.mockReturnValue(new Promise(() => {}) as never);
+      const result = isSenderGroupAdmin(ctx(-100, 5));
+      await vi.advanceTimersByTimeAsync(ADMIN_LOOKUP_TIMEOUT_MS);
+      await expect(result).resolves.toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
-  it('skips leading @mentions like the AI API does', () => {
-    expect(looksLikeCommand('@MyBot /clean all')).toBe(true);
-    expect(looksLikeCommand('@a @b   /help')).toBe(true);
+  it('treats an anonymous admin (posting as the group itself) as admin, without an API call', async () => {
+    await expect(isSenderGroupAdmin(ctx(-100, GROUP_ANONYMOUS_BOT, -100))).resolves.toBe(true);
+    expect(spy).not.toHaveBeenCalled();
   });
 
-  it('rejects ordinary text', () => {
-    expect(looksLikeCommand('good morning')).toBe(false);
-    expect(looksLikeCommand('a/b path')).toBe(false);
-    expect(looksLikeCommand('')).toBe(false);
+  it('does NOT treat a post as another chat (linked channel / own channel) as admin', async () => {
+    spy.mockResolvedValue({ status: 'member' } as never);
+    await expect(isSenderGroupAdmin(ctx(-100, 777000, -200))).resolves.toBe(false);
   });
 });

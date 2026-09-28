@@ -39,6 +39,7 @@ async def process_chat_job_direct(
     document_filename: str | None = None,
     sender_name: str | None = None,
     client_id: str | None = None,
+    is_group_admin: bool | None = None,
 ) -> dict:
     """
     Process a chat message asynchronously (one Redis Streams job).
@@ -197,6 +198,7 @@ async def process_chat_job_direct(
                 whatsapp_client=whatsapp_client,
                 current_message_id=whatsapp_message_id,
                 client_id=client_id,
+                is_group_admin=is_group_admin,
             )
 
             # Step 4: Format message with sender name for group context

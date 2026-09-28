@@ -8,6 +8,8 @@ user-visible failure string.
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from ai_api.agent.tools.settings import clean_user_data
 
 
@@ -90,3 +92,39 @@ class TestCleanUserDataTool:
             mock_handle.assert_called_once_with(
                 ctx.deps.db, "user-123", "123@s.whatsapp.net", level="bogus"
             )
+
+
+class TestCleanUserDataGroupAdmin:
+    """In a group only a confirmed admin may wipe data — like the /clean command.
+
+    Regression: the tool had no admin check, so any group member could ask the
+    bot in plain words to clean the whole group's history."""
+
+    @pytest.mark.parametrize("jid", ["120363012345678@g.us", "tg:-1001234567890"])
+    @pytest.mark.parametrize("is_admin", [False, None])
+    async def test_non_admin_refused_in_group(self, jid, is_admin):
+        ctx = _make_ctx()
+        ctx.deps.whatsapp_jid = jid
+        ctx.deps.is_group_admin = is_admin
+        with patch("ai_api.agent.tools.settings.handle_clean_command") as mock_handle:
+            result = await clean_user_data(ctx, level="all")
+        mock_handle.assert_not_called()
+        assert "Only a group admin" in result
+
+    async def test_admin_allowed_in_group(self):
+        ctx = _make_ctx()
+        ctx.deps.whatsapp_jid = "120363012345678@g.us"
+        ctx.deps.is_group_admin = True
+        with patch("ai_api.agent.tools.settings.handle_clean_command") as mock_handle:
+            mock_handle.return_value = "Deleted 3 messages."
+            result = await clean_user_data(ctx)
+        mock_handle.assert_called_once()
+        assert result == "Deleted 3 messages."
+
+    async def test_private_chat_needs_no_admin_flag(self):
+        ctx = _make_ctx()
+        ctx.deps.is_group_admin = None
+        with patch("ai_api.agent.tools.settings.handle_clean_command") as mock_handle:
+            mock_handle.return_value = "ok"
+            await clean_user_data(ctx)
+        mock_handle.assert_called_once()

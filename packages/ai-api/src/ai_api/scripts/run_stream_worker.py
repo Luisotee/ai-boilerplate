@@ -2,14 +2,17 @@
 """
 Redis Streams worker entry point.
 
-Runs two consumers side by side in one process:
+Runs three consumers side by side in one process:
 
 - the chat consumer (``streams/consumer.py``) — per-user sequential processing
   of chat messages, concurrent across users
 - the PDF consumer (``streams/pdf_consumer.py``) — knowledge-base uploads and
   chat PDF attachments, at most ``KB_MAX_CONCURRENT_PROCESSING`` at a time
+- the broadcast consumer (``streams/broadcast_consumer.py``) — operator
+  broadcasts from ``POST /admin/broadcasts``, paced per platform; only one
+  worker process sends at a time (Redis lease)
 
-If either consumer stops, the worker exits non-zero so the process supervisor
+If any consumer stops, the worker exits non-zero so the process supervisor
 (Docker ``restart: unless-stopped``) restarts it with both consumers healthy.
 """
 
@@ -21,12 +24,13 @@ from redis.asyncio import Redis
 from ..config import settings
 from ..instrument import setup_instrumentation
 from ..logger import logger
+from ..streams.broadcast_consumer import run_broadcast_consumer
 from ..streams.consumer import run_stream_consumer
 from ..streams.pdf_consumer import run_pdf_consumer
 
 
 async def main() -> int:
-    """Start both consumers; return an exit code once either one stops."""
+    """Start every consumer; return an exit code once any one stops."""
     # This is the process that actually runs the Pydantic AI agent, so it is the
     # one that emits the token-usage and cost metrics.
     setup_instrumentation("ai-api-worker")
@@ -42,6 +46,7 @@ async def main() -> int:
     tasks = {
         asyncio.create_task(run_stream_consumer(redis), name="chat-consumer"),
         asyncio.create_task(run_pdf_consumer(redis), name="pdf-consumer"),
+        asyncio.create_task(run_broadcast_consumer(redis), name="broadcast-consumer"),
     }
     try:
         done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)

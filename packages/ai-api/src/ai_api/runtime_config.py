@@ -230,6 +230,66 @@ REGISTRY: tuple[SettingSpec, ...] = (
         "speech",
         "Maximum characters accepted for TTS synthesis.",
     ),
+    # --- Hot: broadcasts (read per send by streams/broadcast_consumer.py) ---
+    SettingSpec(
+        "broadcast_footer",
+        "str",
+        True,
+        "broadcast",
+        "Line appended to every broadcast, telling people how to opt out. "
+        "Snapshotted when a broadcast is created. Empty = no footer.",
+    ),
+    SettingSpec(
+        "broadcast_min_delay_seconds",
+        "int",
+        True,
+        "broadcast",
+        "Baileys: minimum random pause between two broadcast messages.",
+    ),
+    SettingSpec(
+        "broadcast_max_delay_seconds",
+        "int",
+        True,
+        "broadcast",
+        "Baileys: maximum random pause between two broadcast messages.",
+    ),
+    SettingSpec(
+        "broadcast_batch_size",
+        "int",
+        True,
+        "broadcast",
+        "Baileys: messages sent before a longer batch pause.",
+    ),
+    SettingSpec(
+        "broadcast_batch_pause_seconds",
+        "int",
+        True,
+        "broadcast",
+        "Baileys: length of the pause after each batch (±30% jitter).",
+    ),
+    SettingSpec(
+        "broadcast_daily_limit",
+        "int",
+        True,
+        "broadcast",
+        "Baileys: broadcast messages per rolling 24h across all broadcasts (0 = no cap). "
+        "The broadcast waits, still running, when the cap is reached.",
+    ),
+    SettingSpec(
+        "broadcast_send_window",
+        "str",
+        True,
+        "broadcast",
+        "Baileys: local time window for broadcast sends, 'HH:MM-HH:MM' (may wrap "
+        "midnight). Empty = any time.",
+    ),
+    SettingSpec(
+        "broadcast_timezone",
+        "str",
+        True,
+        "broadcast",
+        "IANA time zone for broadcast_send_window (e.g. America/Sao_Paulo).",
+    ),
     # --- Display-only (read at startup → restart required) ---
     SettingSpec("log_level", "str", False, "runtime", "Log level (applied at startup)."),
     SettingSpec(

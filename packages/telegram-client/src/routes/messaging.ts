@@ -28,6 +28,7 @@ export async function registerMessagingRoutes(app: FastifyInstance) {
         response: {
           200: SendTextResponseSchema,
           400: ErrorResponseSchema,
+          403: ErrorResponseSchema,
           500: ErrorResponseSchema,
           503: ErrorResponseSchema,
         },
@@ -77,6 +78,7 @@ export async function registerMessagingRoutes(app: FastifyInstance) {
         response: {
           200: SuccessResponseSchema,
           400: ErrorResponseSchema,
+          403: ErrorResponseSchema,
           500: ErrorResponseSchema,
           503: ErrorResponseSchema,
         },
@@ -122,6 +124,7 @@ export async function registerMessagingRoutes(app: FastifyInstance) {
         response: {
           200: SuccessResponseSchema,
           400: ErrorResponseSchema,
+          403: ErrorResponseSchema,
           500: ErrorResponseSchema,
           503: ErrorResponseSchema,
         },
@@ -168,6 +171,7 @@ export async function registerMessagingRoutes(app: FastifyInstance) {
         response: {
           200: GroupMemberResponseSchema,
           400: ErrorResponseSchema,
+          403: ErrorResponseSchema,
           500: ErrorResponseSchema,
           503: ErrorResponseSchema,
         },

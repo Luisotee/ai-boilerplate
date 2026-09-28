@@ -1,4 +1,5 @@
 import type { FastifyReply } from 'fastify';
+import { GrammyError } from 'grammy';
 import { isTelegramJid, jidToChatId } from './telegram-id.js';
 
 /**
@@ -35,6 +36,13 @@ export function sendErrorResponse(
 ): FastifyReply {
   if (err instanceof InvalidChatIdError) {
     return reply.code(400).send({ error: err.message });
+  }
+  // 403 from the Bot API means this chat can't be written to at all: the user
+  // blocked the bot or deleted their account, or the bot was removed from the
+  // group. Surfaced as a 403 (not the generic 500) so the AI API's broadcast
+  // sender can mark the recipient undeliverable instead of retrying.
+  if (err instanceof GrammyError && err.error_code === 403) {
+    return reply.code(403).send({ error: err.description });
   }
   const error = err as Error;
   return reply.code(500).send({ error: error.message || fallbackMessage });

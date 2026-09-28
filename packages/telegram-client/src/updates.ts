@@ -18,7 +18,7 @@ import { isAddressedToBot, stripBotMention } from './utils/mention.js';
 import { documentMarker, imageMarker } from './utils/group-media-marker.js';
 import { isWhitelisted } from './utils/whitelist.js';
 import { decideGroupGating } from './utils/gating.js';
-import { isSenderGroupAdmin, looksLikeCommand } from './services/group-admin.js';
+import { isSenderGroupAdmin } from './services/group-admin.js';
 
 export function registerUpdateHandlers(): void {
   // ---------------- Account linking (phone share) ----------------
@@ -49,14 +49,13 @@ export function registerUpdateHandlers(): void {
     // should read exactly as it was written in the group.
     const cleanText = isGroup && !saveOnly ? stripBotMentionFromCtx(ctx, text) : text;
 
-    // The AI API gates group admin commands and fails closed (anything but an
-    // explicit `true` is refused), so resolve admin status — lazily, only for
-    // addressed group messages that look like a command, so ordinary chatter
-    // costs no getChatMember round trip. Mirrors Baileys' lazy groupMetadata.
-    const isGroupAdmin =
-      isGroup && !saveOnly && looksLikeCommand(cleanText)
-        ? await isSenderGroupAdmin(ctx)
-        : undefined;
+    // The AI API gates group admin commands and agent tools that change a
+    // group's settings (e.g. "@bot stop the announcements here") and fails
+    // closed: anything but an explicit `true` is refused. So resolve admin
+    // status for every ADDRESSED group message — the one that is about to cost
+    // an AI call anyway. Un-addressed chatter (saved only) never pays for a
+    // getChatMember round trip.
+    const isGroupAdmin = isGroup && !saveOnly ? await isSenderGroupAdmin(ctx) : undefined;
 
     await handleTextMessage(ctx, cleanText, {
       senderJid: ctx.from ? chatIdToJid(ctx.from.id) : undefined,

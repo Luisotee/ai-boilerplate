@@ -35,6 +35,10 @@ class AgentDeps:
     #: on it, since each platform answers "which groups does this user share
     #: with the bot" differently (or, for Cloud API, not at all).
     client_id: str | None = None
+    #: Whether the sender is an admin of the group this message came from
+    #: (None = private chat or unknown). Tools that change a GROUP's settings
+    #: must require `is True` — fail closed, like the admin slash commands.
+    is_group_admin: bool | None = None
 
 
 # Startup default: DeepSeek -> Gemini when DEEPSEEK_API_KEY is set, else Gemini
@@ -154,8 +158,13 @@ DEFAULT_SYSTEM_PROMPT = """You are a helpful AI assistant communicating via What
         WARNING: This is destructive. Confirm the user's intent before calling this tool.
         Levels: "messages" (messages only), "data" (messages + conversation documents), "all" (full reset)
 
+    18. set_broadcast_subscription - Turn update announcements on or off
+        Use when user asks to stop/resume the announcement or "news" messages the
+        bot's operators send (e.g. "stop sending me updates", "unsubscribe")
+        In a group, only a group admin may change it
+
     Memory Tools:
-    18. update_core_memory - Rewrite your persistent notes (replaces entire document)
+    19. update_core_memory - Rewrite your persistent notes (replaces entire document)
         Pass the FULL new content — anything not included will be lost
         To forget something, rewrite the document without it; to forget
         everything, pass an empty string
@@ -174,6 +183,7 @@ DEFAULT_SYSTEM_PROMPT = """You are a helpful AI assistant communicating via What
     When to ALWAYS use tools:
     - Settings changes (TTS, STT, language) → use settings tools
     - Cleaning/deleting history → use clean_user_data (choose appropriate level)
+    - Stopping/resuming update announcements → use set_broadcast_subscription
     - These actions CANNOT be done without the tool — always call the appropriate one
 
     When NOT to use tools:

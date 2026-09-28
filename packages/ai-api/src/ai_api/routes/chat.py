@@ -77,6 +77,37 @@ def _display_name(request: ChatRequest | SaveMessageRequest) -> str | None:
     return request.sender_name
 
 
+def _record_client(db: Session, user, client_id: str | None) -> None:
+    """Remember which chat client the user last wrote through (broadcast routing).
+
+    - ``last_client_id``: the platform last used, tried first for a
+      /link-merged user who has both a WhatsApp and a Telegram identity;
+    - ``whatsapp_client_id``: Baileys vs Cloud, which the JID can't tell apart;
+    - ``cloud_last_inbound_at``: bumped on every Cloud message — Meta's 24h
+      free-form window is measured from it.
+
+    Only changed columns are written. Best-effort: a failure here must never
+    cost the user their reply.
+    """
+    client = client_id or "baileys"
+    changes: dict[str, object] = {}
+    if user.last_client_id != client:
+        changes["last_client_id"] = client
+    if client in ("baileys", "cloud") and user.whatsapp_client_id != client:
+        changes["whatsapp_client_id"] = client
+    if client == "cloud":
+        changes["cloud_last_inbound_at"] = datetime.now(UTC).replace(tzinfo=None)
+    if not changes:
+        return
+    try:
+        for column, value in changes.items():
+            setattr(user, column, value)
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.warning("Failed to record the user's chat client", exc_info=True)
+
+
 def _is_whitelisted(whatsapp_jid: str, phone: str | None = None) -> bool:
     """Check if a conversation is whitelisted. True if the whitelist is empty.
 
@@ -255,6 +286,7 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
     - `/clean all` - Full reset (messages, documents, memories, preferences)
     - `/memories` - Show saved core memories
     - `/memories clear` - Delete all core memories
+    - `/broadcast on|off` - Opt in/out of operator broadcasts
     - `/help` - Show available commands
 
     **Request Body:**
@@ -296,6 +328,7 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
             whatsapp_lid=chat_request.whatsapp_lid,
             name=_display_name(chat_request),
         )
+        _record_client(db, user, chat_request.client_id)
 
         # /link and /unlink need an async Redis client, so they're handled
         # here rather than inside the sync `parse_and_execute`.
@@ -410,6 +443,7 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
             whatsapp_lid=chat_request.whatsapp_lid,
             name=_display_name(chat_request),
         )
+        _record_client(db, user, chat_request.client_id)
 
         # Generate embedding for user message
         user_embedding = None
@@ -458,6 +492,10 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
                 job_data["sender_name"] = chat_request.sender_name
             if chat_request.client_id:
                 job_data["client_id"] = chat_request.client_id
+            if chat_request.is_group_admin is not None:
+                # Agent tools that change a group's settings refuse unless this
+                # is exactly True (same fail-closed rule as admin commands).
+                job_data["is_group_admin"] = "true" if chat_request.is_group_admin else "false"
 
             # Handle image data if present
             if has_image:

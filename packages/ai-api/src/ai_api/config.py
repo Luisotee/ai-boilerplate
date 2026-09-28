@@ -6,6 +6,8 @@ from typing import Literal
 from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .broadcast_pacing import parse_send_window, parse_timezone
+
 
 def get_env_files() -> tuple[Path, ...]:
     """Return env files: root .env first, then local .env.local for overrides."""
@@ -96,6 +98,23 @@ class Settings(BaseSettings):
     # context (and so to the LLM provider in a new context) and lets the bot
     # post into groups on a member's behalf. Overridable at runtime via /admin.
     shared_group_tools_enabled: bool = False
+
+    # Broadcasts (POST /admin/broadcasts, sent by the stream worker). All hot via
+    # /admin. The Baileys pacing is the anti-ban layer: a bulk send to every chat
+    # the account ever talked to is exactly what WhatsApp's spam detection looks
+    # for, so it is deliberately slow, jittered, capped and confined to daytime.
+    broadcast_footer: str = (
+        "_Don't want these updates? Just ask me to stop them, or send /broadcast off._"
+    )
+    broadcast_min_delay_seconds: int = Field(20, ge=0)
+    broadcast_max_delay_seconds: int = Field(60, ge=0)
+    broadcast_batch_size: int = Field(15, ge=1)
+    broadcast_batch_pause_seconds: int = Field(600, ge=0)
+    # Baileys messages per rolling 24h, across all broadcasts. 0 = no cap.
+    broadcast_daily_limit: int = Field(150, ge=0)
+    # "HH:MM-HH:MM" in broadcast_timezone (may wrap midnight); empty = any time.
+    broadcast_send_window: str = "09:00-21:00"
+    broadcast_timezone: str = "UTC"
 
     # Token Management
     max_context_tokens: int = 50000
@@ -238,6 +257,21 @@ class Settings(BaseSettings):
                 "STT_PROVIDER=whisper but WHISPER_BASE_URL is not set. Start the "
                 "self-hosted container (`docker compose --profile whisper up -d`) "
                 "and set WHISPER_BASE_URL."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_broadcast_pacing(self) -> "Settings":
+        # The worker would otherwise meet a typo only at send time, log it and
+        # send at ANY hour — silently weakening the Baileys anti-ban pacing.
+        # PATCH /admin/settings validates overrides the same way.
+        parse_send_window(self.broadcast_send_window)
+        parse_timezone(self.broadcast_timezone)
+        if len(self.broadcast_footer) > 500:
+            raise ValueError("BROADCAST_FOOTER is too long (max 500 characters)")
+        if self.broadcast_min_delay_seconds > self.broadcast_max_delay_seconds:
+            raise ValueError(
+                "BROADCAST_MIN_DELAY_SECONDS must not exceed BROADCAST_MAX_DELAY_SECONDS"
             )
         return self
 

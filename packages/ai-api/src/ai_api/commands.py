@@ -15,6 +15,7 @@ from .config import settings
 from .database import (
     ConversationMessage,
     ConversationPreferences,
+    User,
     get_or_create_core_memory,
     get_or_create_preferences,
 )
@@ -79,8 +80,12 @@ def is_command(message: str) -> bool:
     return cleaned.startswith("/")
 
 
-def format_settings(prefs: ConversationPreferences) -> str:
-    """Format current settings for display."""
+def format_settings(prefs: ConversationPreferences, broadcast_opt_out: bool | None = None) -> str:
+    """Format current settings for display.
+
+    ``broadcast_opt_out`` lives on the user row, not the preferences; the line is
+    shown only when the caller passes it.
+    """
     tts_status = "enabled" if prefs.tts_enabled else "disabled"
     tts_lang = LANGUAGE_NAMES.get(prefs.tts_language, prefs.tts_language)
     stt_lang = (
@@ -89,10 +94,14 @@ def format_settings(prefs: ConversationPreferences) -> str:
         else "auto-detect"
     )
 
+    broadcast_line = ""
+    if broadcast_opt_out is not None:
+        broadcast_line = f"\n- Update announcements: {'off' if broadcast_opt_out else 'on'}"
+
     return f"""Your current settings:
 - TTS: {tts_status}
 - TTS Language: {tts_lang}
-- STT Language: {stt_lang}
+- STT Language: {stt_lang}{broadcast_line}
 
 Use /help to see available commands."""
 
@@ -113,6 +122,8 @@ def _get_help_text() -> str:
 /clean all - Full reset (messages, documents, memories, preferences)
 /memories - Show saved core memories
 /memories clear - Delete all core memories
+/broadcast off - Stop receiving update announcements
+/broadcast on - Receive update announcements again
 /link - Get a code to link this account to your other platform (WhatsApp ↔ Telegram)
 /link [code] - Enter a code from the other platform to complete linking
 /linkphone - (Telegram) Link by sharing your phone number instead of a code
@@ -315,6 +326,39 @@ def handle_clean_command(
     )
 
 
+def set_broadcast_opt_out(db: Session, user_id: str, opt_out: bool) -> bool | None:
+    """Set a chat's broadcast opt-out flag; returns the previous value (None = no user).
+
+    Shared by `/broadcast` and the `set_broadcast_subscription` agent tool. On a
+    group row it is the group's flag — callers enforce the admin check.
+    """
+    user = db.get(User, user_id)
+    if user is None:
+        return None
+    previous = bool(user.broadcast_opt_out)
+    if previous != opt_out:
+        user.broadcast_opt_out = opt_out
+        db.commit()
+        logger.info(f"Broadcast opt-out set to {opt_out} for user {user_id}")
+    return previous
+
+
+def _handle_broadcast_command(db: Session, user_id: str, parts: list[str]) -> str:
+    """Handle /broadcast [on|off]."""
+    action = parts[1].lower() if len(parts) >= 2 else ""
+    if action in ("on", "off"):
+        previous = set_broadcast_opt_out(db, user_id, opt_out=action == "off")
+        if previous is None:
+            return "Sorry, I couldn't update that setting. Please try again."
+        if action == "off":
+            return "Done. You won't receive update announcements anymore. Send /broadcast on to get them again."
+        return "Done. You'll receive update announcements again. Send /broadcast off to stop them."
+
+    user = db.get(User, user_id)
+    status = "off" if user is not None and user.broadcast_opt_out else "on"
+    return f"Update announcements are currently {status}. Use '/broadcast on' or '/broadcast off'."
+
+
 def _handle_memories_command(db: Session, user_id: str, parts: list[str]) -> str:
     """Handle /memories commands."""
     if len(parts) >= 2 and parts[1].lower() == "clear":
@@ -337,7 +381,7 @@ def _handle_memories_command(db: Session, user_id: str, parts: list[str]) -> str
 
 
 # Commands that require group admin privileges
-ADMIN_ONLY_COMMANDS = {"/clean", "/tts", "/stt", "/settings", "/memories"}
+ADMIN_ONLY_COMMANDS = {"/clean", "/tts", "/stt", "/settings", "/memories", "/broadcast"}
 
 
 def parse_and_execute(
@@ -405,11 +449,18 @@ def parse_and_execute(
         response = handle_clean_command(db, user_id, whatsapp_jid, level=clean_level)
         return CommandResult(is_command=True, response_text=response)
 
+    # Handle /broadcast [on|off] (the flag lives on the user row, not prefs)
+    if command == "/broadcast":
+        response = _handle_broadcast_command(db, user_id, parts)
+        return CommandResult(is_command=True, response_text=response)
+
     # Get or create preferences for other commands
     prefs = get_or_create_preferences(db, user_id)
 
     if command == "/settings":
-        return CommandResult(is_command=True, response_text=format_settings(prefs))
+        user = db.get(User, user_id)
+        opt_out = bool(user.broadcast_opt_out) if user is not None else None
+        return CommandResult(is_command=True, response_text=format_settings(prefs, opt_out))
 
     elif command == "/tts":
         response = _handle_tts_command(db, prefs, parts)

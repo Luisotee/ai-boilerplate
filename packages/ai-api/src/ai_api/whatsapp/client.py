@@ -115,6 +115,25 @@ class WhatsAppClient:
             message_id=data.get("message_id"),
         )
 
+    async def send_typing(self, phone_number: str, state: str = "composing") -> SuccessResponse:
+        """
+        Show ("composing") or hide ("paused") the typing indicator.
+
+        Args:
+            phone_number: WhatsApp JID or phone number
+            state: "composing" or "paused"
+
+        Returns:
+            SuccessResponse with success status
+        """
+        response = await self._client.post(
+            f"{self._base_url}/whatsapp/typing",
+            json={"phoneNumber": phone_number, "state": state},
+            headers=self._get_headers(),
+        )
+        data = await self._handle_response(response)
+        return SuccessResponse(success=data.get("success", False))
+
     async def get_shared_groups(
         self,
         jid: str | None = None,

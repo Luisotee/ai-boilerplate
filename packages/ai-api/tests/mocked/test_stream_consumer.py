@@ -151,6 +151,17 @@ class TestSafeDecode:
         call_kwargs = mock_processor.call_args[1]
         assert call_kwargs["client_id"] == "cloud"
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [({b"is_group_admin": b"true"}, True), ({b"is_group_admin": b"false"}, False), ({}, None)],
+    )
+    @patch("ai_api.streams.consumer.process_chat_job_direct", new_callable=AsyncMock)
+    async def test_is_group_admin_decoded(self, mock_processor, raw, expected):
+        """Group-changing agent tools fail closed on anything but True."""
+        await process_single_message("user-123", "stream-msg-1", _make_stream_data(raw))
+        assert mock_processor.call_args[1]["is_group_admin"] is expected
+
 
 # ---------------------------------------------------------------------------
 # has_image boolean parsing from Redis
