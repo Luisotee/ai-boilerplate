@@ -16,12 +16,23 @@ import { bot } from '../../src/bot.js';
 import { ADMIN_LOOKUP_TIMEOUT_MS, isSenderGroupAdmin } from '../../src/services/group-admin.js';
 import type { TelegramContext } from '../../src/bot.js';
 
-function ctx(chatId?: number, userId?: number): TelegramContext {
+function ctx(chatId?: number, userId?: number, senderChatId?: number): TelegramContext {
   return {
     chat: chatId === undefined ? undefined : { id: chatId, type: 'supergroup' },
     from: userId === undefined ? undefined : { id: userId, is_bot: false, first_name: 'A' },
+    msg:
+      senderChatId === undefined
+        ? {}
+        : {
+            sender_chat: {
+              id: senderChatId,
+              type: senderChatId === chatId ? 'supergroup' : 'channel',
+            },
+          },
   } as unknown as TelegramContext;
 }
+
+const GROUP_ANONYMOUS_BOT = 1087968824;
 
 describe('isSenderGroupAdmin', () => {
   let spy: ReturnType<typeof vi.spyOn>;
@@ -63,5 +74,15 @@ describe('isSenderGroupAdmin', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('treats an anonymous admin (posting as the group itself) as admin, without an API call', async () => {
+    await expect(isSenderGroupAdmin(ctx(-100, GROUP_ANONYMOUS_BOT, -100))).resolves.toBe(true);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('does NOT treat a post as another chat (linked channel / own channel) as admin', async () => {
+    spy.mockResolvedValue({ status: 'member' } as never);
+    await expect(isSenderGroupAdmin(ctx(-100, 777000, -200))).resolves.toBe(false);
   });
 });

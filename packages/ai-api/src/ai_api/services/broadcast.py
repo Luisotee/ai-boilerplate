@@ -10,9 +10,13 @@ Routing a user to a platform:
 
 - A ``tg:`` row that was never linked is only reachable on Telegram.
 - A WhatsApp row goes through the WhatsApp client it last wrote from
-  (``users.whatsapp_client_id``: Baileys or Cloud; NULL on old rows means
-  Baileys). If it was merged with a Telegram account (``telegram_jid``) it also
-  has a Telegram route; the platform the user last used overall
+  (``users.whatsapp_client_id``: Baileys or Cloud). NULL (a row from before
+  the column existed) means Baileys only when this deployment has no Cloud
+  client; with one, the row could be a Cloud user who never saw the Baileys
+  number, so it is skipped (``unknown_client``) until the user writes again —
+  an unexpected message from an unknown number is exactly what gets reported
+  as spam. If the row was merged with a Telegram account (``telegram_jid``)
+  it also has a Telegram route; the platform the user last used overall
   (``users.last_client_id``) comes first.
 - Only selected platforms count, and only routes whose own identity passes the
   whitelist. A user with no usable route is left out of the snapshot.
@@ -52,10 +56,12 @@ CLOUD_WINDOW = timedelta(hours=23)
 SKIP_CLOUD_WINDOW = "cloud_window"
 SKIP_OPTED_OUT = "opted_out"
 SKIP_USER_DELETED = "user_deleted"
-
-# Why choose_route found no route at all (plan counters, never stored).
-NO_PLATFORM = "no_platform"
+SKIP_UNKNOWN_CLIENT = "unknown_client"
+#: Also stored, when the whitelist changes while a broadcast is running.
 NOT_WHITELISTED = "not_whitelisted"
+
+# Why choose_route found no route at all (plan counter, never stored).
+NO_PLATFORM = "no_platform"
 
 
 @dataclass(frozen=True)
@@ -124,15 +130,19 @@ def choose_route(
     selected: Iterable[str],
     allowed: RouteFilter,
     now: datetime,
+    *,
+    cloud_deployed: bool = False,
 ) -> tuple[Route | None, str | None]:
     """Pick the route for ``user`` among the ``selected`` platforms.
 
-    Returns ``(route, None)`` to send, ``(route, SKIP_CLOUD_WINDOW)`` to record
-    the user as skipped, or ``(None, NO_PLATFORM | NOT_WHITELISTED)`` when no
-    usable route exists. ``now`` is naive UTC, like the DB timestamps.
+    Returns ``(route, None)`` to send, ``(route, SKIP_CLOUD_WINDOW |
+    SKIP_UNKNOWN_CLIENT)`` to record the user as skipped, or
+    ``(None, NO_PLATFORM | NOT_WHITELISTED)`` when no usable route exists.
+    ``now`` is naive UTC, like the DB timestamps. ``cloud_deployed``: this bot
+    also runs a Cloud client, so a NULL ``whatsapp_client_id`` is ambiguous.
     """
     selected = set(selected)
-    skipped: Route | None = None
+    skipped: tuple[Route, str] | None = None
     blocked = False
     for route in candidate_routes(user):
         if route.platform not in selected:
@@ -141,11 +151,14 @@ def choose_route(
             blocked = True
             continue
         if route.platform == "cloud" and not in_cloud_window(user.cloud_last_inbound_at, now):
-            skipped = skipped or route
+            skipped = skipped or (route, SKIP_CLOUD_WINDOW)
+            continue
+        if route.platform == "baileys" and cloud_deployed and user.whatsapp_client_id is None:
+            skipped = skipped or (route, SKIP_UNKNOWN_CLIENT)
             continue
         return route, None
     if skipped is not None:
-        return skipped, SKIP_CLOUD_WINDOW
+        return skipped
     return None, NOT_WHITELISTED if blocked else NO_PLATFORM
 
 
@@ -167,6 +180,8 @@ def plan_broadcast(
     selected: Iterable[str],
     allowed: RouteFilter,
     now: datetime,
+    *,
+    cloud_deployed: bool = False,
 ) -> BroadcastPlan:
     """Turn audience rows into the recipient snapshot (pure)."""
     selected = tuple(selected)
@@ -175,7 +190,7 @@ def plan_broadcast(
         if user.broadcast_opt_out:
             plan.opted_out += 1
             continue
-        route, reason = choose_route(user, selected, allowed, now)
+        route, reason = choose_route(user, selected, allowed, now, cloud_deployed=cloud_deployed)
         if route is None:
             if reason == NOT_WHITELISTED:
                 plan.not_whitelisted += 1
@@ -186,12 +201,18 @@ def plan_broadcast(
     return plan
 
 
-def whitelist_filter(raw_whitelist: str, group_gating: str) -> RouteFilter:
+def whitelist_filter(raw_whitelist: str) -> RouteFilter:
     """Whitelist predicate per ROUTE, mirroring ``routes/chat.py`` ``_is_whitelisted``.
 
     A broadcast must never reach a chat the bot would refuse to talk to, and the
     check is on the identity the message actually goes to: a linked user
     whitelisted only as ``tg:…`` gets nothing on WhatsApp, and vice versa.
+
+    Stricter than chat gating for groups: under ``GROUP_GATING=membership`` a
+    group is in scope for chat because a member is whitelisted (Baileys) or
+    simply because the bot is in it (Telegram), and the bot mostly stays silent
+    there. A broadcast into such a group would be unsolicited, so a group
+    passes only when it is listed itself.
     """
     from ..whitelist import is_whitelisted, parse_whitelist
 
@@ -200,9 +221,7 @@ def whitelist_filter(raw_whitelist: str, group_gating: str) -> RouteFilter:
     wl = parse_whitelist(raw_whitelist)
 
     def allowed(user: User, route: Route) -> bool:
-        if group_gating == "membership" and is_group_jid(route.address):
-            return True
-        if route.platform == "telegram":
+        if is_group_jid(route.address) or route.platform == "telegram":
             return is_whitelisted(wl, route.address)
         if is_whitelisted(wl, user.whatsapp_jid, user.phone):
             return True

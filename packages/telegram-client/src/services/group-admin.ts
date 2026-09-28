@@ -26,6 +26,13 @@ export const ADMIN_LOOKUP_TIMEOUT_MS = 3_000;
  */
 export async function isSenderGroupAdmin(ctx: TelegramContext): Promise<boolean> {
   const chatId = ctx.chat?.id;
+  // An anonymous admin posts AS the group: `sender_chat` is the group itself
+  // and `from` is the fake @GroupAnonymousBot, so getChatMember can't tell who
+  // it is. Posting as the group is an admin-only right (`is_anonymous`), so
+  // that alone proves admin status. A linked-channel auto-forward or a user
+  // posting as their own channel carries a DIFFERENT sender_chat and falls
+  // through — and then to "not admin", since `from` is a fake user there too.
+  if (chatId !== undefined && ctx.msg?.sender_chat?.id === chatId) return true;
   const userId = ctx.from?.id;
   if (chatId === undefined || userId === undefined) return false;
 

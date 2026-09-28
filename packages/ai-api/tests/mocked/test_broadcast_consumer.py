@@ -63,11 +63,11 @@ class Harness:
     def _next(self, _bid, _platform):
         return self.queue.pop(0) if self.queue else None
 
-    async def _sleep(self, _bid, seconds):
+    async def _sleep(self, _bid, seconds, stop=None):
         self.sleeps.append(seconds)
-        return True
+        return not (stop is not None and stop.is_set())
 
-    async def run(self, platform="baileys"):
+    async def run(self, platform="baileys", stop=None):
         with ExitStack() as stack:
             enter = stack.enter_context
             enter(patch.object(bc, "create_whatsapp_client", return_value=self.client))
@@ -80,7 +80,7 @@ class Harness:
             enter(patch.object(bc, "_recent_baileys_sends", return_value=self.recent_sends))
             enter(patch.object(bc, "_sleep_while_running", self._sleep))
             enter(patch.object(bc, "typing_seconds", return_value=0))
-            await bc.run_lane(BID, platform, TEXT, MagicMock())
+            await bc.run_lane(BID, platform, TEXT, MagicMock(), stop=stop)
 
     def outcomes(self):
         return [(c.args[0], c.kwargs) for c in self.record.call_args_list]
@@ -176,6 +176,24 @@ async def test_circuit_breaker_pauses_after_consecutive_failures():
     h.pause.assert_called_once_with(BID, bc.PAUSE_CONSECUTIVE_FAILURES)
 
 
+async def test_fast_lanes_have_the_circuit_breaker_too():
+    """Review finding: a wrong API key failed the whole Telegram audience in seconds."""
+    h = Harness([claimed(n) for n in range(10)])
+    h.client.send_text.side_effect = WhatsAppClientError("Unauthorized", status_code=401)
+    await h.run("telegram")
+    assert h.client.send_text.await_count == bc.MAX_CONSECUTIVE_FAILURES
+    h.pause.assert_called_once_with(BID, bc.PAUSE_CONSECUTIVE_FAILURES)
+
+
+async def test_a_failed_sent_write_is_retried_not_resent():
+    h = Harness([claimed(1)])
+    h.record.side_effect = [RuntimeError("db blip"), 1]
+    with patch.object(bc.asyncio, "sleep", AsyncMock()):
+        await h.run("telegram")
+    h.client.send_text.assert_awaited_once()
+    assert [c.kwargs["status"] for c in h.record.call_args_list] == ["sent", "sent"]
+
+
 async def test_not_found_does_not_trip_the_circuit_breaker():
     h = Harness([claimed(n) for n in range(8)])
     h.client.send_text.side_effect = WhatsAppNotFoundError()
@@ -261,7 +279,7 @@ async def test_supervisor_restarts_a_lane_that_exited_during_pause_resume():
     fleet = Fleet({"baileys", "telegram"})
     baileys_done = asyncio.Event()
 
-    async def lane(_bid, platform, _text, _http):
+    async def lane(_bid, platform, _text, _http, stop=None):
         fleet.starts.append(platform)
         if platform == "telegram":
             if fleet.starts.count("telegram") == 1:
@@ -281,7 +299,7 @@ async def test_supervisor_restarts_a_lane_that_exited_during_pause_resume():
 async def test_supervisor_restarts_a_crashed_lane():
     fleet = Fleet({"telegram"})
 
-    async def lane(_bid, platform, _text, _http):
+    async def lane(_bid, platform, _text, _http, stop=None):
         fleet.starts.append(platform)
         if len(fleet.starts) == 1:
             raise RuntimeError("bug")
@@ -292,17 +310,16 @@ async def test_supervisor_restarts_a_crashed_lane():
 
 
 @pytest.mark.parametrize("status", ["paused", "cancelled"])
-async def test_supervisor_cancels_lanes_when_the_broadcast_stops(status):
+async def test_supervisor_drains_lanes_instead_of_cancelling_them(status):
+    """Review finding: cancelling a lane mid-send left the message unrecorded,
+    so it was sent again on resume. Lanes get ``stop`` and finish instead."""
     fleet = Fleet({"baileys", "telegram"})
-    cancelled: list[str] = []
+    drained: list[str] = []
 
-    async def lane(_bid, platform, _text, _http):
+    async def lane(_bid, platform, _text, _http, stop=None):
         fleet.starts.append(platform)
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            cancelled.append(platform)
-            raise
+        await stop.wait()  # e.g. between messages, or finishing a send
+        drained.append(platform)
 
     async def stop_soon():
         while len(fleet.starts) < 2:
@@ -312,27 +329,65 @@ async def test_supervisor_cancels_lanes_when_the_broadcast_stops(status):
     stopper = asyncio.create_task(stop_soon())
     await fleet.supervise(lane)
     await stopper
-    assert sorted(cancelled) == ["baileys", "telegram"]
+    assert sorted(drained) == ["baileys", "telegram"]
 
 
-async def test_supervisor_stops_sending_when_the_lease_is_lost():
+async def test_supervisor_cancels_a_lane_that_does_not_stop_in_time(monkeypatch):
+    monkeypatch.setattr(bc, "LANE_DRAIN_SECONDS", 0.05)
     fleet = Fleet({"baileys"})
     cancelled = asyncio.Event()
 
-    async def lane(_bid, platform, _text, _http):
+    async def lane(_bid, platform, _text, _http, stop=None):
         fleet.starts.append(platform)
         try:
-            await asyncio.Event().wait()
+            await asyncio.Event().wait()  # ignores stop: a hung HTTP call
         except asyncio.CancelledError:
             cancelled.set()
             raise
+
+    async def stop_soon():
+        while not fleet.starts:
+            await asyncio.sleep(0.01)
+        fleet.status = "paused"
+
+    stopper = asyncio.create_task(stop_soon())
+    await fleet.supervise(lane)
+    await stopper
+    assert cancelled.is_set()
+
+
+async def test_supervisor_drains_lanes_when_the_lease_is_lost():
+    fleet = Fleet({"baileys"})
+    drained = asyncio.Event()
+
+    async def lane(_bid, platform, _text, _http, stop=None):
+        fleet.starts.append(platform)
+        await stop.wait()
+        drained.set()
 
     async def lost_heartbeat(_redis, _token):
         while not fleet.starts:
             await asyncio.sleep(0.01)
 
     await fleet.supervise(lane, heartbeat=lost_heartbeat)
-    assert cancelled.is_set()
+    assert drained.is_set()
+
+
+async def test_in_flight_send_is_finished_and_recorded_when_stopped():
+    stop = asyncio.Event()
+    first, second = claimed(1), claimed(2)
+    h = Harness([first, second])
+    h.client.send_text.side_effect = lambda *_a: stop.set()  # pause lands mid-send
+    await h.run("telegram", stop=stop)
+    h.client.send_text.assert_awaited_once()
+    assert h.outcomes() == [(first.id, {"status": "sent", "history_text": TEXT})]
+
+
+async def test_stop_wakes_a_sleeping_lane_immediately():
+    stop = asyncio.Event()
+    asyncio.get_running_loop().call_later(0.05, stop.set)
+    with patch.object(bc, "_broadcast_status", return_value="running"):
+        assert await asyncio.wait_for(bc._sleep_while_running(BID, 600, stop), timeout=1) is False
 
 
 async def test_supervisor_does_nothing_if_the_broadcast_cannot_start():
@@ -384,6 +439,25 @@ class TestHeartbeat:
             task = asyncio.create_task(bc._heartbeat(MagicMock(), "tok"))
             await asyncio.sleep(0.2)
             assert not task.done()
+            task.cancel()
+
+    async def test_a_hung_renewal_counts_as_a_failure(self):
+        """Review finding: a half-open Redis connection blocked the heartbeat for
+        minutes while the lanes kept sending on an expired lease."""
+
+        async def hang(*_a):
+            await asyncio.Event().wait()
+
+        with patch.object(bc, "acquire_lock", side_effect=hang):
+            await asyncio.wait_for(bc._heartbeat(MagicMock(), "tok"), timeout=1)
+
+    async def test_renews_immediately(self):
+        acquire = AsyncMock(return_value=True)
+        with patch.object(bc, "acquire_lock", acquire):
+            task = asyncio.create_task(bc._heartbeat(MagicMock(), "tok"))
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            assert acquire.await_count >= 1
             task.cancel()
 
     async def test_returns_when_another_worker_holds_the_lease(self):

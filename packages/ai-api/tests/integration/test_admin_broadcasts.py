@@ -30,7 +30,9 @@ RUNTIME = {
 }
 
 
-def user(jid, *, cloud_at=None, opt_out=False, telegram_jid=None, kind="private"):
+def user(
+    jid, *, cloud_at=None, opt_out=False, telegram_jid=None, kind="private", wa_client="baileys"
+):
     cloud = cloud_at is not None
     return SimpleNamespace(
         id=uuid.uuid4(),
@@ -38,7 +40,7 @@ def user(jid, *, cloud_at=None, opt_out=False, telegram_jid=None, kind="private"
         whatsapp_lid=None,
         telegram_jid=telegram_jid,
         last_client_id="cloud" if cloud else None,
-        whatsapp_client_id="cloud" if cloud else None,
+        whatsapp_client_id="cloud" if cloud else wa_client,
         cloud_last_inbound_at=cloud_at if cloud_at is not False else None,
         broadcast_opt_out=opt_out,
         conversation_type=kind,
@@ -52,6 +54,8 @@ USERS = [
     user("tg:42"),
     user("5511900000003@s.whatsapp.net", cloud_at=NOW - timedelta(hours=1)),
     user("5511900000004@s.whatsapp.net", cloud_at=NOW - timedelta(days=5)),
+    # From before client tracking: Baileys or Cloud? Unknown while Cloud is up.
+    user("5511900000005@s.whatsapp.net", wa_client=None),
 ]
 
 
@@ -174,6 +178,7 @@ class TestPreview:
         assert data["total_recipients"] == 3  # baileys + tg + cloud-in-window
         assert data["opted_out"] == 1
         assert data["skipped_cloud_window"] == 1
+        assert data["skipped_unknown_client"] == 1
         per = {p["platform"]: p for p in data["per_platform"]}
         assert per["baileys"]["recipients"] == 1
         assert per["cloud"] == {"platform": "cloud", "recipients": 1, "skipped_cloud_window": 1}
@@ -188,7 +193,7 @@ class TestPreview:
         data = resp.json()
         assert data["platforms"] == ["telegram"]
         assert data["total_recipients"] == 1
-        assert data["no_selected_platform"] == 3
+        assert data["no_selected_platform"] == 4
 
     async def test_unreachable_explicit_platform_is_400(self, client_for):
         with reachable({"baileys": True, "cloud": False, "telegram": True}), audience():
@@ -204,6 +209,9 @@ class TestPreview:
             async with client_for(make_db()) as c:
                 resp = await c.post("/admin/broadcasts/preview", json={}, headers=AUTH)
         assert resp.json()["platforms"] == ["baileys"]
+        # No Cloud client deployed: an untracked WhatsApp row can only be Baileys.
+        assert resp.json()["skipped_unknown_client"] == 0
+        assert resp.json()["per_platform"][0]["recipients"] == 2
 
     async def test_nothing_reachable_is_503(self, client_for):
         with reachable({"baileys": False, "cloud": False, "telegram": False}), audience():
@@ -242,6 +250,7 @@ class TestCreate:
         by_status = sorted((r.platform, r.status, r.error_code) for r in recipients)
         assert by_status == [
             ("baileys", "pending", None),
+            ("baileys", "skipped", "unknown_client"),
             ("cloud", "pending", None),
             ("cloud", "skipped", "cloud_window"),
             ("telegram", "pending", None),
@@ -255,11 +264,24 @@ class TestCreate:
             async with client_for(db) as c:
                 resp = await c.post(
                     "/admin/broadcasts",
-                    json={"text": "Hi", "idempotency_key": "abc"},
+                    json={"text": "New feature", "idempotency_key": "abc"},
                     headers=AUTH,
                 )
         assert resp.status_code == 200
         assert resp.json()["id"] == str(existing.id)
+        db.add.assert_not_called()
+
+    async def test_idempotency_key_reused_for_a_different_message_is_422(self, client_for):
+        db = make_db(first=broadcast("completed", text="Old news"))
+        with reachable(), audience():
+            async with client_for(db) as c:
+                resp = await c.post(
+                    "/admin/broadcasts",
+                    json={"text": "Brand new feature", "idempotency_key": "abc"},
+                    headers=AUTH,
+                )
+        assert resp.status_code == 422
+        assert "different broadcast" in resp.json()["detail"]
         db.add.assert_not_called()
 
     async def test_conflicts_with_an_active_broadcast(self, client_for):

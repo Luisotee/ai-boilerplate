@@ -24,6 +24,7 @@ from ai_api.services.broadcast import (
     NO_PLATFORM,
     NOT_WHITELISTED,
     SKIP_CLOUD_WINDOW,
+    SKIP_UNKNOWN_CLIENT,
     Route,
     candidate_routes,
     choose_route,
@@ -133,9 +134,32 @@ class TestChooseRoute:
     def test_whitelist_is_checked_per_route(self):
         """A user whitelisted only as tg:7 must not be messaged on WhatsApp."""
         u = user(telegram_jid="tg:7", last_client_id="baileys")
-        allowed = whitelist_filter("tg:7", "jid")
+        allowed = whitelist_filter("tg:7")
         assert choose_route(u, ALL, allowed, NOW) == (Route("telegram", "tg:7"), None)
         assert choose_route(u, ["baileys"], allowed, NOW) == (None, NOT_WHITELISTED)
+
+
+class TestUnknownWhatsAppClient:
+    """Rows from before client tracking: Baileys only if no Cloud client exists."""
+
+    def test_no_cloud_deployed_means_baileys(self):
+        route, reason = choose_route(user(), ALL, allow_all, NOW, cloud_deployed=False)
+        assert route.platform == "baileys" and reason is None
+
+    def test_cloud_deployed_skips_the_ambiguous_row(self):
+        """Review finding: an old Cloud-only user would get a message from the
+        Baileys number they never talked to — a spam-report risk."""
+        route, reason = choose_route(user(), ALL, allow_all, NOW, cloud_deployed=True)
+        assert route.platform == "baileys" and reason == SKIP_UNKNOWN_CLIENT
+
+    def test_known_baileys_user_is_unaffected(self):
+        u = user(whatsapp_client_id="baileys")
+        assert choose_route(u, ALL, allow_all, NOW, cloud_deployed=True)[1] is None
+
+    def test_ambiguous_linked_user_falls_back_to_telegram(self):
+        u = user(telegram_jid="tg:7")
+        route, reason = choose_route(u, ALL, allow_all, NOW, cloud_deployed=True)
+        assert route == Route("telegram", "tg:7") and reason is None
 
 
 class TestPlanBroadcast:
@@ -164,10 +188,10 @@ class TestPlanBroadcast:
 class TestWhitelistFilter:
     def test_empty_whitelist_allows_everyone(self):
         u = user()
-        assert whitelist_filter("", "jid")(u, candidate_routes(u)[0]) is True
+        assert whitelist_filter("")(u, candidate_routes(u)[0]) is True
 
     def test_whatsapp_route_matches_phone_or_lid(self):
-        allowed = whitelist_filter("5511999999999", "jid")
+        allowed = whitelist_filter("5511999999999")
         assert allowed(user(), Route("baileys", "5511999999999@s.whatsapp.net")) is True
         lid_user = user("123@lid", phone="+5511999999999")
         assert allowed(lid_user, Route("baileys", "123@lid")) is True
@@ -175,15 +199,23 @@ class TestWhitelistFilter:
         assert allowed(stranger, Route("baileys", stranger.whatsapp_jid)) is False
 
     def test_telegram_route_only_matches_its_own_id(self):
-        allowed = whitelist_filter("5511999999999", "jid")
+        allowed = whitelist_filter("5511999999999")
         linked = user(telegram_jid="tg:7")
         assert allowed(linked, Route("telegram", "tg:7")) is False
 
-    def test_membership_mode_admits_groups(self):
+    def test_a_group_must_be_listed_itself(self):
+        """Even under GROUP_GATING=membership, where chat admits such groups: a
+        broadcast into a group the bot is mostly silent in would be unsolicited."""
         group = user("120363@g.us", conversation_type="group")
         route = Route("baileys", "120363@g.us")
-        assert whitelist_filter("5511999999999", "membership")(group, route) is True
-        assert whitelist_filter("5511999999999", "jid")(group, route) is False
+        assert whitelist_filter("5511999999999")(group, route) is False
+        assert whitelist_filter("5511999999999,120363@g.us")(group, route) is True
+
+    def test_a_telegram_group_must_be_listed_itself(self):
+        group = user("tg:-1001", conversation_type="group")
+        route = Route("telegram", "tg:-1001")
+        assert whitelist_filter("tg:7")(group, route) is False
+        assert whitelist_filter("tg:-1001")(group, route) is True
 
 
 class TestRenderMessage:
@@ -323,6 +355,7 @@ class TestBootValidation:
             {"BROADCAST_SEND_WINDOW": "9am-5pm"},
             {"BROADCAST_TIMEZONE": "Mars/Olympus"},
             {"BROADCAST_MIN_DELAY_SECONDS": "90", "BROADCAST_MAX_DELAY_SECONDS": "30"},
+            {"BROADCAST_FOOTER": "x" * 501},
         ],
     )
     def test_rejects_bad_env(self, monkeypatch, env):

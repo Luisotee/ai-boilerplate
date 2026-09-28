@@ -267,6 +267,8 @@ class Settings(BaseSettings):
         # PATCH /admin/settings validates overrides the same way.
         parse_send_window(self.broadcast_send_window)
         parse_timezone(self.broadcast_timezone)
+        if len(self.broadcast_footer) > 500:
+            raise ValueError("BROADCAST_FOOTER is too long (max 500 characters)")
         if self.broadcast_min_delay_seconds > self.broadcast_max_delay_seconds:
             raise ValueError(
                 "BROADCAST_MIN_DELAY_SECONDS must not exceed BROADCAST_MAX_DELAY_SECONDS"

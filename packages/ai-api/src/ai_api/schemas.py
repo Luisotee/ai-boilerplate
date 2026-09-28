@@ -326,6 +326,13 @@ class BroadcastPreviewResponse(BaseModel):
         ..., description="Chats with no route through the selected platforms"
     )
     skipped_cloud_window: int
+    skipped_unknown_client: int = Field(
+        0,
+        description=(
+            "Chats from before client tracking whose WhatsApp client (Baileys or Cloud) is "
+            "unknown; skipped while a Cloud client is deployed, until they write again"
+        ),
+    )
     estimated_baileys_seconds: int = Field(
         ..., description="Rough time to finish the Baileys lane under the current pacing"
     )
@@ -386,7 +393,8 @@ class BroadcastRecipientItem(BaseModel):
         None,
         description=(
             "Failure/skip reason, e.g. not_on_whatsapp, blocked, invalid_address, "
-            "http_500, transport_error, opted_out, cloud_window, user_deleted"
+            "http_500, transport_error, opted_out, cloud_window, user_deleted, "
+            "unknown_client, not_whitelisted"
         ),
     )
     attempts: int

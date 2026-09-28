@@ -3,7 +3,7 @@
 from pydantic_ai import RunContext
 
 from ...commands import set_broadcast_opt_out
-from ...database import User, is_group_jid
+from ...database import is_group_jid
 from ...logger import logger
 from ..core import AgentDeps, agent
 from ._db import safe_rollback
@@ -32,10 +32,6 @@ async def set_broadcast_subscription(ctx: RunContext[AgentDeps], subscribed: boo
     logger.info(f"📣 TOOL CALLED: set_broadcast_subscription (subscribed={subscribed})")
     deps = ctx.deps
     try:
-        # Identity comes from the run's own user row, never from arguments.
-        user = deps.db.get(User, deps.user_id)
-        if user is None:
-            return "Failed to update the announcement setting. Please try again."
         # Same group test as clean_user_data: the conversation's own JID.
         is_group = is_group_jid(deps.whatsapp_jid)
         if is_group and deps.is_group_admin is not True:
@@ -45,6 +41,8 @@ async def set_broadcast_subscription(ctx: RunContext[AgentDeps], subscribed: boo
                 "An admin can ask me, or send /broadcast off."
             )
 
+        # Identity comes from the run's own user row (deps.user_id), never from
+        # arguments; None means that row doesn't exist.
         previous = set_broadcast_opt_out(deps.db, deps.user_id, opt_out=not subscribed)
         if previous is None:
             return "Failed to update the announcement setting. Please try again."

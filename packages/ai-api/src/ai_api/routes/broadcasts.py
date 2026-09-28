@@ -30,7 +30,6 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..broadcast_pacing import estimate_baileys_seconds, parse_send_window
-from ..config import settings
 from ..database import Broadcast, BroadcastRecipient, User, get_db
 from ..deps import limiter
 from ..logger import logger
@@ -53,6 +52,7 @@ from ..schemas import (
 from ..services.broadcast import (
     PLATFORMS,
     SKIP_CLOUD_WINDOW,
+    SKIP_UNKNOWN_CLIENT,
     BroadcastPlan,
     audience_users,
     plan_broadcast,
@@ -81,14 +81,18 @@ def _lock_active(db: Session) -> None:
     db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": BROADCAST_LOCK_KEY})
 
 
-async def _resolve_platforms(requested: list[str] | None) -> list[str]:
-    """Explicit platforms must be reachable; omitted = every reachable one."""
+async def _resolve_platforms(requested: list[str] | None) -> tuple[list[str], bool]:
+    """Explicit platforms must be reachable; omitted = every reachable one.
+
+    Also returns whether a Cloud client is deployed: then a user row with no
+    known WhatsApp client can't safely be assumed to be a Baileys user.
+    """
     reachable = await probe_platforms()
     if requested is None:
         platforms = [p for p in PLATFORMS if reachable[p]]
         if not platforms:
             raise HTTPException(status_code=503, detail="No chat client is reachable")
-        return platforms
+        return platforms, reachable["cloud"]
     down = [p for p in requested if not reachable[p]]
     if down:
         raise HTTPException(
@@ -96,13 +100,15 @@ async def _resolve_platforms(requested: list[str] | None) -> list[str]:
             detail=f"Chat client not reachable (not deployed or down): {', '.join(down)}",
         )
     # De-duplicate, keeping the canonical order.
-    return [p for p in PLATFORMS if p in requested]
+    return [p for p in PLATFORMS if p in requested], reachable["cloud"]
 
 
-def _plan(db: Session, audience: str, platforms: list[str]) -> BroadcastPlan:
+def _plan(db: Session, audience: str, platforms: list[str], cloud_deployed: bool) -> BroadcastPlan:
     """Resolve the audience (sync DB work: call it through the threadpool)."""
-    allowed = whitelist_filter(runtime_config.get("whitelist_phones"), settings.group_gating)
-    return plan_broadcast(audience_users(db, audience), platforms, allowed, _utcnow())
+    allowed = whitelist_filter(runtime_config.get("whitelist_phones"))
+    return plan_broadcast(
+        audience_users(db, audience), platforms, allowed, _utcnow(), cloud_deployed=cloud_deployed
+    )
 
 
 def _estimate(plan: BroadcastPlan, text_length: int = 280) -> int:
@@ -219,8 +225,8 @@ async def broadcast_platforms():
 @router.post("/preview", response_model=BroadcastPreviewResponse)
 async def preview_broadcast(request: BroadcastPreviewRequest, db: Session = Depends(get_db)):
     """Count who a broadcast would reach, per platform. Creates nothing."""
-    platforms = await _resolve_platforms(request.platforms)
-    plan = await run_in_threadpool(_plan, db, request.audience, platforms)
+    platforms, cloud_deployed = await _resolve_platforms(request.platforms)
+    plan = await run_in_threadpool(_plan, db, request.audience, platforms, cloud_deployed)
     per_platform = [
         BroadcastPlatformPreview(
             platform=p,
@@ -238,12 +244,29 @@ async def preview_broadcast(request: BroadcastPreviewRequest, db: Session = Depe
         not_whitelisted=plan.not_whitelisted,
         no_selected_platform=plan.no_selected_platform,
         skipped_cloud_window=sum(p.skipped_cloud_window for p in per_platform),
+        skipped_unknown_client=plan.count("baileys", skipped=SKIP_UNKNOWN_CLIENT),
         estimated_baileys_seconds=_estimate(plan),
     )
 
 
+def _replay(existing: Broadcast, request: BroadcastCreateRequest) -> None:
+    """422 when an idempotency key is reused for a DIFFERENT broadcast.
+
+    A retry of the same request is fine; a new message under an old key is a
+    client bug that would otherwise silently return the old broadcast.
+    """
+    if existing.text != request.text.strip() or existing.audience != request.audience:
+        raise HTTPException(
+            status_code=422,
+            detail="idempotency_key was already used for a different broadcast",
+        )
+
+
 def _create_locked(
-    db: Session, request: BroadcastCreateRequest, platforms: list[str]
+    db: Session,
+    request: BroadcastCreateRequest,
+    platforms: list[str],
+    cloud_deployed: bool = False,
 ) -> tuple[BroadcastResponse, bool]:
     """Lock, re-check, snapshot and insert in one transaction. Returns (payload, created)."""
     try:
@@ -251,9 +274,10 @@ def _create_locked(
         existing = _find_by_key(db, request.idempotency_key)
         if existing is not None:
             db.rollback()
+            _replay(existing, request)
             return _broadcast_payload(db, existing), False
         _ensure_none_active(db)
-        plan = _plan(db, request.audience, platforms)
+        plan = _plan(db, request.audience, platforms, cloud_deployed)
 
         broadcast = Broadcast(
             text=request.text.strip(),
@@ -284,6 +308,7 @@ def _create_locked(
         db.rollback()
         existing = _find_by_key(db, request.idempotency_key)
         if existing is not None:
+            _replay(existing, request)
             return _broadcast_payload(db, existing), False
         logger.error("Error creating broadcast: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error") from e
@@ -310,19 +335,23 @@ async def create_broadcast(
     """Snapshot the recipients and queue the broadcast for the worker (201).
 
     Re-sending the same ``idempotency_key`` returns the broadcast it created
-    with a 200 (so a timed-out request is safe to retry), whatever its state.
+    with a 200 (so a timed-out request is safe to retry), whatever its state;
+    reusing it with a different text or audience is a 422.
     """
     # Fast path: a replay needs neither reachable clients nor the lock.
     existing = _find_by_key(db, request.idempotency_key)
     if existing is not None:
+        _replay(existing, request)
         response.status_code = 200
         return _broadcast_payload(db, existing)
 
     if not request.text.strip():
         raise HTTPException(status_code=400, detail="Broadcast text cannot be blank")
     # Probe the clients BEFORE taking the lock: it's up to 3s of network I/O.
-    platforms = await _resolve_platforms(request.platforms)
-    payload, created = await run_in_threadpool(_create_locked, db, request, platforms)
+    platforms, cloud_deployed = await _resolve_platforms(request.platforms)
+    payload, created = await run_in_threadpool(
+        _create_locked, db, request, platforms, cloud_deployed
+    )
     if not created:
         response.status_code = 200
     return payload
