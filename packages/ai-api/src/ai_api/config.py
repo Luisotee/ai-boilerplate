@@ -6,7 +6,14 @@ from typing import Literal
 from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from .broadcast_pacing import parse_send_window, parse_timezone
+from .broadcast_pacing import (
+    MAX_BATCH_PAUSE_SECONDS,
+    MAX_BATCH_SIZE,
+    MAX_DAILY_LIMIT,
+    MAX_DELAY_SECONDS,
+    parse_send_window,
+    parse_timezone,
+)
 
 
 def get_env_files() -> tuple[Path, ...]:
@@ -106,12 +113,12 @@ class Settings(BaseSettings):
     broadcast_footer: str = (
         "_Don't want these updates? Just ask me to stop them, or send /broadcast off._"
     )
-    broadcast_min_delay_seconds: int = Field(20, ge=0)
-    broadcast_max_delay_seconds: int = Field(60, ge=0)
-    broadcast_batch_size: int = Field(15, ge=1)
-    broadcast_batch_pause_seconds: int = Field(600, ge=0)
+    broadcast_min_delay_seconds: int = Field(20, ge=0, le=MAX_DELAY_SECONDS)
+    broadcast_max_delay_seconds: int = Field(60, ge=0, le=MAX_DELAY_SECONDS)
+    broadcast_batch_size: int = Field(15, ge=1, le=MAX_BATCH_SIZE)
+    broadcast_batch_pause_seconds: int = Field(600, ge=0, le=MAX_BATCH_PAUSE_SECONDS)
     # Baileys messages per rolling 24h, across all broadcasts. 0 = no cap.
-    broadcast_daily_limit: int = Field(150, ge=0)
+    broadcast_daily_limit: int = Field(150, ge=0, le=MAX_DAILY_LIMIT)
     # "HH:MM-HH:MM" in broadcast_timezone (may wrap midnight); empty = any time.
     broadcast_send_window: str = "09:00-21:00"
     broadcast_timezone: str = "UTC"

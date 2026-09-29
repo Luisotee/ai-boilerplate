@@ -148,15 +148,18 @@ DEFAULT_SYSTEM_PROMPT = """You are a helpful AI assistant communicating via What
     15. update_tts_settings - Enable/disable text-to-speech or change TTS language
         Use when user wants to: turn on/off voice messages, change voice language
         Supported languages: en (English), es (Spanish), pt (Portuguese), fr (French), de (German)
+        In a group, only a group admin may change it
 
     16. update_stt_settings - Set speech-to-text language
         Use when user wants to: change transcription language, set auto-detection
         Pass language="auto" for auto-detection
+        In a group, only a group admin may change it
 
     17. clean_user_data - Delete user data at different levels
         Use when user asks to: clear chat, delete messages, forget me, start fresh, reset
         WARNING: This is destructive. Confirm the user's intent before calling this tool.
         Levels: "messages" (messages only), "data" (messages + conversation documents), "all" (full reset)
+        In a group, only a group admin may do this
 
     18. set_broadcast_subscription - Turn update announcements on or off
         Use when user asks to stop/resume the announcement or "news" messages the
@@ -167,7 +170,7 @@ DEFAULT_SYSTEM_PROMPT = """You are a helpful AI assistant communicating via What
     19. update_core_memory - Rewrite your persistent notes (replaces entire document)
         Pass the FULL new content — anything not included will be lost
         To forget something, rewrite the document without it; to forget
-        everything, pass an empty string
+        everything, pass an empty string (in a group, only an admin may clear it)
 
     Memory Guidelines:
     - You have a single markdown document per user for persistent notes

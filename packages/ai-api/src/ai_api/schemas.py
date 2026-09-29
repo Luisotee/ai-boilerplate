@@ -333,6 +333,13 @@ class BroadcastPreviewResponse(BaseModel):
             "unknown; skipped while a Cloud client is deployed, until they write again"
         ),
     )
+    skipped_duplicate: int = Field(
+        0,
+        description=(
+            "Extra chat rows of a person who already gets the message (e.g. an early "
+            "@lid row next to the phone-number row); never sent"
+        ),
+    )
     estimated_baileys_seconds: int = Field(
         ..., description="Rough time to finish the Baileys lane under the current pacing"
     )
@@ -393,8 +400,9 @@ class BroadcastRecipientItem(BaseModel):
         None,
         description=(
             "Failure/skip reason, e.g. not_on_whatsapp, blocked, invalid_address, "
-            "http_500, transport_error, opted_out, cloud_window, user_deleted, "
-            "unknown_client, not_whitelisted"
+            "rejected, unknown (may have been delivered; never retried), http_429, "
+            "transport_error, opted_out, cloud_window, user_deleted, unknown_client, "
+            "not_whitelisted"
         ),
     )
     attempts: int

@@ -3,6 +3,7 @@ import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { isCloudApiConnected } from '../services/cloud-state.js';
 import * as graphApi from '../services/graph-api.js';
 import { jidToPhone } from '../utils/jid.js';
+import { sendErrorResponse } from '../utils/send-error.js';
 import {
   SendTextSchema,
   SendReactionSchema,
@@ -24,7 +25,10 @@ export async function registerMessagingRoutes(app: FastifyInstance) {
         body: SendTextSchema,
         response: {
           200: SendTextResponseSchema,
+          422: ErrorResponseSchema,
+          429: ErrorResponseSchema,
           500: ErrorResponseSchema,
+          502: ErrorResponseSchema,
           503: ErrorResponseSchema,
         },
       },
@@ -45,9 +49,9 @@ export async function registerMessagingRoutes(app: FastifyInstance) {
         );
         return { success: true, message_id: messageId };
       } catch (err) {
-        const error = err as Error;
-        app.log.error({ error }, 'Failed to send message');
-        return reply.code(500).send({ error: 'Failed to send message' });
+        const { statusCode, error } = sendErrorResponse(err);
+        app.log.error({ err, statusCode }, 'Failed to send message');
+        return reply.code(statusCode).send({ error });
       }
     }
   );

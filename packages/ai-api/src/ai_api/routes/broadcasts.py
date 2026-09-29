@@ -55,6 +55,7 @@ from ..services.broadcast import (
     SKIP_UNKNOWN_CLIENT,
     BroadcastPlan,
     audience_users,
+    cloud_seen,
     plan_broadcast,
     probe_platforms,
     whitelist_filter,
@@ -104,7 +105,13 @@ async def _resolve_platforms(requested: list[str] | None) -> tuple[list[str], bo
 
 
 def _plan(db: Session, audience: str, platforms: list[str], cloud_deployed: bool) -> BroadcastPlan:
-    """Resolve the audience (sync DB work: call it through the threadpool)."""
+    """Resolve the audience (sync DB work: call it through the threadpool).
+
+    ``cloud_deployed`` from the health probe is OR-ed with ``cloud_seen``: a
+    Cloud client that is slow or restarting during the probe must not get its
+    legacy users queued for the Baileys number (the snapshot is final).
+    """
+    cloud_deployed = cloud_deployed or cloud_seen(db)
     allowed = whitelist_filter(runtime_config.get("whitelist_phones"))
     return plan_broadcast(
         audience_users(db, audience), platforms, allowed, _utcnow(), cloud_deployed=cloud_deployed
@@ -245,6 +252,7 @@ async def preview_broadcast(request: BroadcastPreviewRequest, db: Session = Depe
         no_selected_platform=plan.no_selected_platform,
         skipped_cloud_window=sum(p.skipped_cloud_window for p in per_platform),
         skipped_unknown_client=plan.count("baileys", skipped=SKIP_UNKNOWN_CLIENT),
+        skipped_duplicate=plan.duplicates,
         estimated_baileys_seconds=_estimate(plan),
     )
 
@@ -253,9 +261,18 @@ def _replay(existing: Broadcast, request: BroadcastCreateRequest) -> None:
     """422 when an idempotency key is reused for a DIFFERENT broadcast.
 
     A retry of the same request is fine; a new message under an old key is a
-    client bug that would otherwise silently return the old broadcast.
+    client bug that would otherwise silently return the old broadcast. Explicit
+    platforms must match too (in canonical order); omitted ones mean "whatever
+    was reachable", which a retry can't contradict.
     """
-    if existing.text != request.text.strip() or existing.audience != request.audience:
+    platforms_differ = request.platforms is not None and [
+        p for p in PLATFORMS if p in request.platforms
+    ] != list(existing.platforms or [])
+    if (
+        existing.text != request.text.strip()
+        or existing.audience != request.audience
+        or platforms_differ
+    ):
         raise HTTPException(
             status_code=422,
             detail="idempotency_key was already used for a different broadcast",
@@ -394,7 +411,9 @@ async def list_recipients(
 ):
     """Per-chat delivery rows, optionally filtered by status.
 
-    Ordered by the immutable row id, so pages don't shift while it is sending.
+    Ordered by the immutable row id, so the order is stable. With a status
+    filter, though, rows move in and out of the filtered set while the
+    broadcast is sending, so paging through it then can skip or repeat a row.
     """
     _get_or_404(db, broadcast_id)
     query = (
@@ -425,6 +444,9 @@ async def list_recipients(
     )
 
 
+# The three routes below run _transition in the threadpool: resume waits on
+# pg_advisory_xact_lock, which a create holds for its whole snapshot, and a
+# blocking wait inside an async route would freeze every request on the worker.
 def _transition(
     db: Session,
     broadcast_id: uuid.UUID,
@@ -478,16 +500,18 @@ def _transition(
 @router.post("/{broadcast_id}/pause", response_model=BroadcastResponse)
 async def pause_broadcast(broadcast_id: uuid.UUID, db: Session = Depends(get_db)):
     """Stop sending before the next message; resume picks up where it left off."""
-    return _transition(db, broadcast_id, _ACTIVE, "paused", pause_reason="manual")
+    return await run_in_threadpool(
+        _transition, db, broadcast_id, _ACTIVE, "paused", pause_reason="manual"
+    )
 
 
 @router.post("/{broadcast_id}/resume", response_model=BroadcastResponse)
 async def resume_broadcast(broadcast_id: uuid.UUID, db: Session = Depends(get_db)):
     """Resume a paused broadcast (also after an automatic pause)."""
-    return _transition(db, broadcast_id, ("paused",), "running")
+    return await run_in_threadpool(_transition, db, broadcast_id, ("paused",), "running")
 
 
 @router.post("/{broadcast_id}/cancel", response_model=BroadcastResponse)
 async def cancel_broadcast(broadcast_id: uuid.UUID, db: Session = Depends(get_db)):
     """Stop for good. Unsent recipients stay 'pending' in the record."""
-    return _transition(db, broadcast_id, (*_ACTIVE, "paused"), "cancelled")
+    return await run_in_threadpool(_transition, db, broadcast_id, (*_ACTIVE, "paused"), "cancelled")

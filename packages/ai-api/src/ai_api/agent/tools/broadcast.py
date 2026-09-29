@@ -7,6 +7,7 @@ from ...database import is_group_jid
 from ...logger import logger
 from ..core import AgentDeps, agent
 from ._db import safe_rollback
+from ._group import group_admin_refusal
 
 
 @agent.tool
@@ -32,14 +33,12 @@ async def set_broadcast_subscription(ctx: RunContext[AgentDeps], subscribed: boo
     logger.info(f"📣 TOOL CALLED: set_broadcast_subscription (subscribed={subscribed})")
     deps = ctx.deps
     try:
-        # Same group test as clean_user_data: the conversation's own JID.
+        refusal = group_admin_refusal(
+            deps, "turn announcements on or off for this group", "/broadcast off"
+        )
+        if refusal:
+            return refusal
         is_group = is_group_jid(deps.whatsapp_jid)
-        if is_group and deps.is_group_admin is not True:
-            # Fail closed: unknown admin status is "not an admin".
-            return (
-                "Only a group admin can turn announcements on or off for this group. "
-                "An admin can ask me, or send /broadcast off."
-            )
 
         # Identity comes from the run's own user row (deps.user_id), never from
         # arguments; None means that row doesn't exist.

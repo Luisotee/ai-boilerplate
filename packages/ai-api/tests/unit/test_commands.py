@@ -603,7 +603,7 @@ class TestGroupAdminFailsClosed:
             "/settings",
             "/memories clear",
             "/broadcast off",
-            "/broadcast",
+            "/broadcast on",
         ],
     )
     def test_refused_unless_explicitly_admin(self, message, is_admin):
@@ -751,6 +751,32 @@ class TestBroadcastCommand:
             is_group_admin=True,
         )
         assert user.broadcast_opt_out is True
+
+    @pytest.mark.parametrize("is_admin", [None, False, True])
+    def test_any_member_can_read_the_group_state(self, is_admin):
+        db, _ = self._db(opt_out=True)
+        result = parse_and_execute(
+            db,
+            "user-123",
+            "group@g.us",
+            "/broadcast",
+            conversation_type="group",
+            is_group_admin=is_admin,
+        )
+        assert "currently off for this group" in result.response_text
+        db.commit.assert_not_called()
+
+    def test_group_reply_is_worded_for_the_group(self):
+        db, _ = self._db(opt_out=False)
+        result = parse_and_execute(
+            db,
+            "user-123",
+            "group@g.us",
+            "/broadcast off",
+            conversation_type="group",
+            is_group_admin=True,
+        )
+        assert "This group won't receive" in result.response_text
 
     def test_settings_shows_announcement_status(self):
         db, _ = self._db(opt_out=True)

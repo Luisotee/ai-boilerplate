@@ -15,9 +15,16 @@ Routing a user to a platform:
   client; with one, the row could be a Cloud user who never saw the Baileys
   number, so it is skipped (``unknown_client``) until the user writes again —
   an unexpected message from an unknown number is exactly what gets reported
-  as spam. If the row was merged with a Telegram account (``telegram_jid``)
+  as spam. "Has a Cloud client" is the health probe OR ``cloud_seen`` (some
+  row has written through Cloud), so a Cloud client that is slow or
+  restarting during one probe doesn't route its users through Baileys. A
+  WhatsApp GROUP is never ambiguous: the Cloud API has no groups, and a group
+  where the bot is never mentioned keeps a NULL client forever. If the row was merged with a Telegram account (``telegram_jid``)
   it also has a Telegram route; the platform the user last used overall
   (``users.last_client_id``) comes first.
+- One person, one message: rows that are the same WhatsApp human (an early
+  ``@lid`` row next to the phone-JID row carrying that LID, or private rows
+  sharing a phone) are grouped by ``_people`` and only the best row is sent.
 - Only selected platforms count, and only routes whose own identity passes the
   whitelist. A user with no usable route is left out of the snapshot.
 - The Cloud API can only send free-form text within 24h of the user's last
@@ -91,6 +98,8 @@ class BroadcastPlan:
     opted_out: int = 0
     not_whitelisted: int = 0
     no_selected_platform: int = 0
+    #: Extra rows of a person who already has a recipient (never sent).
+    duplicates: int = 0
 
     def pending(self) -> list[RecipientPlan]:
         return [r for r in self.recipients if r.skip_reason is None]
@@ -125,6 +134,15 @@ def in_cloud_window(last_cloud_inbound_at: datetime | None, now: datetime) -> bo
     return last_cloud_inbound_at is not None and now - last_cloud_inbound_at < CLOUD_WINDOW
 
 
+def is_ambiguous_whatsapp_row(user: User) -> bool:
+    """A private WhatsApp row whose client (Baileys vs Cloud) was never recorded."""
+    return (
+        user.whatsapp_client_id is None
+        and not is_telegram_jid(user.whatsapp_jid)
+        and not is_group_jid(user.whatsapp_jid)
+    )
+
+
 def choose_route(
     user: User,
     selected: Iterable[str],
@@ -153,7 +171,7 @@ def choose_route(
         if route.platform == "cloud" and not in_cloud_window(user.cloud_last_inbound_at, now):
             skipped = skipped or (route, SKIP_CLOUD_WINDOW)
             continue
-        if route.platform == "baileys" and cloud_deployed and user.whatsapp_client_id is None:
+        if route.platform == "baileys" and cloud_deployed and is_ambiguous_whatsapp_row(user):
             skipped = skipped or (route, SKIP_UNKNOWN_CLIENT)
             continue
         return route, None
@@ -175,6 +193,75 @@ def audience_users(db: Session, audience: Audience) -> list[User]:
     return query.order_by(User.created_at).all()
 
 
+def cloud_seen(db: Session) -> bool:
+    """Whether any chat has ever written through the Cloud client.
+
+    Evidence of a Cloud deployment that doesn't depend on one health probe.
+    """
+    return db.query(User.id).filter(User.whatsapp_client_id == "cloud").first() is not None
+
+
+def _is_lid(jid: str | None) -> bool:
+    return bool(jid) and jid.endswith("@lid")
+
+
+def _mergeable(user: User) -> bool:
+    """Only private WhatsApp rows can be the same person; groups and tg: never are."""
+    return (
+        user.conversation_type == "private"
+        and not is_telegram_jid(user.whatsapp_jid)
+        and not is_group_jid(user.whatsapp_jid)
+    )
+
+
+def _people(users: Iterable[User]) -> list[list[User]]:
+    """Group rows into people, best row first; order follows each person's first row.
+
+    Two private WhatsApp rows are one person when an ``@lid`` row's JID is the
+    other row's ``whatsapp_lid`` (the chat was first seen before its LID
+    resolved to a phone), or when they share a phone number. The best row has
+    a phone JID rather than an ``@lid`` one; ties go to the newest.
+    """
+    users = list(users)
+    parent = list(range(len(users)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    owner: dict[str, int] = {}
+    for i, user in enumerate(users):
+        if not _mergeable(user):
+            continue
+        keys = []
+        if _is_lid(user.whatsapp_jid):
+            keys.append(f"lid:{user.whatsapp_jid}")
+        if user.whatsapp_lid:
+            keys.append(f"lid:{user.whatsapp_lid}")
+        phone = (user.phone or "").strip().lstrip("+")
+        if phone:
+            keys.append(f"phone:{phone}")
+        for key in keys:
+            if key in owner:
+                parent[find(i)] = find(owner[key])
+            else:
+                owner[key] = i
+
+    groups: dict[int, list[int]] = {}
+    for i in range(len(users)):
+        groups.setdefault(find(i), []).append(i)
+
+    def rank(i: int) -> tuple:
+        user = users[i]
+        created = user.created_at.timestamp() if user.created_at else 0.0
+        return (_is_lid(user.whatsapp_jid), -created)
+
+    people = sorted(groups.values(), key=min)
+    return [[users[i] for i in sorted(members, key=rank)] for members in people]
+
+
 def plan_broadcast(
     users: Iterable[User],
     selected: Iterable[str],
@@ -186,10 +273,12 @@ def plan_broadcast(
     """Turn audience rows into the recipient snapshot (pure)."""
     selected = tuple(selected)
     plan = BroadcastPlan()
-    for user in users:
-        if user.broadcast_opt_out:
+    for person in _people(users):
+        plan.duplicates += len(person) - 1
+        if any(row.broadcast_opt_out for row in person):
             plan.opted_out += 1
             continue
+        user = person[0]
         route, reason = choose_route(user, selected, allowed, now, cloud_deployed=cloud_deployed)
         if route is None:
             if reason == NOT_WHITELISTED:
@@ -216,9 +305,10 @@ def whitelist_filter(raw_whitelist: str) -> RouteFilter:
     """
     from ..whitelist import is_whitelisted, parse_whitelist
 
-    if not raw_whitelist:
+    wl = parse_whitelist(raw_whitelist or "")
+    if wl.size == 0:
+        # Same as chat: a whitelist with no entries (" , ") is no whitelist.
         return lambda _user, _route: True
-    wl = parse_whitelist(raw_whitelist)
 
     def allowed(user: User, route: Route) -> bool:
         if is_group_jid(route.address) or route.platform == "telegram":

@@ -237,6 +237,10 @@ class BroadcastRecipient(Base):
     attempts = Column(Integer, nullable=False, default=0)
     error_code = Column(String(64), nullable=True)
     sent_at = Column(DateTime, nullable=True, index=True)
+    # Set (and committed) right before a send, cleared when its outcome is
+    # recorded. A claimed row is never picked again: if the worker dies
+    # mid-send the orphan sweep records it as 'unknown' instead of re-sending.
+    attempt_started_at = Column(DateTime, nullable=True)
 
     broadcast = relationship("Broadcast", back_populates="recipients")
 

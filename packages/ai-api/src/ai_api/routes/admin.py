@@ -17,7 +17,7 @@ from sqlalchemy import func, nullslast, or_
 from sqlalchemy.orm import Session
 
 from ..agent.core import DEFAULT_SYSTEM_PROMPT
-from ..broadcast_pacing import parse_send_window, parse_timezone
+from ..broadcast_pacing import SETTING_MAXIMA, parse_send_window, parse_timezone
 from ..config import get_whatsapp_api_key, get_whatsapp_client_url, settings
 from ..database import (
     ConversationMessage,
@@ -182,6 +182,9 @@ def _validate_broadcast_settings(coerced: dict[str, object], effective) -> None:
             raise HTTPException(status_code=400, detail=f"{key} must be >= 0")
     if "broadcast_batch_size" in coerced and coerced["broadcast_batch_size"] < 1:
         raise HTTPException(status_code=400, detail="broadcast_batch_size must be >= 1")
+    for key, maximum in SETTING_MAXIMA.items():
+        if key in coerced and coerced[key] > maximum:
+            raise HTTPException(status_code=400, detail=f"{key} must be <= {maximum}")
     if (
         "broadcast_min_delay_seconds" in coerced or "broadcast_max_delay_seconds" in coerced
     ) and effective("broadcast_min_delay_seconds") > effective("broadcast_max_delay_seconds"):
@@ -330,11 +333,33 @@ async def patch_settings(request: UpdateSettingsRequest, db: Session = Depends(g
     return _settings_payload(db)
 
 
+def _check_delay_revert(key: str) -> None:
+    """400 if reverting one broadcast delay would leave min above max.
+
+    PATCH checks the pair; without this a DELETE could revert min to its env
+    value while max keeps a lower override.
+    """
+    pair = ("broadcast_min_delay_seconds", "broadcast_max_delay_seconds")
+    if key not in pair:
+        return
+    effective = {k: getattr(settings, k) if k == key else runtime_config.get(k) for k in pair}
+    if effective[pair[0]] > effective[pair[1]]:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Reverting {key} would leave broadcast_min_delay_seconds "
+                f"({effective[pair[0]]}) above broadcast_max_delay_seconds "
+                f"({effective[pair[1]]}); change the other one first"
+            ),
+        )
+
+
 @router.delete("/settings/{key}", response_model=SettingsResponse)
 async def delete_setting(key: str, db: Session = Depends(get_db)):
     """Remove an override, reverting the setting to its env default."""
     if key not in REGISTRY_BY_KEY:
         raise HTTPException(status_code=404, detail=f"Unknown setting: '{key}'")
+    _check_delay_revert(key)
     try:
         delete_setting_override(db, key)
     except Exception as e:

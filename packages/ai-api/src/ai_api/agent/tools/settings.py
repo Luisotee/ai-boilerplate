@@ -6,10 +6,11 @@ from ...commands import (
     format_settings,
     handle_clean_command,
 )
-from ...database import get_or_create_preferences, is_group_jid
+from ...database import get_or_create_preferences
 from ...logger import logger
 from ..core import AgentDeps, agent
 from ._db import safe_rollback
+from ._group import group_admin_refusal
 
 
 @agent.tool
@@ -81,6 +82,10 @@ async def update_tts_settings(
     logger.info(f"   Enabled: {enabled}")
     logger.info(f"   Language: {language}")
     logger.info("=" * 80)
+
+    refusal = group_admin_refusal(ctx.deps, "change this group's voice settings", "/tts")
+    if refusal:
+        return refusal
 
     try:
         if language is not None:
@@ -158,6 +163,10 @@ async def update_stt_settings(
     logger.info(f"   Language: {language}")
     logger.info("=" * 80)
 
+    refusal = group_admin_refusal(ctx.deps, "change this group's transcription settings", "/stt")
+    if refusal:
+        return refusal
+
     try:
         prefs = get_or_create_preferences(ctx.deps.db, ctx.deps.user_id)
 
@@ -227,15 +236,10 @@ async def clean_user_data(
     logger.info(f"   Level: {level}")
     logger.info("=" * 80)
 
-    # Same rule as the /clean command (ADMIN_ONLY_COMMANDS): in a group, wiping
-    # the shared transcript is admin-only and FAILS CLOSED — anything but an
-    # explicit True (unknown, lookup failed, older client) is refused. Without
-    # this, any member could ask the bot in plain words to clean the group.
-    if is_group_jid(ctx.deps.whatsapp_jid) and ctx.deps.is_group_admin is not True:
-        logger.info("❌ clean_user_data refused: sender is not a confirmed group admin")
-        return (
-            "Only a group admin can delete this group's data. An admin can ask me, or send /clean."
-        )
+    # Same rule as the /clean command: wiping a group's transcript is admin-only.
+    refusal = group_admin_refusal(ctx.deps, "delete this group's data", "/clean")
+    if refusal:
+        return refusal
 
     try:
         result = handle_clean_command(

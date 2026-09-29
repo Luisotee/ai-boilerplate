@@ -122,8 +122,9 @@ def _get_help_text() -> str:
 /clean all - Full reset (messages, documents, memories, preferences)
 /memories - Show saved core memories
 /memories clear - Delete all core memories
-/broadcast off - Stop receiving update announcements
-/broadcast on - Receive update announcements again
+/broadcast - Show whether update announcements are on
+/broadcast off - Stop receiving update announcements (groups: admins only)
+/broadcast on - Receive update announcements again (groups: admins only)
 /link - Get a code to link this account to your other platform (WhatsApp ↔ Telegram)
 /link [code] - Enter a code from the other platform to complete linking
 /linkphone - (Telegram) Link by sharing your phone number instead of a code
@@ -343,20 +344,45 @@ def set_broadcast_opt_out(db: Session, user_id: str, opt_out: bool) -> bool | No
     return previous
 
 
-def _handle_broadcast_command(db: Session, user_id: str, parts: list[str]) -> str:
-    """Handle /broadcast [on|off]."""
+def _handle_broadcast_command(
+    db: Session,
+    user_id: str,
+    parts: list[str],
+    *,
+    is_group: bool = False,
+    is_group_admin: bool | None = None,
+) -> str:
+    """Handle /broadcast [on|off].
+
+    Not in ADMIN_ONLY_COMMANDS: anyone may read the state. In a group only an
+    admin may change it (fail closed: anything but an explicit True is refused),
+    since the flag is the whole group's.
+    """
     action = parts[1].lower() if len(parts) >= 2 else ""
+    subject = "This group" if is_group else "You"
     if action in ("on", "off"):
+        if is_group and is_group_admin is not True:
+            return "Only group admins can use this command."
         previous = set_broadcast_opt_out(db, user_id, opt_out=action == "off")
         if previous is None:
             return "Sorry, I couldn't update that setting. Please try again."
         if action == "off":
-            return "Done. You won't receive update announcements anymore. Send /broadcast on to get them again."
-        return "Done. You'll receive update announcements again. Send /broadcast off to stop them."
+            return (
+                f"Done. {subject} won't receive update announcements anymore. "
+                "Send /broadcast on to get them again."
+            )
+        return (
+            f"Done. {subject} will receive update announcements again. "
+            "Send /broadcast off to stop them."
+        )
 
     user = db.get(User, user_id)
     status = "off" if user is not None and user.broadcast_opt_out else "on"
-    return f"Update announcements are currently {status}. Use '/broadcast on' or '/broadcast off'."
+    whose = " for this group" if is_group else ""
+    return (
+        f"Update announcements are currently {status}{whose}. "
+        "Use '/broadcast on' or '/broadcast off'."
+    )
 
 
 def _handle_memories_command(db: Session, user_id: str, parts: list[str]) -> str:
@@ -381,7 +407,8 @@ def _handle_memories_command(db: Session, user_id: str, parts: list[str]) -> str
 
 
 # Commands that require group admin privileges
-ADMIN_ONLY_COMMANDS = {"/clean", "/tts", "/stt", "/settings", "/memories", "/broadcast"}
+# (/broadcast is not here: reading it is open, its handler gates on/off.)
+ADMIN_ONLY_COMMANDS = {"/clean", "/tts", "/stt", "/settings", "/memories"}
 
 
 def parse_and_execute(
@@ -451,7 +478,13 @@ def parse_and_execute(
 
     # Handle /broadcast [on|off] (the flag lives on the user row, not prefs)
     if command == "/broadcast":
-        response = _handle_broadcast_command(db, user_id, parts)
+        response = _handle_broadcast_command(
+            db,
+            user_id,
+            parts,
+            is_group=conversation_type == "group",
+            is_group_admin=is_group_admin,
+        )
         return CommandResult(is_command=True, response_text=response)
 
     # Get or create preferences for other commands
