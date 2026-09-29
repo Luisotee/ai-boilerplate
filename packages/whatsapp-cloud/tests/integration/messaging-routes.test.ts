@@ -8,6 +8,8 @@
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterAll } from 'vitest';
 import type { FastifyInstance } from 'fastify';
+import { GraphApiError } from '../../src/errors/GraphApiError.js';
+import { RequestTimeoutError } from '../../src/errors/RequestTimeoutError.js';
 
 // ---------------------------------------------------------------------------
 // Mocks — must be declared before any import that transitively loads the
@@ -219,9 +221,17 @@ describe('Cloud API messaging routes — /whatsapp/*', () => {
       });
     });
 
-    it('returns 500 when graphApi.sendText throws', async () => {
+    // The AI API's broadcast worker reads 4xx as "nothing was sent" and 5xx as
+    // "may have been sent" (never retried), so the mapping must be honest.
+    it.each([
+      ['an unexpected error', new Error('boom'), 502],
+      ['a request timeout', new RequestTimeoutError('https://graph', 30000), 502],
+      ['a Graph 5xx', new GraphApiError(500, '{"error":{}}'), 502],
+      ['a Graph 429', new GraphApiError(429, '{"error":{}}'), 429],
+      ['a Graph 400', new GraphApiError(400, '{"error":{"message":"+5511999999999"}}'), 422],
+    ])('maps %s from sendText to %i', async (_label, error, status) => {
       mockIsCloudApiConnected.mockReturnValue(true);
-      mockSendText.mockRejectedValueOnce(new Error('Graph API error'));
+      mockSendText.mockRejectedValueOnce(error);
 
       const res = await app.inject({
         method: 'POST',
@@ -229,8 +239,10 @@ describe('Cloud API messaging routes — /whatsapp/*', () => {
         payload: { phoneNumber: '5511999999999', text: 'Hello' },
       });
 
-      expect(res.statusCode).toBe(500);
-      expect(res.json()).toEqual({ error: 'Failed to send message' });
+      expect(res.statusCode).toBe(status);
+      // Generic text only: the Graph body can contain the phone number.
+      expect(res.body).not.toContain('5511999999999');
+      expect(typeof res.json().error).toBe('string');
     });
   });
 

@@ -5,6 +5,7 @@ from ...logger import logger
 from ...runtime_config import runtime_config
 from ..core import AgentDeps, agent
 from ._db import safe_rollback
+from ._group import group_admin_refusal
 
 
 @agent.tool
@@ -33,6 +34,13 @@ async def update_core_memory(ctx: RunContext[AgentDeps], content: str) -> str:
     logger.info(f"   User ID: {ctx.deps.user_id}")
     logger.info(f"   Content length: {len(content)} characters")
     logger.info("=" * 80)
+
+    # Emptying the document wipes a group's memory, which /memories clear
+    # reserves for admins. Normal rewrites stay open to every member.
+    if not content.strip():
+        refusal = group_admin_refusal(ctx.deps, "clear this group's memory", "/memories clear")
+        if refusal:
+            return refusal
 
     try:
         max_length = runtime_config.get("core_memory_max_length")

@@ -9,6 +9,7 @@
  */
 
 import { config } from '../config.js';
+import { GraphApiError } from '../errors/GraphApiError.js';
 import { logger } from '../logger.js';
 import { fetchWithTimeout } from '../utils/fetch.js';
 
@@ -87,7 +88,7 @@ async function sendMessage(to: string, messageBody: Record<string, unknown>): Pr
   if (!response.ok) {
     const errorBody = await response.text();
     logger.error({ status: response.status, body: errorBody, to }, 'Graph API message send failed');
-    throw new Error(`Graph API error ${response.status}: ${errorBody}`);
+    throw new GraphApiError(response.status, errorBody);
   }
 
   const data = (await response.json()) as GraphApiResponse;

@@ -92,7 +92,7 @@ export async function getGroupMetadataCached(
   if (pending) return pending;
 
   const gen = generation;
-  const promise = (async () => {
+  const promise: Promise<GroupMetadata | undefined> = (async () => {
     try {
       const data = await sock.groupMetadata(jid);
       if (gen === generation) cache.set(jid, hit(data));
@@ -109,7 +109,11 @@ export async function getGroupMetadataCached(
     // synchronously up to its first await, so a synchronous throw from
     // `sock.groupMetadata` would otherwise delete the entry *before*
     // `inflight.set` below adds it, stranding a resolved promise forever.
-    .finally(() => inflight.delete(jid));
+    // Only delete our OWN entry: an invalidation may have dropped it and a
+    // newer fetch taken its place.
+    .finally(() => {
+      if (inflight.get(jid) === promise) inflight.delete(jid);
+    });
 
   inflight.set(jid, promise);
   return promise;
@@ -224,6 +228,10 @@ export function isCompleteGroupMetadata(update: Partial<GroupMetadata>): update 
 export function invalidateGroup(jid: string): void {
   generation++;
   cache.delete(jid);
+  // A fetch already in flight may have read the pre-change metadata (e.g. an
+  // admin who was just demoted); later callers must start a fresh one rather
+  // than join it.
+  inflight.delete(jid);
   fleet = null;
 }
 

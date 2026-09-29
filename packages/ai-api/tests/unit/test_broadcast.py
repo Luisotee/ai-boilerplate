@@ -26,6 +26,7 @@ from ai_api.services.broadcast import (
     SKIP_CLOUD_WINDOW,
     SKIP_UNKNOWN_CLIENT,
     Route,
+    _people,
     candidate_routes,
     choose_route,
     plan_broadcast,
@@ -53,6 +54,7 @@ def user(
     phone=None,
     lid=None,
     uid="u1",
+    created_at=None,
 ):
     return SimpleNamespace(
         id=uid,
@@ -65,6 +67,7 @@ def user(
         broadcast_opt_out=opt_out,
         conversation_type=conversation_type,
         phone=phone,
+        created_at=created_at,
     )
 
 
@@ -156,6 +159,14 @@ class TestUnknownWhatsAppClient:
         u = user(whatsapp_client_id="baileys")
         assert choose_route(u, ALL, allow_all, NOW, cloud_deployed=True)[1] is None
 
+    @pytest.mark.parametrize("jid", ["120363012345678@g.us"])
+    def test_a_whatsapp_group_is_never_ambiguous(self, jid):
+        """Review finding: the Cloud API has no groups, and a group where the bot
+        is never mentioned keeps a NULL client forever, so it was never reached."""
+        group = user(jid, conversation_type="group")
+        route, reason = choose_route(group, ALL, allow_all, NOW, cloud_deployed=True)
+        assert route == Route("baileys", jid) and reason is None
+
     def test_ambiguous_linked_user_falls_back_to_telegram(self):
         u = user(telegram_jid="tg:7")
         route, reason = choose_route(u, ALL, allow_all, NOW, cloud_deployed=True)
@@ -185,10 +196,88 @@ class TestPlanBroadcast:
         assert plan.count("baileys") == 1
 
 
+class TestOnePersonOneMessage:
+    """Review finding: an early @lid row next to the phone-JID row carrying that LID
+    (or two rows sharing a phone) got the broadcast twice."""
+
+    def test_lid_row_joins_the_phone_row_that_carries_its_lid(self):
+        lid_row = user("99887766@lid", uid="lid", created_at=NOW)
+        phone_row = user(
+            "5511999999999@s.whatsapp.net",
+            uid="phone",
+            lid="99887766@lid",
+            created_at=NOW - timedelta(days=30),
+        )
+        plan = plan_broadcast([lid_row, phone_row], ALL, allow_all, NOW)
+        assert [r.user_id for r in plan.pending()] == ["phone"]
+        assert plan.duplicates == 1
+
+    def test_rows_sharing_a_phone_send_to_the_phone_jid_row(self):
+        rows = [
+            user("111@lid", uid="lid", phone="+5511999999999"),
+            user("5511999999999@s.whatsapp.net", uid="phone", phone="5511999999999"),
+        ]
+        plan = plan_broadcast(rows, ALL, allow_all, NOW)
+        assert [r.user_id for r in plan.pending()] == ["phone"]
+
+    def test_ties_go_to_the_newest_row(self):
+        # e.g. the BR mobile number with and without the extra 9
+        rows = [
+            user("5511999999999@s.whatsapp.net", uid="old", phone="+5511999999999", created_at=NOW),
+            user(
+                "551199999999@s.whatsapp.net",
+                uid="new",
+                phone="5511999999999",
+                created_at=NOW + timedelta(days=1),
+            ),
+        ]
+        assert [u.id for u in _people(rows)[0]] == ["new", "old"]
+
+    @pytest.mark.parametrize("opted_out", ["lid", "phone"])
+    def test_an_opt_out_on_either_row_wins(self, opted_out):
+        rows = [
+            user("99887766@lid", uid="lid", opt_out=opted_out == "lid"),
+            user(
+                "5511999999999@s.whatsapp.net",
+                uid="phone",
+                lid="99887766@lid",
+                opt_out=opted_out == "phone",
+            ),
+        ]
+        plan = plan_broadcast(rows, ALL, allow_all, NOW)
+        assert plan.pending() == []
+        assert plan.opted_out == 1
+
+    def test_groups_and_telegram_rows_never_merge(self):
+        rows = [
+            user("120363@g.us", uid="g1", conversation_type="group", phone="1"),
+            user("120364@g.us", uid="g2", conversation_type="group", phone="1"),
+            user("tg:5", uid="t", phone="1"),
+            user("5511999999999@s.whatsapp.net", uid="w", phone="1"),
+        ]
+        plan = plan_broadcast(rows, ALL, allow_all, NOW)
+        assert sorted(r.user_id for r in plan.pending()) == ["g1", "g2", "t", "w"]
+        assert plan.duplicates == 0
+
+    def test_keeps_the_audience_order(self):
+        rows = [user(f"55119000000{n}@s.whatsapp.net", uid=str(n)) for n in range(3)]
+        assert [r.user_id for r in plan_broadcast(rows, ALL, allow_all, NOW).pending()] == [
+            "0",
+            "1",
+            "2",
+        ]
+
+
 class TestWhitelistFilter:
     def test_empty_whitelist_allows_everyone(self):
         u = user()
         assert whitelist_filter("")(u, candidate_routes(u)[0]) is True
+
+    @pytest.mark.parametrize("raw", [" , ", ",", "  "])
+    def test_a_whitelist_with_no_entries_is_no_whitelist(self, raw):
+        """Same as chat: it used to block every recipient instead."""
+        u = user()
+        assert whitelist_filter(raw)(u, candidate_routes(u)[0]) is True
 
     def test_whatsapp_route_matches_phone_or_lid(self):
         allowed = whitelist_filter("5511999999999")
@@ -356,6 +445,10 @@ class TestBootValidation:
             {"BROADCAST_TIMEZONE": "Mars/Olympus"},
             {"BROADCAST_MIN_DELAY_SECONDS": "90", "BROADCAST_MAX_DELAY_SECONDS": "30"},
             {"BROADCAST_FOOTER": "x" * 501},
+            {"BROADCAST_MAX_DELAY_SECONDS": "3601"},
+            {"BROADCAST_BATCH_SIZE": "1001"},
+            {"BROADCAST_BATCH_PAUSE_SECONDS": "86401"},
+            {"BROADCAST_DAILY_LIMIT": "100001"},
         ],
     )
     def test_rejects_bad_env(self, monkeypatch, env):

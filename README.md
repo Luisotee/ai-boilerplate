@@ -65,6 +65,7 @@ A production-ready AI agent system that brings conversational AI to WhatsApp wit
 | `/link` | Get a code to link this account to your other platform (WhatsApp ↔ Telegram) |
 | `/link [code]` | Enter a code from the other platform to finish linking |
 | `/linkphone` | Telegram only: link by sharing your phone number (must match your WhatsApp number) |
+| `/broadcast` | Show whether operator announcements are on |
 | `/broadcast off\|on` | Stop / resume operator announcements (in groups: admins only) |
 | `/unlink` | Unlink your accounts |
 | `/help` | Show available commands |

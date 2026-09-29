@@ -5,6 +5,8 @@ so no separate show/clear tool is needed)."""
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from ai_api.agent.tools.memory import update_core_memory
 
 MODULE = "ai_api.agent.tools.memory"
@@ -14,6 +16,8 @@ def _ctx():
     ctx = MagicMock()
     ctx.deps.db = MagicMock()
     ctx.deps.user_id = "user-123"
+    ctx.deps.whatsapp_jid = "5511999999999@s.whatsapp.net"
+    ctx.deps.is_group_admin = None
     return ctx
 
 
@@ -30,6 +34,46 @@ async def test_empty_content_clears_the_document():
     assert mem.content == ""
     ctx.deps.db.commit.assert_called_once()
     assert result.startswith("Core memory updated (0 characters)")
+
+
+@pytest.mark.parametrize("is_admin", [None, False])
+async def test_a_group_member_cannot_clear_the_groups_memory(is_admin):
+    ctx = _ctx()
+    ctx.deps.whatsapp_jid = "120363012345678@g.us"
+    ctx.deps.is_group_admin = is_admin
+    mem = MagicMock(content="## Facts")
+    with patch(f"{MODULE}.get_or_create_core_memory", return_value=mem):
+        result = await update_core_memory(ctx, "  ")
+    assert "Only a group admin" in result
+    assert mem.content == "## Facts"
+    ctx.deps.db.commit.assert_not_called()
+
+
+async def test_a_group_member_can_still_rewrite_the_memory():
+    ctx = _ctx()
+    ctx.deps.whatsapp_jid = "tg:-1001234567890"
+    mem = MagicMock(content="## Facts")
+    with (
+        patch(f"{MODULE}.get_or_create_core_memory", return_value=mem),
+        patch(f"{MODULE}.runtime_config") as mock_rc,
+    ):
+        mock_rc.get.return_value = 2000
+        result = await update_core_memory(ctx, "## Facts\n- meets on Fridays")
+    assert result.startswith("Core memory updated")
+
+
+async def test_a_group_admin_can_clear_the_memory():
+    ctx = _ctx()
+    ctx.deps.whatsapp_jid = "120363012345678@g.us"
+    ctx.deps.is_group_admin = True
+    mem = MagicMock(content="## Facts")
+    with (
+        patch(f"{MODULE}.get_or_create_core_memory", return_value=mem),
+        patch(f"{MODULE}.runtime_config") as mock_rc,
+    ):
+        mock_rc.get.return_value = 2000
+        await update_core_memory(ctx, "")
+    assert mem.content == ""
 
 
 async def test_prompt_documents_the_clear_path():

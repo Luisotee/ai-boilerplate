@@ -13,6 +13,12 @@
 --
 -- Safe to re-run (every statement is IF NOT EXISTS).
 --
+-- Already applied an earlier version of this file? Apply it again: the last
+-- statement (`broadcast_recipients.attempt_started_at`) was added afterwards,
+-- and `create_all()` won't add it to a table that already exists. The
+-- `BroadcastRecipient` model selects it, so the broadcast worker and
+-- `/admin/broadcasts` fail until it exists.
+--
 -- Apply it BEFORE deploying the new API image: the `User` model now selects
 -- these columns, so every user lookup fails until they exist.
 --
@@ -36,5 +42,10 @@ ALTER TABLE users
 
 ALTER TABLE users
   ADD COLUMN IF NOT EXISTS cloud_last_inbound_at TIMESTAMP WITHOUT TIME ZONE;
+
+-- Delivery claim (see streams/broadcast_consumer.py `_claim`). A no-op on a
+-- fresh database, where create_all() already made the column.
+ALTER TABLE IF EXISTS broadcast_recipients
+  ADD COLUMN IF NOT EXISTS attempt_started_at TIMESTAMP WITHOUT TIME ZONE;
 
 COMMIT;

@@ -218,6 +218,44 @@ describe('stale writes and stuck lookups', () => {
     expect(await getGroupSubject(fresh, GROUP)).toBe('New Name');
   });
 
+  it('a caller after invalidateGroup does not join the pre-change fetch', async () => {
+    // e.g. an admin demoted mid-fetch: the old fetch may carry the old role.
+    const { sock, release } = gatedSock();
+    const stale = getGroupMetadataCached(sock, GROUP);
+    invalidateGroup(GROUP); // group-participants.update (demote)
+
+    const fresh = {
+      groupMetadata: vi
+        .fn()
+        .mockResolvedValue({ id: GROUP, subject: 'After demote', participants: [] }),
+    } as any;
+    const after = getGroupMetadataCached(fresh, GROUP);
+    release({ id: GROUP, subject: 'Before demote', participants: [] });
+
+    expect((await stale)?.subject).toBe('Before demote');
+    expect((await after)?.subject).toBe('After demote');
+    expect(fresh.groupMetadata).toHaveBeenCalledTimes(1);
+  });
+
+  it("an old fetch settling doesn't drop a newer in-flight fetch", async () => {
+    const first = gatedSock();
+    const old = getGroupMetadataCached(first.sock, GROUP);
+    invalidateGroup(GROUP);
+
+    const second = gatedSock();
+    const newer = getGroupMetadataCached(second.sock, GROUP);
+    first.release({ id: GROUP, subject: 'Old', participants: [] });
+    await old;
+
+    // Still joins the newer fetch instead of starting a third one.
+    const third = makeSock('Third');
+    const joined = getGroupMetadataCached(third, GROUP);
+    second.release({ id: GROUP, subject: 'Newer', participants: [] });
+    expect((await newer)?.subject).toBe('Newer');
+    expect((await joined)?.subject).toBe('Newer');
+    expect(third.groupMetadata).not.toHaveBeenCalled();
+  });
+
   it('a synchronous throw does not strand an inflight entry forever', async () => {
     // An async body runs synchronously up to its first await, so a sync throw
     // used to delete the inflight entry before it was even added — leaving a

@@ -45,6 +45,7 @@ def user(
         broadcast_opt_out=opt_out,
         conversation_type=kind,
         phone=None,
+        created_at=NOW,
     )
 
 
@@ -213,6 +214,27 @@ class TestPreview:
         assert resp.json()["skipped_unknown_client"] == 0
         assert resp.json()["per_platform"][0]["recipients"] == 2
 
+    async def test_a_cloud_client_seen_before_counts_as_deployed(self, client_for):
+        """Review finding: a Cloud client slow or restarting during the one health
+        probe got its legacy users queued for the Baileys number."""
+        seen_cloud_row = SimpleNamespace(id=uuid.uuid4())
+        with reachable({"baileys": True, "cloud": False, "telegram": False}), audience():
+            async with client_for(make_db(first=seen_cloud_row)) as c:
+                resp = await c.post("/admin/broadcasts/preview", json={}, headers=AUTH)
+        assert resp.json()["platforms"] == ["baileys"]
+        assert resp.json()["skipped_unknown_client"] == 1
+
+    async def test_reports_duplicate_rows_of_one_person(self, client_for):
+        lid_row = user("99887766@lid")
+        phone_row = user("5511900000009@s.whatsapp.net")
+        phone_row.whatsapp_lid = "99887766@lid"
+        with reachable(), audience([lid_row, phone_row]):
+            async with client_for(make_db()) as c:
+                resp = await c.post("/admin/broadcasts/preview", json={}, headers=AUTH)
+        data = resp.json()
+        assert data["skipped_duplicate"] == 1
+        assert data["total_recipients"] == 1
+
     async def test_nothing_reachable_is_503(self, client_for):
         with reachable({"baileys": False, "cloud": False, "telegram": False}), audience():
             async with client_for(make_db()) as c:
@@ -283,6 +305,28 @@ class TestCreate:
         assert resp.status_code == 422
         assert "different broadcast" in resp.json()["detail"]
         db.add.assert_not_called()
+
+    async def test_idempotency_key_reused_with_other_platforms_is_422(self, client_for):
+        db = make_db(first=broadcast("running", platforms=["baileys", "telegram"]))
+        with reachable(), audience():
+            async with client_for(db) as c:
+                resp = await c.post(
+                    "/admin/broadcasts",
+                    json={"text": "New feature", "idempotency_key": "abc", "platforms": ["cloud"]},
+                    headers=AUTH,
+                )
+        assert resp.status_code == 422
+
+    @pytest.mark.parametrize("platforms", [None, ["telegram", "baileys"]])
+    async def test_replay_with_same_or_omitted_platforms_is_200(self, client_for, platforms):
+        db = make_db(first=broadcast("running", platforms=["baileys", "telegram"]))
+        body = {"text": "New feature", "idempotency_key": "abc"}
+        if platforms is not None:
+            body["platforms"] = platforms
+        with reachable(), audience():
+            async with client_for(db) as c:
+                resp = await c.post("/admin/broadcasts", json=body, headers=AUTH)
+        assert resp.status_code == 200
 
     async def test_conflicts_with_an_active_broadcast(self, client_for):
         db = make_db(first=broadcast("running"))

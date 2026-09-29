@@ -8,7 +8,7 @@
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterAll } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import { GrammyError } from 'grammy';
+import { GrammyError, HttpError } from 'grammy';
 
 // ---------------------------------------------------------------------------
 // Mocks — must be declared before any import that transitively loads them.
@@ -200,12 +200,18 @@ describe('Telegram messaging routes — /whatsapp/*', () => {
       expect(res.json()).toEqual({ error: 'Forbidden: bot was blocked by the user' });
     });
 
-    it('keeps other Bot API errors (e.g. 400) as 500', async () => {
+    // The AI API's broadcast sender reads a 4xx as "nothing was sent" and a
+    // 5xx as "may have been sent" (never retried).
+    it.each([
+      [400, 'Bad Request: chat not found', 422],
+      [429, 'Too Many Requests: retry after 90', 429],
+      [500, 'Internal Server Error', 502],
+    ])('maps a Bot API %i to %i', async (code, description, status) => {
       markBotReady();
       mockSendText.mockRejectedValueOnce(
         new GrammyError(
           'Call to sendMessage failed',
-          { ok: false, error_code: 400, description: 'Bad Request: chat not found' },
+          { ok: false, error_code: code, description },
           'sendMessage',
           {}
         )
@@ -217,7 +223,22 @@ describe('Telegram messaging routes — /whatsapp/*', () => {
         payload: { phoneNumber: 'tg:12345', text: 'Hi' },
       });
 
-      expect(res.statusCode).toBe(500);
+      expect(res.statusCode).toBe(status);
+    });
+
+    it('maps a network failure (HttpError) to 502: it may have been sent', async () => {
+      markBotReady();
+      mockSendText.mockRejectedValueOnce(
+        new HttpError('Network request for sendMessage failed!', new Error('socket hang up'))
+      );
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/whatsapp/send-text',
+        payload: { phoneNumber: 'tg:12345', text: 'Hi' },
+      });
+
+      expect(res.statusCode).toBe(502);
     });
   });
 

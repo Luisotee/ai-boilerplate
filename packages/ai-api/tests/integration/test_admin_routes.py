@@ -1103,6 +1103,10 @@ class TestBroadcastSettingsValidation:
             {"broadcast_daily_limit": -1},
             {"broadcast_min_delay_seconds": 90, "broadcast_max_delay_seconds": 30},
             {"broadcast_footer": "x" * 501},
+            {"broadcast_max_delay_seconds": 3601},
+            {"broadcast_batch_size": 1001},
+            {"broadcast_batch_pause_seconds": 86401},
+            {"broadcast_daily_limit": 100001},
         ]
         app = _app_with_db(_make_mock_db())
         try:
@@ -1138,5 +1142,49 @@ class TestBroadcastSettingsValidation:
                     )
             assert resp.status_code == 200
             mock_set.assert_called_once()
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_delete_that_would_leave_min_above_max_is_400(self, *_):
+        """Env min=20; an override max=10 (with min=5) is valid, but reverting min
+        alone would leave 20 > 10 — PATCH checks the pair, DELETE must too."""
+        app = _app_with_db(_make_mock_db())
+        effective = {"broadcast_min_delay_seconds": 5, "broadcast_max_delay_seconds": 10}
+        try:
+            with (
+                patch("ai_api.routes.admin.delete_setting_override") as mock_del,
+                patch("ai_api.routes.admin.runtime_config.get", side_effect=effective.get),
+            ):
+                async with _client(app) as client:
+                    resp = await client.delete(
+                        "/admin/settings/broadcast_min_delay_seconds", headers=AUTH_HEADERS
+                    )
+            assert resp.status_code == 400
+            assert "above broadcast_max_delay_seconds" in resp.json()["detail"]
+            mock_del.assert_not_called()
+        finally:
+            _cleanup()
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_delete_that_keeps_min_below_max_is_allowed(self, *_):
+        app = _app_with_db(_make_mock_db())
+        effective = {"broadcast_min_delay_seconds": 5, "broadcast_max_delay_seconds": 100}
+        try:
+            with (
+                patch("ai_api.routes.admin.delete_setting_override") as mock_del,
+                patch("ai_api.routes.admin.get_setting_overrides", return_value={}),
+                patch("ai_api.routes.admin.runtime_config.get", side_effect=effective.get),
+            ):
+                async with _client(app) as client:
+                    resp = await client.delete(
+                        "/admin/settings/broadcast_min_delay_seconds", headers=AUTH_HEADERS
+                    )
+            assert resp.status_code == 200
+            mock_del.assert_called_once()
         finally:
             _cleanup()

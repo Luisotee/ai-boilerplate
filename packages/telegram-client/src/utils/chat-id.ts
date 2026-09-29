@@ -1,5 +1,5 @@
 import type { FastifyReply } from 'fastify';
-import { GrammyError } from 'grammy';
+import { GrammyError, HttpError } from 'grammy';
 import { isTelegramJid, jidToChatId } from './telegram-id.js';
 
 /**
@@ -43,6 +43,23 @@ export function sendErrorResponse(
   // sender can mark the recipient undeliverable instead of retrying.
   if (err instanceof GrammyError && err.error_code === 403) {
     return reply.code(403).send({ error: err.description });
+  }
+  // The rest follows the same contract as the Cloud client: a 4xx means the
+  // Bot API refused the call, so nothing was sent; a 5xx means it may have
+  // been (the broadcast sender never retries those).
+  if (err instanceof GrammyError) {
+    // Rate limited past auto-retry's wait budget: nothing sent, retry later.
+    if (err.error_code === 429) return reply.code(429).send({ error: err.description });
+    // A definite refusal, e.g. "chat not found".
+    if (err.error_code >= 400 && err.error_code < 500) {
+      return reply.code(422).send({ error: err.description });
+    }
+    return reply.code(502).send({ error: err.description });
+  }
+  // Network failure, timeout or unparsable answer: the request may have
+  // reached Telegram.
+  if (err instanceof HttpError) {
+    return reply.code(502).send({ error: fallbackMessage });
   }
   const error = err as Error;
   return reply.code(500).send({ error: error.message || fallbackMessage });

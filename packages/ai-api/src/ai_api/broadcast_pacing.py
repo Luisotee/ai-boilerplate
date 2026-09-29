@@ -14,6 +14,21 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+#: Upper bounds for the numeric broadcast settings, shared by the env
+#: validation (config.py) and PATCH /admin/settings. Generous: they only catch
+#: typos like an extra zero, never a deliberate slow schedule.
+MAX_DELAY_SECONDS = 3600
+MAX_BATCH_SIZE = 1000
+MAX_BATCH_PAUSE_SECONDS = 86400
+MAX_DAILY_LIMIT = 100000
+SETTING_MAXIMA = {
+    "broadcast_min_delay_seconds": MAX_DELAY_SECONDS,
+    "broadcast_max_delay_seconds": MAX_DELAY_SECONDS,
+    "broadcast_batch_size": MAX_BATCH_SIZE,
+    "broadcast_batch_pause_seconds": MAX_BATCH_PAUSE_SECONDS,
+    "broadcast_daily_limit": MAX_DAILY_LIMIT,
+}
+
 _WINDOW_RE = re.compile(r"^\s*(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})\s*$")
 
 
