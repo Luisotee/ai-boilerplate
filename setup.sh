@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Every path below (.env, scripts/…) is relative to the repo root.
+cd "$(dirname "$0")"
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -34,12 +37,13 @@ sanitize() { printf '%s' "${1//$'\r'/}" | tr -d '\n'; }
 
 # Port allocation and every "does this clash with another bot on this host?"
 # check live in scripts/instance_check.py (stdlib Python, reads Docker's state).
-instance_check() { python3 "$(dirname "$0")/scripts/instance_check.py" "$@"; }
+instance_check() { python3 scripts/instance_check.py "$@"; }
 
-# Read KEY's value from .env ("" when the file or the key is missing).
+# KEY's value in .env as Compose reads it ("" when unset): quotes, inline
+# comments, `export` and repeated keys are handled by the helper, not grep.
 env_value() {
   [ -f "$ENV_FILE" ] || return 0
-  grep -E "^$1=" "$ENV_FILE" | head -n1 | cut -d= -f2- || true
+  instance_check --env "$ENV_FILE" get "$1"
 }
 
 # Compare semantic versions with sort -V; returns 0 if $2 >= $3.
@@ -63,7 +67,7 @@ case "${1:-}" in
   --check | --fix)
     if ! command -v python3 &>/dev/null; then
       print_error "python3 not found"
-      exit 1
+      exit 69
     fi
     MODE="${1#--}"
     shift
@@ -72,7 +76,7 @@ case "${1:-}" in
   "") ;;
   *)
     echo "Usage: ./setup.sh [--check | --fix [--yes]]"
-    exit 1
+    exit 64
     ;;
 esac
 
@@ -185,11 +189,19 @@ if [ "$SKIP_ENV" = false ]; then
   fi
 
   # Carry the project's identity over an overwrite, read BEFORE the copy: the
-  # ports it already uses (kept while still free), its SERVICE_NAME, and a
+  # ports it already uses (kept while still free), its SERVICE_NAME, the *_BIND
+  # addresses (dropping one would republish a port on every interface), and a
   # hand-set COMPOSE_PROJECT_NAME — losing that one would switch the stack to
   # new, empty volumes.
   OLD_SERVICE_NAME=$(env_value SERVICE_NAME)
-  OLD_PROJECT_NAME=$(env_value COMPOSE_PROJECT_NAME)
+  if [[ ! "$OLD_SERVICE_NAME" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+    OLD_SERVICE_NAME=""
+  fi
+  CARRY_KEYS=(COMPOSE_PROJECT_NAME AI_API_BIND WHATSAPP_API_BIND WHATSAPP_CLOUD_BIND TELEGRAM_BIND)
+  CARRY_VALUES=()
+  for key in "${CARRY_KEYS[@]}"; do
+    CARRY_VALUES+=("$(env_value "$key")")
+  done
   CURRENT_PORT_ARGS=()
   for var in POSTGRES_PORT REDIS_PORT ADMINER_PORT AI_API_PORT WHATSAPP_API_PORT \
     WHATSAPP_CLOUD_PORT TELEGRAM_PORT WHISPER_PORT; do
@@ -202,10 +214,12 @@ if [ "$SKIP_ENV" = false ]; then
   cp "$ENV_EXAMPLE" "$ENV_FILE"
   chmod 600 "$ENV_FILE"
   print_success "Copied .env.example → .env (mode 600)"
-  if [ -n "$OLD_PROJECT_NAME" ]; then
-    printf '\nCOMPOSE_PROJECT_NAME=%s\n' "$OLD_PROJECT_NAME" >> "$ENV_FILE"
-    print_success "Kept COMPOSE_PROJECT_NAME=$OLD_PROJECT_NAME"
-  fi
+  for i in "${!CARRY_KEYS[@]}"; do
+    if [ -n "${CARRY_VALUES[$i]}" ]; then
+      instance_check --env "$ENV_FILE" set "${CARRY_KEYS[$i]}" "${CARRY_VALUES[$i]}"
+      print_success "Kept ${CARRY_KEYS[$i]}=${CARRY_VALUES[$i]}"
+    fi
+  done
 
   # Fail fast if .env.example is missing any key this script writes to —
   # otherwise sed substitutions silently no-op and the user ends up with a
@@ -289,7 +303,7 @@ if [ "$SKIP_ENV" = false ]; then
       read -rp "  Set COMPOSE_PROJECT_NAME=$SERVICE_NAME for this checkout? (y/n): " SET_PROJECT
       case "$SET_PROJECT" in
         [Yy])
-          printf '\nCOMPOSE_PROJECT_NAME=%s\n' "$SERVICE_NAME" >> "$ENV_FILE"
+          instance_check --env "$ENV_FILE" set COMPOSE_PROJECT_NAME "$SERVICE_NAME"
           print_success "Compose project name set to '$SERVICE_NAME'"
           break
           ;;
@@ -311,36 +325,43 @@ if [ "$SKIP_ENV" = false ]; then
   # AI_API_URL stays at :8000 — the local API always binds 8000.
   echo ""
   echo -e "  ${BOLD}Port check${NC}"
+  # Helper output, one line each: `PORT VAR from to` (from = the port carried
+  # over from the previous .env, else the default), `ERROR VAR default`, `NOTE …`.
   PORT_CHANGES=0
+  PORT_CHECK_OK=true
   if PORT_REPORT=$(instance_check assign-ports ${CURRENT_PORT_ARGS[@]+"${CURRENT_PORT_ARGS[@]}"}); then
-    while read -r var default chosen; do
-      case "$var" in
-        "") ;;
-        NOTE) print_warning "$default $chosen" ;;
-        ERROR)
-          print_error "Could not find a free port near $chosen for $default — set $default manually in .env"
-          PORT_ERRORS+=("$default (default $chosen)")
-          ;;
-        *)
-          if [ "$chosen" != "$default" ]; then
-            print_warning "Port $default taken → ${var}=${chosen}"
+    while read -r kind var from to; do
+      case "$kind" in
+        PORT)
+          if [ "$from" != "$to" ]; then
+            print_warning "Port $from taken → ${var}=${to}"
             PORT_CHANGES=$((PORT_CHANGES + 1))
           fi
           ;;
+        ERROR)
+          print_error "Could not find a free port near $from for $var — set $var manually in .env"
+          PORT_ERRORS+=("$var (default $from)")
+          ;;
+        NOTE) print_warning "$var $from $to" ;;
       esac
     done <<< "$PORT_REPORT"
   else
-    print_error "Port check failed — default ports kept; run ./setup.sh --check afterwards"
+    PORT_CHECK_OK=false
+    print_error "Port check failed — ports left as in .env.example; run ./setup.sh --check afterwards"
     PORT_ERRORS+=("all ports (port check failed)")
   fi
   # Used to build DATABASE_URL below.
   PG_PORT=$(env_value POSTGRES_PORT)
   PG_PORT="${PG_PORT:-5432}"
 
-  if [ "$PORT_CHANGES" -eq 0 ]; then
-    print_success "All default ports are free"
-  else
+  if [ "$PORT_CHECK_OK" = false ]; then
+    :
+  elif [ "$PORT_CHANGES" -gt 0 ]; then
     print_success "Reassigned $PORT_CHANGES port(s) to avoid conflicts"
+  elif [ ${#CURRENT_PORT_ARGS[@]} -gt 0 ]; then
+    print_success "Kept the ports from the previous .env"
+  else
+    print_success "All default ports are free"
   fi
 
   # ── Required secrets ──────────────────────────────────
@@ -719,8 +740,8 @@ echo ""
 # Read host ports back from .env (fall back to defaults) so the links below
 # reflect any conflict-driven reassignment.
 env_port() {
-  local val=""
-  [ -f "$ENV_FILE" ] && val=$(grep -E "^$1=" "$ENV_FILE" | head -n1 | cut -d= -f2-)
+  local val
+  val=$(env_value "$1")
   printf '%s' "${val:-$2}"
 }
 DOC_API_PORT=$(env_port AI_API_PORT 8000)

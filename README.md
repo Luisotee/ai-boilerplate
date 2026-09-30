@@ -162,7 +162,7 @@ Profiles are opt-in: without `--profile`, Adminer, the Cloud API client, and the
 
 ### Several bots on one server
 
-Each checkout needs its own `SERVICE_NAME` (container, network and image names) and its own host ports. `./setup.sh` takes care of both: it refuses a name another compose project already uses and picks ports that are free — counting other projects' stopped stacks and not-yet-started profiles, not just what is listening right now. Run `./setup.sh --check` on an existing deployment to see clashes and `./setup.sh --fix` to move the clashing ports.
+Each checkout needs its own `SERVICE_NAME` (container, network and image names) and its own host ports. `./setup.sh` takes care of both: it refuses a name another compose project already uses and picks ports that are free — counting other projects' stopped stacks and not-yet-started profiles, not just what is listening right now. Run `./setup.sh --check` on an existing deployment to see clashes and `./setup.sh --fix` to move the clashing ports (it keeps a byte-for-byte backup, changes only ports and the local-dev URLs that embed them, and refuses to run while Docker is unreachable). Re-running `./setup.sh` and overwriting `.env` keeps `SERVICE_NAME`, `COMPOSE_PROJECT_NAME`, the `*_BIND` addresses and the current ports.
 
 Volumes belong to the Compose project, which is named after the checkout's **directory**. Clone each bot into a differently named directory (or set `COMPOSE_PROJECT_NAME` before the first start); never change it afterwards, or the stack starts with empty volumes. A stopped bot that is not in a neighbouring directory can be included in the check with `SIBLING_DIRS=/path/a:/path/b ./setup.sh --check`.
 

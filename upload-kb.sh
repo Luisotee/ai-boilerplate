@@ -28,7 +28,17 @@ API_URL="${AI_API_URL:-}"
 if [ -z "$API_URL" ]; then
     API_PORT=""
     if [ -f "$ENV_FILE" ]; then
-        API_PORT=$(grep -m1 '^AI_API_PORT=' "$ENV_FILE" | cut -d= -f2- | tr -d '"'"'"' \r' || true)
+        # As Compose reads it: optional `export`, last assignment wins, an
+        # inline ` # comment` and surrounding quotes are not part of the value.
+        API_PORT=$(tr -d '\r' < "$ENV_FILE" \
+            | sed -nE 's/^[[:space:]]*(export[[:space:]]+)?AI_API_PORT[[:space:]]*=(.*)$/\2/p' \
+            | tail -n1 \
+            | sed -E 's/[[:space:]]+#.*$//; s/^[[:space:]]+//; s/[[:space:]]+$//' \
+            | sed -E "s/^([\"'])(.*)\\1\$/\\2/")
+    fi
+    if [ -n "$API_PORT" ] && ! [[ "$API_PORT" =~ ^[0-9]+$ ]]; then
+        echo "Warning: AI_API_PORT in $ENV_FILE is not a number; using 8000" >&2
+        API_PORT=""
     fi
     API_URL="http://localhost:${API_PORT:-8000}"
 fi

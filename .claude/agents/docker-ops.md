@@ -27,7 +27,7 @@ Worker runs: `python -m ai_api.scripts.run_stream_worker`. It reuses the image b
 
 **The `aiagent-*` names and the ports in this document are defaults.** Several bots can share a host, so read `SERVICE_NAME` and the `*_PORT` / `*_BIND` values from the root `.env` first and substitute them (containers are `<SERVICE_NAME>-<service>`, the network `<SERVICE_NAME>-network`). `./setup.sh --check` reports clashes with other compose projects.
 
-Infrastructure ports (5432 / 6379 / 8080) are bound to `127.0.0.1` only. Application ports (8000 / 3001 / 3002) are bound to all interfaces.
+Infrastructure ports (5432 / 6379 / 8080 / 8771) are bound to `127.0.0.1` only. Application ports (8000 / 3001 / 3002 / 3003) are bound to all interfaces unless `AI_API_BIND` / `WHATSAPP_API_BIND` / `WHATSAPP_CLOUD_BIND` / `TELEGRAM_BIND` set a host address.
 
 ## Common Operations
 
