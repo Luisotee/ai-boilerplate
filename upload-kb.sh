@@ -7,7 +7,9 @@
 #   ./upload-kb.sh                         # defaults to ./knowledge_base
 #
 # Environment:
-#   AI_API_URL   AI API base URL (default: http://localhost:8000)
+#   AI_API_URL   AI API base URL (default: http://localhost:<AI_API_PORT from
+#                ./.env>, else :8000 — so it reaches THIS checkout's API when
+#                several bots share the host)
 #   AI_API_KEY   API key; read from ./.env when not set in the environment
 #
 # Files already in the knowledge base (same SHA-256 content) are reported as
@@ -18,11 +20,21 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PDF_DIR="${1:-$SCRIPT_DIR/knowledge_base}"
-API_URL="${AI_API_URL:-http://localhost:8000}"
+ENV_FILE="$SCRIPT_DIR/.env"
+
+# AI_API_URL in .env is the local-dev URL (always :8000), so it is not read here:
+# the Docker-published port is AI_API_PORT, which setup.sh moves on a clash.
+API_URL="${AI_API_URL:-}"
+if [ -z "$API_URL" ]; then
+    API_PORT=""
+    if [ -f "$ENV_FILE" ]; then
+        API_PORT=$(grep -m1 '^AI_API_PORT=' "$ENV_FILE" | cut -d= -f2- | tr -d '"'"'"' \r' || true)
+    fi
+    API_URL="http://localhost:${API_PORT:-8000}"
+fi
 
 API_KEY="${AI_API_KEY:-}"
 if [ -z "$API_KEY" ]; then
-    ENV_FILE="$SCRIPT_DIR/.env"
     if [ ! -f "$ENV_FILE" ]; then
         echo "Error: AI_API_KEY is not set and no .env found at $ENV_FILE" >&2
         exit 1

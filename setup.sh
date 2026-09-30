@@ -32,47 +32,14 @@ escape_sed() { printf '%s' "$1" | sed -e 's/[&/|\\]/\\&/g'; }
 # Strip CR/LF from user-pasted input (common when copying tokens from the clipboard).
 sanitize() { printf '%s' "${1//$'\r'/}" | tr -d '\n'; }
 
-# Return 0 if a TCP port is currently bound on the host.
-# ss/lsof check all interfaces; the bash /dev/tcp fallback only probes 127.0.0.1
-# (best-effort on minimal hosts that have neither tool — may miss a port bound to
-# a non-loopback interface). A probe that errors out is treated as "free".
-port_in_use() {
-  local port="$1"
-  if command -v ss &>/dev/null; then
-    ss -Hltn "( sport = :$port )" 2>/dev/null | grep -q . && return 0
-    return 1
-  elif command -v lsof &>/dev/null; then
-    lsof -iTCP:"$port" -sTCP:LISTEN -t &>/dev/null && return 0
-    return 1
-  else
-    # Fallback: a successful connect means something is listening.
-    (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null && { exec 3>&- 3<&-; return 0; }
-    return 1
-  fi
-}
+# Port allocation and every "does this clash with another bot on this host?"
+# check live in scripts/instance_check.py (stdlib Python, reads Docker's state).
+instance_check() { python3 "$(dirname "$0")/scripts/instance_check.py" "$@"; }
 
-# Find the first free port at/above $1 (scans up to +100), skipping ports already
-# claimed this run (tracked in $CHOSEN_PORTS). A port published by this project's
-# own running containers ($OWN_PORTS) counts as free, so re-running setup against
-# a live stack keeps its ports instead of bumping them all. On success sets the global FREE_PORT
-# and returns 0. Sets a global (not stdout) so calls aren't run in a subshell —
-# otherwise CHOSEN_PORTS would not accumulate and two services could be assigned
-# the same bumped port.
-CHOSEN_PORTS=""
-FREE_PORT=""
-OWN_PORTS=""
-find_free_port() {
-  local port="$1" max=$(( $1 + 100 ))
-  while [ "$port" -le "$max" ]; do
-    if [[ " $CHOSEN_PORTS " != *" $port "* ]] \
-      && { [[ " $OWN_PORTS " == *" $port "* ]] || ! port_in_use "$port"; }; then
-      CHOSEN_PORTS="$CHOSEN_PORTS $port"
-      FREE_PORT="$port"
-      return 0
-    fi
-    port=$(( port + 1 ))
-  done
-  return 1
+# Read KEY's value from .env ("" when the file or the key is missing).
+env_value() {
+  [ -f "$ENV_FILE" ] || return 0
+  grep -E "^$1=" "$ENV_FILE" | head -n1 | cut -d= -f2- || true
 }
 
 # Compare semantic versions with sort -V; returns 0 if $2 >= $3.
@@ -85,6 +52,29 @@ check_min_version() {
   fi
   return 0
 }
+
+ENV_FILE=".env"
+ENV_EXAMPLE=".env.example"
+
+# ── Instance check modes (no install, no prompts for secrets) ──
+#   ./setup.sh --check         report clashes with other bots on this host
+#   ./setup.sh --fix [--yes]   move clashing ports in the existing .env
+case "${1:-}" in
+  --check | --fix)
+    if ! command -v python3 &>/dev/null; then
+      print_error "python3 not found"
+      exit 1
+    fi
+    MODE="${1#--}"
+    shift
+    instance_check "$MODE" "$@" && exit 0 || exit $?
+    ;;
+  "") ;;
+  *)
+    echo "Usage: ./setup.sh [--check | --fix [--yes]]"
+    exit 1
+    ;;
+esac
 
 # ── Banner ──────────────────────────────────────────────
 echo ""
@@ -162,12 +152,14 @@ fi
 # ── 2. Create .env from template ────────────────────────
 print_header "Environment configuration"
 
-ENV_FILE=".env"
-ENV_EXAMPLE=".env.example"
 # Ports we couldn't free (declared here so the always-run final summary can read it).
 PORT_ERRORS=()
 
+# A first setup (no .env yet) is the only time the Compose project name may be
+# changed automatically — see the project-name guard below.
+FRESH_ENV=true
 if [ -f "$ENV_FILE" ]; then
+  FRESH_ENV=false
   echo ""
   echo -e "  ${YELLOW}A .env file already exists.${NC}"
   read -rp "  Overwrite it? (y/N): " OVERWRITE
@@ -176,6 +168,9 @@ if [ -f "$ENV_FILE" ]; then
     print_warning "Verify your .env contains all required keys (diff against .env.example)"
     chmod 600 "$ENV_FILE" 2>/dev/null || true
     SKIP_ENV=true
+    # Report-only: clashes with other bots on this host (ports, names, volumes).
+    echo ""
+    instance_check check | sed 's/^/  /' || true
   else
     SKIP_ENV=false
   fi
@@ -189,18 +184,28 @@ if [ "$SKIP_ENV" = false ]; then
     exit 1
   fi
 
-  # Host ports published by this project's running containers. Read BEFORE the
-  # .env is overwritten, so `docker compose` still resolves the current project.
-  # Any failure (no daemon, no permission) just leaves the list empty.
-  if command -v docker &>/dev/null; then
-    for cid in $(docker compose ps -q 2>/dev/null || true); do
-      OWN_PORTS="$OWN_PORTS $( (docker port "$cid" 2>/dev/null || true) | awk -F: '{print $NF}' | tr '\n' ' ')"
-    done
-  fi
+  # Carry the project's identity over an overwrite, read BEFORE the copy: the
+  # ports it already uses (kept while still free), its SERVICE_NAME, and a
+  # hand-set COMPOSE_PROJECT_NAME — losing that one would switch the stack to
+  # new, empty volumes.
+  OLD_SERVICE_NAME=$(env_value SERVICE_NAME)
+  OLD_PROJECT_NAME=$(env_value COMPOSE_PROJECT_NAME)
+  CURRENT_PORT_ARGS=()
+  for var in POSTGRES_PORT REDIS_PORT ADMINER_PORT AI_API_PORT WHATSAPP_API_PORT \
+    WHATSAPP_CLOUD_PORT TELEGRAM_PORT WHISPER_PORT; do
+    old_port=$(env_value "$var")
+    if [ -n "$old_port" ]; then
+      CURRENT_PORT_ARGS+=(--current "$var=$old_port")
+    fi
+  done
 
   cp "$ENV_EXAMPLE" "$ENV_FILE"
   chmod 600 "$ENV_FILE"
   print_success "Copied .env.example → .env (mode 600)"
+  if [ -n "$OLD_PROJECT_NAME" ]; then
+    printf '\nCOMPOSE_PROJECT_NAME=%s\n' "$OLD_PROJECT_NAME" >> "$ENV_FILE"
+    print_success "Kept COMPOSE_PROJECT_NAME=$OLD_PROJECT_NAME"
+  fi
 
   # Fail fast if .env.example is missing any key this script writes to —
   # otherwise sed substitutions silently no-op and the user ends up with a
@@ -233,78 +238,104 @@ if [ "$SKIP_ENV" = false ]; then
   echo "  Names every Docker container (NAME-postgres, …), the network, and the"
   echo "  API image tag. Use lowercase letters, digits, '-' or '_'."
   echo ""
+  DEFAULT_SERVICE_NAME="${OLD_SERVICE_NAME:-aiagent}"
   while true; do
-    read -rp "  SERVICE_NAME (Enter for 'aiagent'): " SERVICE_NAME
-    SERVICE_NAME=$(sanitize "${SERVICE_NAME:-aiagent}")
+    read -rp "  SERVICE_NAME (Enter for '$DEFAULT_SERVICE_NAME'): " SERVICE_NAME
+    SERVICE_NAME=$(sanitize "${SERVICE_NAME:-$DEFAULT_SERVICE_NAME}")
     SERVICE_NAME=$(printf '%s' "$SERVICE_NAME" | tr '[:upper:]' '[:lower:]')
-    if [[ "$SERVICE_NAME" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+    if [[ ! "$SERVICE_NAME" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+      print_error "Invalid name — must start with a letter/digit and contain only a-z 0-9 _ -"
+      continue
+    fi
+    # Refuse a name another compose project on this host already uses.
+    NAME_OK=true
+    NAME_REPORT=$(instance_check check-name "$SERVICE_NAME") || NAME_OK=false
+    while IFS= read -r line; do
+      case "$line" in
+        ERROR\ *) print_error "${line#ERROR }" ;;
+        WARN\ *) print_warning "${line#WARN }" ;;
+      esac
+    done <<< "$NAME_REPORT"
+    if [ "$NAME_OK" = true ]; then
       break
     fi
-    print_error "Invalid name — must start with a letter/digit and contain only a-z 0-9 _ -"
+    print_error "'$SERVICE_NAME' is taken on this host — choose another name"
   done
   sed -i "s|^SERVICE_NAME=.*|SERVICE_NAME=$(escape_sed "$SERVICE_NAME")|" "$ENV_FILE"
   print_success "Service name set to '$SERVICE_NAME'"
 
+  # ── Compose project name guard ────────────────────────
+  # Volumes belong to the Compose project, named after this DIRECTORY. Two
+  # checkouts in same-named directories would share database, WhatsApp session
+  # and uploads. The name is only ever changed on a first setup, and only on a
+  # yes: changing it on an existing deployment switches to empty volumes.
+  GUARD_ARGS=(--candidate "$SERVICE_NAME")
+  if [ "$FRESH_ENV" = true ]; then
+    GUARD_ARGS+=(--fresh)
+  fi
+  GUARD_REPORT=$(instance_check project-guard "${GUARD_ARGS[@]}" || true)
+  GUARD_STATUS=$(printf '%s\n' "$GUARD_REPORT" | head -n1)
+  if [ "$GUARD_STATUS" = "OFFER" ] || [ "$GUARD_STATUS" = "REFUSE" ]; then
+    echo ""
+    while IFS= read -r line; do
+      print_warning "$line"
+    done <<< "$(printf '%s\n' "$GUARD_REPORT" | tail -n +2)"
+  fi
+  if [ "$GUARD_STATUS" = "OFFER" ]; then
+    echo ""
+    echo "  This looks like a first setup here. Answer 'n' if those volumes belong to"
+    echo "  THIS checkout (its stack is just stopped) — 'y' would start with empty ones."
+    while true; do
+      read -rp "  Set COMPOSE_PROJECT_NAME=$SERVICE_NAME for this checkout? (y/n): " SET_PROJECT
+      case "$SET_PROJECT" in
+        [Yy])
+          printf '\nCOMPOSE_PROJECT_NAME=%s\n' "$SERVICE_NAME" >> "$ENV_FILE"
+          print_success "Compose project name set to '$SERVICE_NAME'"
+          break
+          ;;
+        [Nn])
+          print_warning "Compose project name left as is"
+          break
+          ;;
+      esac
+    done
+  fi
+
   # ── Port conflict detection ───────────────────────────
-  # Each entry is VAR:DEFAULT. The .env value is the Docker host-published port
-  # (and, for the client *_PORT vars, the local-dev bind port); containers stay
-  # pinned to canonical internal ports in docker-compose.yml. We auto-bump any
-  # port already in use on the host.
+  # The .env value is the Docker host-published port (and, for the client *_PORT
+  # vars, the local-dev bind port); containers stay pinned to canonical internal
+  # ports in docker-compose.yml. A port is skipped when something listens on it,
+  # when another compose project's container has it, or when a neighbouring
+  # compose file declares it (a stopped stack, a profile not started yet). The
+  # helper also syncs DATABASE_URL and the *_CLIENT_URL callbacks for local dev;
+  # AI_API_URL stays at :8000 — the local API always binds 8000.
   echo ""
   echo -e "  ${BOLD}Port check${NC}"
-  if ! command -v ss &>/dev/null && ! command -v lsof &>/dev/null; then
-    print_warning "Neither 'ss' nor 'lsof' found — port probing is best-effort"
-    print_warning "(loopback only); a conflict on a non-loopback interface may be missed"
-  fi
-  if [ -n "${OWN_PORTS// /}" ]; then
-    print_success "Ports used by this project's running containers are kept"
-  fi
-  PORT_SPECS=(
-    "POSTGRES_PORT:5432"
-    "REDIS_PORT:6379"
-    "ADMINER_PORT:8080"
-    "AI_API_PORT:8000"
-    "WHATSAPP_API_PORT:3001"
-    "WHATSAPP_CLOUD_PORT:3002"
-    "TELEGRAM_PORT:3003"
-    "WHISPER_PORT:8771"
-  )
   PORT_CHANGES=0
-  # Captured to rebuild DATABASE_URL and the client callback URLs below.
-  PG_PORT=5432
-  WA_PORT=3001
-  WA_CLOUD_PORT=3002
-  TG_PORT=3003
-  for spec in "${PORT_SPECS[@]}"; do
-    var="${spec%%:*}"
-    default="${spec##*:}"
-    if find_free_port "$default"; then
-      chosen="$FREE_PORT"
-    else
-      print_error "Could not find a free port near $default for $var — set $var manually in .env"
-      PORT_ERRORS+=("$var (default $default)")
-      chosen="$default"
-    fi
-    sed -i "s|^${var}=.*|${var}=${chosen}|" "$ENV_FILE"
-    if [ "$chosen" != "$default" ]; then
-      print_warning "Port $default in use → ${var}=${chosen}"
-      PORT_CHANGES=$((PORT_CHANGES + 1))
-    fi
-    case "$var" in
-      POSTGRES_PORT) PG_PORT="$chosen" ;;
-      WHATSAPP_API_PORT) WA_PORT="$chosen" ;;
-      WHATSAPP_CLOUD_PORT) WA_CLOUD_PORT="$chosen" ;;
-      TELEGRAM_PORT) TG_PORT="$chosen" ;;
-    esac
-  done
-
-  # Keep the inter-service callback URLs the AI API reads in sync with the chosen
-  # client ports, so local (non-Docker) dev works after a bump. In Docker these
-  # are overridden in docker-compose.yml, so this only affects local dev.
-  # AI_API_URL is intentionally left at :8000 — the local API always binds 8000.
-  sed -i "s|^WHATSAPP_CLIENT_URL=.*|WHATSAPP_CLIENT_URL=$(escape_sed "http://localhost:${WA_PORT}")|" "$ENV_FILE"
-  sed -i "s|^WHATSAPP_CLOUD_CLIENT_URL=.*|WHATSAPP_CLOUD_CLIENT_URL=$(escape_sed "http://localhost:${WA_CLOUD_PORT}")|" "$ENV_FILE"
-  sed -i "s|^TELEGRAM_CLIENT_URL=.*|TELEGRAM_CLIENT_URL=$(escape_sed "http://localhost:${TG_PORT}")|" "$ENV_FILE"
+  if PORT_REPORT=$(instance_check assign-ports ${CURRENT_PORT_ARGS[@]+"${CURRENT_PORT_ARGS[@]}"}); then
+    while read -r var default chosen; do
+      case "$var" in
+        "") ;;
+        NOTE) print_warning "$default $chosen" ;;
+        ERROR)
+          print_error "Could not find a free port near $chosen for $default — set $default manually in .env"
+          PORT_ERRORS+=("$default (default $chosen)")
+          ;;
+        *)
+          if [ "$chosen" != "$default" ]; then
+            print_warning "Port $default taken → ${var}=${chosen}"
+            PORT_CHANGES=$((PORT_CHANGES + 1))
+          fi
+          ;;
+      esac
+    done <<< "$PORT_REPORT"
+  else
+    print_error "Port check failed — default ports kept; run ./setup.sh --check afterwards"
+    PORT_ERRORS+=("all ports (port check failed)")
+  fi
+  # Used to build DATABASE_URL below.
+  PG_PORT=$(env_value POSTGRES_PORT)
+  PG_PORT="${PG_PORT:-5432}"
 
   if [ "$PORT_CHANGES" -eq 0 ]; then
     print_success "All default ports are free"

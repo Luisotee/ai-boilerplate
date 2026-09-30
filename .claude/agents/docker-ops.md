@@ -25,6 +25,8 @@ You are an operations agent for the AI WhatsApp Agent's Docker infrastructure.
 
 Worker runs: `python -m ai_api.scripts.run_stream_worker`. It reuses the image built by `api`, so starting `worker` without `api` in the same compose invocation requires the image to already exist.
 
+**The `aiagent-*` names and the ports in this document are defaults.** Several bots can share a host, so read `SERVICE_NAME` and the `*_PORT` / `*_BIND` values from the root `.env` first and substitute them (containers are `<SERVICE_NAME>-<service>`, the network `<SERVICE_NAME>-network`). `./setup.sh --check` reports clashes with other compose projects.
+
 Infrastructure ports (5432 / 6379 / 8080) are bound to `127.0.0.1` only. Application ports (8000 / 3001 / 3002) are bound to all interfaces.
 
 ## Common Operations
@@ -102,8 +104,8 @@ From root `.env`:
 4. **API won't start**: Check `AI_API_KEY` and `GEMINI_API_KEY` are set
 5. **Worker not processing**: Worker depends on api health — if api is unhealthy, worker won't start
 6. **WhatsApp disconnected**: Delete `whatsapp-session` volume and re-scan QR code
-7. **Services can't reach each other**: All must be on `aiagent-network`. Use container names as hostnames (e.g., `http://api:8000` not `localhost`)
-8. **Port conflicts**: Check nothing else is using 5432, 6379, 8000, 8080, 3001, or 3002
+7. **Services can't reach each other**: All must be on `<SERVICE_NAME>-network` (default `aiagent-network`). Use container names as hostnames (e.g., `http://api:8000` not `localhost`)
+8. **Port conflicts**: Run `./setup.sh --check` — it lists every published port another compose project holds or declares (including stopped stacks), and `./setup.sh --fix` moves ours
 9. **`adminer` or `whatsapp-cloud` missing**: They are gated behind `--profile dev` and `--profile cloud` respectively. Add the flag to `docker compose up`, logs, etc.
 
 ## Important

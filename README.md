@@ -142,6 +142,8 @@ packages/
 git clone <repo>
 cd ai-boilerplate
 ./setup.sh             # interactive: generates .env, installs deps
+./setup.sh --check     # any time: report clashes with other bots on this host
+./setup.sh --fix       # move clashing ports in .env (keeps a backup)
 ```
 
 The script checks prerequisites, creates `.env` from the template (auto-generating passwords and inter-service keys), prompts for `GEMINI_API_KEY` and any optional integrations (DeepSeek, Meta Cloud API, Groq), then runs `pnpm install:all`.
@@ -156,7 +158,13 @@ docker compose --profile whisper up -d                  # + self-hosted Whisper 
 docker compose --profile dev --profile cloud up -d      # everything
 ```
 
-Profiles are opt-in: without `--profile`, Adminer, the Cloud API client, and the self-hosted Whisper server stay stopped. Infrastructure ports (`5432`, `6379`, `8080`, `8771`) bind to `127.0.0.1` only — application services (`8000`, `3001`, `3002`) remain on all interfaces so they can be reached from host tooling and the WhatsApp client.
+Profiles are opt-in: without `--profile`, Adminer, the Cloud API client, and the self-hosted Whisper server stay stopped. Infrastructure ports (`5432`, `6379`, `8080`, `8771`) bind to `127.0.0.1` only — application services (`8000`, `3001`, `3002`) remain on all interfaces so they can be reached from host tooling and the WhatsApp client. Set `AI_API_BIND` / `WHATSAPP_API_BIND` / `WHATSAPP_CLOUD_BIND` / `TELEGRAM_BIND` to `127.0.0.1` to publish one on loopback only.
+
+### Several bots on one server
+
+Each checkout needs its own `SERVICE_NAME` (container, network and image names) and its own host ports. `./setup.sh` takes care of both: it refuses a name another compose project already uses and picks ports that are free — counting other projects' stopped stacks and not-yet-started profiles, not just what is listening right now. Run `./setup.sh --check` on an existing deployment to see clashes and `./setup.sh --fix` to move the clashing ports.
+
+Volumes belong to the Compose project, which is named after the checkout's **directory**. Clone each bot into a differently named directory (or set `COMPOSE_PROJECT_NAME` before the first start); never change it afterwards, or the stack starts with empty volumes. A stopped bot that is not in a neighbouring directory can be included in the check with `SIBLING_DIRS=/path/a:/path/b ./setup.sh --check`.
 
 The images run as non-root users (uid 1000). **Upgrading a deployment built from the older root images?** Chown the existing Baileys session and upload volumes once, or the WhatsApp session and uploads can't be written:
 
@@ -228,7 +236,7 @@ The free tier covers 10M records/month and is hard-capped at $0 — it can never
 | GET | `/knowledge-base/status/{id}` | Processing status |
 | DELETE | `/knowledge-base/documents/{id}` | Delete document |
 
-Bulk-load a folder of PDFs with `./upload-kb.sh /path/to/pdfs` (uses `AI_API_KEY` from the environment or `.env`; `AI_API_URL` defaults to `http://localhost:8000`). Re-running it is safe: files already in the knowledge base are rejected as duplicates.
+Bulk-load a folder of PDFs with `./upload-kb.sh /path/to/pdfs` (uses `AI_API_KEY` from the environment or `.env`; `AI_API_URL` defaults to `http://localhost:<AI_API_PORT from .env>`, i.e. this checkout's published API port). Re-running it is safe: files already in the knowledge base are rejected as duplicates.
 
 ### Broadcasts (admin)
 | Method | Endpoint | Description |

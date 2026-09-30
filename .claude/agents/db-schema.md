@@ -73,7 +73,7 @@ Key facts that won't change:
    ```
 3. **Provide the execution command**:
    ```bash
-   docker exec -it aiagent-postgres psql -U aiagent -d aiagent -c "SQL HERE"
+   docker exec -it aiagent-postgres psql -U aiagent -d aiagent -c "SQL HERE"   # container is <SERVICE_NAME>-postgres (see .env)
    ```
 
 ### Creating indexes

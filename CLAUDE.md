@@ -105,6 +105,8 @@ One human on WhatsApp and Telegram can share one `users` row (history, core memo
 ```bash
 # First-time setup
 ./setup.sh                              # Interactive: generates .env, installs Node + Python deps
+./setup.sh --check                      # Report clashes with other bots on this host (read-only)
+./setup.sh --fix                        # Move clashing ports in the existing .env (backup first)
 
 # Infrastructure (Docker Compose profiles)
 docker compose up -d                                    # Core: postgres, redis, api, worker, whatsapp
@@ -378,6 +380,17 @@ Multipart routes can't use Zod validation directly. Follow the pattern in `route
 - Agent tool modules must be imported in `agent/tools/__init__.py` or the `@agent.tool` decorators won't register
 - Agent tools that touch `ctx.deps.db` must call `safe_rollback(ctx.deps.db)` (`agent/tools/_db.py`) in their except blocks — all tools share one DB session per agent run, so a failed flush/commit leaves it dirty and later tool calls hit `PendingRollbackError`. `safe_rollback` swallows (and logs) a failing rollback, so it can never replace the tool's reply with a crash
 - Agent tool error returns must NOT include raw `str(e)` — SQLAlchemy/httpx exceptions can leak DB hostnames, table names, SQL or internal URLs to the LLM → user. Return a generic English message; details go to `logger.error(..., exc_info=True)`. Pinned by `tests/mocked/test_tool_error_hygiene.py`
+
+### Several bots on one host
+
+Forks of this repo share a VPS, so everything host-global must be unique per checkout. `scripts/instance_check.py` (stdlib Python, no repo imports — a fork copies the one file) does the checking; `setup.sh` is a thin caller. Pure logic is covered by `packages/ai-api/tests/unit/test_instance_check.py`.
+- **What is host-global, and what scopes it**: container names, the network and the `…-api` image tag follow `SERVICE_NAME`; the eight published ports follow the `*_PORT` vars; the six volumes and the three TS client images follow the **Compose project name**, which is the directory basename unless `COMPOSE_PROJECT_NAME` is set. Those are two independent namespaces
+- **Ports are checked against three sources**, because a listening-socket probe alone misses a stopped stack and a profile (`telegram`, `cloud`, `dev`, `whisper`) that was never started: containers Docker knows (`docker inspect` `HostConfig.PortBindings`, running or not), ports *declared* by other compose projects (`docker compose --profile '*' config --format json`, run in that project's directory with a scrubbed environment so our exported vars can't override its `.env`; the output holds that project's secrets and is parsed for ports only), and live sockets. "Other projects" = working dirs of foreign containers + `../*/` with a compose file + `SIBLING_DIRS` (colon-separated) for a stopped stack that lives elsewhere. Ours vs theirs is decided by the `com.docker.compose.project.working_dir` label, never by name
+- **`./setup.sh --check`** (also printed when you keep an existing `.env`): exit 0 clean, 1 collisions, 2 Docker unavailable. **`--fix`** re-bumps only the clashing ports, pins ports that were implicit defaults, follows the change in `DATABASE_URL` / `*_CLIENT_URL` when they still have the stock `localhost` shape, and backs up to `.env.bak.<timestamp>`. It touches nothing else. A moved port applies at the next `docker compose up -d`, and external targets (proxy, webhook URL, FleetView base URL) must follow
+- **`SERVICE_NAME` is refused when another project already owns** a `<name>-<service>` container or `<name>-network`. An `…-api:latest` image built by another project is only a warning (the label records the last builder)
+- **The Compose project name is never changed on an existing deployment** — that switches the stack to new, empty volumes (database, WhatsApp session, uploads). When another checkout uses the same name (same-named directories: shared volumes, and `up`/`down` in one replaces the other's containers), a *first* setup with no containers of its own offers `COMPOSE_PROJECT_NAME=<SERVICE_NAME>`; every other case only warns. An overwrite re-run carries `COMPOSE_PROJECT_NAME`, `SERVICE_NAME` and the current ports over. For the same reason the compose file has no top-level `name:` and no explicit volume names
+- **`*_BIND`** (`AI_API_BIND`, `WHATSAPP_API_BIND`, `WHATSAPP_CLOUD_BIND`, `TELEGRAM_BIND`): host address an app port is published on. The default must stay **empty**, not `0.0.0.0`: `'${X_BIND:-}:${X_PORT}:…'` with an empty IP renders exactly like the old two-part form (all interfaces, IPv4 and IPv6), while `0.0.0.0` would drop IPv6. The empty-IP form is Compose implementation behaviour rather than documented syntax; it is verified by comparing `docker compose config` output
+- `upload-kb.sh` targets `http://localhost:<AI_API_PORT from .env>` unless `AI_API_URL` is exported. It does not read `AI_API_URL` from `.env` — that is the local-dev URL, pinned to `:8000`
 
 ### General
 - Husky pre-commit hook runs `pnpm format` automatically — do NOT run format manually before committing
