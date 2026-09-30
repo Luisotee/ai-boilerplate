@@ -552,10 +552,13 @@ class TestProjectSpecs:
     def test_nothing_declared(self):
         assert ic.specs_from_compose("services: {}\n") == (None, None)
 
-    def test_this_repo_compose_matches_the_fallbacks(self):
-        specs, name = ic.project_specs(str(SCRIPT.parents[1]))
-        assert dict(specs) == dict(ic.PORT_SPECS)
-        assert name == ic.DEFAULT_SERVICE_NAME
+    def test_this_repo_compose_agrees_with_env_example(self):
+        """The template pins every compose port at its compose default (forks too)."""
+        root = SCRIPT.parents[1]
+        specs, name = ic.project_specs(str(root))
+        env = ic.parse_env((root / ".env.example").read_text())
+        assert name == env["SERVICE_NAME"]
+        assert {var: str(port) for var, port in specs} == {var: env.get(var) for var, _ in specs}
 
     def test_no_compose_file_uses_the_fallbacks(self, tmp_path):
         assert ic.project_specs(str(tmp_path)) == (ic.PORT_SPECS, ic.DEFAULT_SERVICE_NAME)
