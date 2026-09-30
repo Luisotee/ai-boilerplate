@@ -534,6 +534,48 @@ class TestCmdFix:
         assert list(project.glob(".env.bak.*")) == []
 
 
+class TestProjectSpecs:
+    def test_reads_host_ports_and_default_name(self):
+        text = (
+            "    container_name: ${SERVICE_NAME:-castanha}-api\n"
+            "      - '127.0.0.1:${POSTGRES_PORT:-5433}:5432'\n"
+            '      - "${AI_API_BIND:-}:${AI_API_PORT:-8001}:8000"\n'
+            "      WHATSAPP_API_PORT: 3001\n"
+            "      - '${WHATSAPP_API_BIND:-127.0.0.1}:${WHATSAPP_API_PORT:-3003}:3001'\n"
+            "      - '127.0.0.1:${POSTGRES_PORT:-5433}:5432'\n"
+        )
+        assert ic.specs_from_compose(text) == (
+            [("POSTGRES_PORT", 5433), ("AI_API_PORT", 8001), ("WHATSAPP_API_PORT", 3003)],
+            "castanha",
+        )
+
+    def test_nothing_declared(self):
+        assert ic.specs_from_compose("services: {}\n") == (None, None)
+
+    def test_this_repo_compose_matches_the_fallbacks(self):
+        specs, name = ic.project_specs(str(SCRIPT.parents[1]))
+        assert dict(specs) == dict(ic.PORT_SPECS)
+        assert name == ic.DEFAULT_SERVICE_NAME
+
+    def test_no_compose_file_uses_the_fallbacks(self, tmp_path):
+        assert ic.project_specs(str(tmp_path)) == (ic.PORT_SPECS, ic.DEFAULT_SERVICE_NAME)
+
+    def test_fix_uses_the_fork_ports_and_only_their_urls(self, project, use_host, capsys):
+        (project / "docker-compose.yml").write_text(
+            "      - '${WHATSAPP_API_BIND:-127.0.0.1}:${WHATSAPP_API_PORT:-3003}:3001'\n"
+            "      - '${AI_API_BIND:-}:${AI_API_PORT:-8001}:8000'\n"
+        )
+        (project / ".env").write_text("AI_API_PORT=8001\n")
+        use_host(ic.Host(str(project), declared=[_foreign_on(3003)], listening=lambda _p: False))
+        assert _main(project, "fix", "--yes") == ic.EXIT_OK
+        env = ic.parse_env((project / ".env").read_text())
+        assert env == {
+            "AI_API_PORT": "8001",
+            "WHATSAPP_API_PORT": "3004",
+            "WHATSAPP_CLIENT_URL": "http://localhost:3004",
+        }
+
+
 class TestCmdAssignPorts:
     def test_output_format_setup_sh_parses(self, project, use_host, capsys):
         (project / ".env").write_text((project / ".env.example").read_text())

@@ -30,7 +30,9 @@ import time
 from collections import namedtuple
 
 # VAR, default. The value is the Docker host-published port; container ports are
-# pinned in docker-compose.yml. Order is the order ports are assigned in.
+# pinned in docker-compose.yml. Order is the order ports are assigned in. The
+# real list is read from this checkout's compose file (`project_specs`), so a
+# fork with other services or defaults needs no edit here; this is the fallback.
 PORT_SPECS = [
     ("POSTGRES_PORT", 5432),
     ("REDIS_PORT", 6379),
@@ -47,7 +49,7 @@ CLIENT_URLS = {
     "WHATSAPP_CLOUD_PORT": "WHATSAPP_CLOUD_CLIENT_URL",
     "TELEGRAM_PORT": "TELEGRAM_CLIENT_URL",
 }
-DEFAULT_SERVICE_NAME = "aiagent"
+DEFAULT_SERVICE_NAME = "aiagent"  # fallback; read from the compose file too
 COMPOSE_FILES = ("compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml")
 PORT_SPAN = 100
 
@@ -272,6 +274,24 @@ def allocate(specs, current, is_free, span=PORT_SPAN):
             errors.append(var)
             assignments[var] = _to_port(current.get(var)) or default
     return assignments, errors
+
+
+_PUBLISHED_PORT = re.compile(r"\$\{([A-Z][A-Z0-9_]*_PORT):-(\d+)\}:\d+")
+_SERVICE_DEFAULT = re.compile(r"\$\{SERVICE_NAME:-([a-z0-9][a-z0-9_-]*)\}")
+
+
+def specs_from_compose(compose_text):
+    """(port specs, default SERVICE_NAME) declared by a compose file.
+
+    Port specs are the `${VAR_PORT:-N}:container` host ports, in file order;
+    either part is None when the file declares none.
+    """
+    specs = []
+    for var, default in _PUBLISHED_PORT.findall(compose_text):
+        if var not in (v for v, _d in specs):
+            specs.append((var, int(default)))
+    name = _SERVICE_DEFAULT.search(compose_text)
+    return specs or None, name.group(1) if name else None
 
 
 def container_suffixes(compose_text):
@@ -612,17 +632,27 @@ def _backup(path):
     return backup
 
 
-def _configured_ports(env):
-    """The port each variable resolves to: the .env value, else compose's default."""
-    return {var: _to_port(env.get(var)) or default for var, default in PORT_SPECS}
-
-
-def _suffixes(project_dir):
+def _compose_text(project_dir):
     for name in COMPOSE_FILES:
         path = os.path.join(project_dir, name)
         if os.path.isfile(path):
-            return container_suffixes(_read(path))
-    return []
+            return _read(path)
+    return ""
+
+
+def project_specs(project_dir):
+    """(port specs, default SERVICE_NAME) of this checkout, else the fallbacks."""
+    specs, name = specs_from_compose(_compose_text(project_dir))
+    return specs or PORT_SPECS, name or DEFAULT_SERVICE_NAME
+
+
+def _configured_ports(env, specs):
+    """The port each variable resolves to: the .env value, else compose's default."""
+    return {var: _to_port(env.get(var)) or default for var, default in specs}
+
+
+def _suffixes(project_dir):
+    return container_suffixes(_compose_text(project_dir))
 
 
 def _explicit_project(env):
@@ -669,8 +699,9 @@ def cmd_check(args):
     own_dir = os.path.realpath(args.project_dir)
     project = effective_project(env, os.environ, own_dir)
     host = load_host(own_dir, project)
-    service_name = env.get("SERVICE_NAME") or DEFAULT_SERVICE_NAME
-    ports = _configured_ports(env)
+    specs, default_name = project_specs(own_dir)
+    service_name = env.get("SERVICE_NAME") or default_name
+    ports = _configured_ports(env, specs)
 
     print(f"Instance check: SERVICE_NAME '{service_name}', Compose project '{project}'")
     problems = 0
@@ -678,7 +709,7 @@ def cmd_check(args):
     clashes = host.clashes(ports)
     if clashes:
         print("\nPort clashes:")
-        for var, _default in PORT_SPECS:
+        for var, _default in specs:
             for claim in clashes.get(var, []):
                 problems += 1
                 print(f"  {var}={claim.port}: {describe_claim(claim)}")
@@ -760,16 +791,15 @@ def cmd_fix(args):
         print("Refusing to change ports: this checkout's containers can't be told apart")
         print("from other projects' without Docker. Nothing changed.")
         return EXIT_INCOMPLETE
-    current = _configured_ports(env)
-    assignments, errors = allocate(PORT_SPECS, current, host.is_free)
+    specs, _name = project_specs(own_dir)
+    current = _configured_ports(env, specs)
+    assignments, errors = allocate(specs, current, host.is_free)
 
-    moved = [
-        (v, current[v], assignments[v]) for v, _d in PORT_SPECS if assignments[v] != current[v]
-    ]
-    pinned = [var for var, _d in PORT_SPECS if var not in env]
+    moved = [(v, current[v], assignments[v]) for v, _d in specs if assignments[v] != current[v]]
+    pinned = [var for var, _d in specs if var not in env]
     for line in _host_notes(host):
         print(line)
-    defaults = dict(PORT_SPECS)
+    defaults = dict(specs)
     for var in errors:
         print(f"No free port near {defaults[var]} for {var}: set it by hand in .env")
     if not moved and not pinned:
@@ -791,7 +821,7 @@ def cmd_fix(args):
 
     backup = _backup(args.env)
     new_text = env_text
-    for var, _default in PORT_SPECS:
+    for var, _default in specs:
         if var in pinned or assignments[var] != current[var]:
             new_text = set_env(new_text, var, str(assignments[var]))
     new_text, warnings = sync_derived(new_text, current, assignments)
@@ -810,19 +840,20 @@ def cmd_assign_ports(args):
     `PORT VAR from to` (from = the carried-over value, else the default),
     `ERROR VAR default` when nothing near the default is free, and `NOTE text`."""
     env_text = _read(args.env)
-    before = _configured_ports(parse_env(env_text))
+    own_dir = os.path.realpath(args.project_dir)
+    specs, _name = project_specs(own_dir)
+    before = _configured_ports(parse_env(env_text), specs)
     current = {}
     for pair in args.current or []:
         var, _, value = pair.partition("=")
         current[var] = value
-    own_dir = os.path.realpath(args.project_dir)
     host = load_host(own_dir, effective_project(parse_env(env_text), os.environ, own_dir))
     if host.docker_error:
         # Can't see our own containers: keep carried-over ports rather than
         # bumping them away from what is probably our own stack.
         host.assumed_own = {p for p in map(_to_port, current.values()) if p}
-    assignments, errors = allocate(PORT_SPECS, current, host.is_free)
-    for var, default in PORT_SPECS:
+    assignments, errors = allocate(specs, current, host.is_free)
+    for var, default in specs:
         env_text = set_env(env_text, var, str(assignments[var]))
         if var in errors:
             print(f"ERROR {var} {default}")
