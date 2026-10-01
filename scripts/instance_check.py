@@ -11,12 +11,17 @@ file. `setup.sh` is a thin caller; run it directly for the same commands:
     python3 scripts/instance_check.py check          # read-only report
     python3 scripts/instance_check.py fix [--yes]    # move clashing ports
 
+The port variables, their defaults and the default SERVICE_NAME are read from
+this checkout's compose file (every `${X_PORT:-N}:<port>` mapping), so a fork
+with other services or ports uses this file unchanged.
+
 Exit codes: 0 clean; 1 collisions found (the check may also be incomplete, see
 its notes); 2 check incomplete and nothing found, or `fix` refused because
 Docker state is unavailable; 64 usage error.
 """
 
 import argparse
+import contextlib
 import errno
 import glob
 import json
@@ -24,32 +29,22 @@ import os
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 from collections import namedtuple
 
-# VAR, default. The value is the Docker host-published port; container ports are
-# pinned in docker-compose.yml. Order is the order ports are assigned in. The
-# real list is read from this checkout's compose file (`project_specs`), so a
-# fork with other services or defaults needs no edit here; this is the fallback.
-PORT_SPECS = [
-    ("POSTGRES_PORT", 5432),
-    ("REDIS_PORT", 6379),
-    ("ADMINER_PORT", 8080),
-    ("AI_API_PORT", 8000),
-    ("WHATSAPP_API_PORT", 3001),
-    ("WHATSAPP_CLOUD_PORT", 3002),
-    ("TELEGRAM_PORT", 3003),
-    ("WHISPER_PORT", 8771),
-]
 # Local-dev callback URLs that follow a client port.
 CLIENT_URLS = {
     "WHATSAPP_API_PORT": "WHATSAPP_CLIENT_URL",
     "WHATSAPP_CLOUD_PORT": "WHATSAPP_CLOUD_CLIENT_URL",
     "TELEGRAM_PORT": "TELEGRAM_CLIENT_URL",
 }
-DEFAULT_SERVICE_NAME = "aiagent"  # fallback; read from the compose file too
+# Lowercase words joined by single "-" or "_": always a valid container and
+# image name (a trailing "_" or "a__b" would make `<name>-api` an invalid tag).
+VALID_SERVICE_NAME = re.compile(r"^[a-z0-9]+([_-][a-z0-9]+)*$")
 COMPOSE_FILES = ("compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml")
 PORT_SPAN = 100
 
@@ -105,29 +100,85 @@ def parse_env(text):
     return env
 
 
+def _quote_and_tail(raw):
+    """(quote char, text after the value) of an assignment's right-hand side:
+    the tail is an inline comment, kept when the value is rewritten."""
+    stripped = raw.lstrip()
+    if stripped[:1] in ("'", '"'):
+        end = stripped.find(stripped[0], 1)
+        return stripped[0], ("" if end == -1 else stripped[end + 1 :])
+    comment = re.search(r"\s+#", stripped)
+    return "", (stripped[comment.start() :] if comment else "")
+
+
+def _needs_quotes(value):
+    # `$` too: Compose interpolates unquoted and double-quoted values.
+    return bool(re.search(r"\s#|^\s|\s$|^['\"]|\$", value))
+
+
+def _newline(text):
+    return "\r\n" if "\r\n" in text else "\n"
+
+
+def _append(text, line):
+    newline = _newline(text)
+    if text and not text.endswith("\n"):
+        text += newline
+    return text + line + newline
+
+
 def set_env(text, key, value):
     """Rewrite every assignment of KEY in place, or append one.
 
-    An `export ` prefix, the value's quote style and each line's own ending
-    (LF or CRLF) are kept; no other line is touched.
+    An `export ` prefix, the value's quote style, an inline comment and each
+    line's own ending (LF or CRLF) are kept; no other line is touched.
     """
     lines = text.splitlines(keepends=True)
-    newline = "\r\n" if "\r\n" in text else "\n"
     found = False
     for index, line in enumerate(lines):
         match = _ENV_LINE.match(_body(line))
         if not match or match.group(2) != key:
             continue
         found = True
-        old = match.group(3).strip()
-        quote = old[0] if old[:1] in ("'", '"') else ""
+        quote, tail = _quote_and_tail(match.group(3))
+        if not quote and _needs_quotes(value):
+            quote = '"' if "'" in value else "'"
         ending = line[len(_body(line)) :]
-        lines[index] = f"{match.group(1) or ''}{key}={quote}{value}{quote}{ending}"
-    if not found:
-        if lines and not lines[-1].endswith("\n"):
-            lines[-1] += newline
-        lines.append(f"{key}={value}{newline}")
-    return "".join(lines)
+        lines[index] = f"{match.group(1) or ''}{key}={quote}{value}{quote}{tail}{ending}"
+    if found:
+        return "".join(lines)
+    quote = ('"' if "'" in value else "'") if _needs_quotes(value) else ""
+    return _append(text, f"{key}={quote}{value}{quote}")
+
+
+def carry_env(new_text, old_text, skip=()):
+    """Bring every non-empty value of a previous .env into a fresh template copy.
+
+    Each line is copied verbatim (quoting and `$` escaping stay exactly as the
+    operator wrote them); keys the template lacks are appended. Returns
+    (text, kept, appended), where kept counts the values that differ from the
+    template's.
+    """
+    old = {}
+    for line in old_text.splitlines():
+        match = _ENV_LINE.match(line)
+        if match and match.group(2) not in skip and _unquote(match.group(3)):
+            old[match.group(2)] = line.strip()
+    template = parse_env(new_text)
+    lines = new_text.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        match = _ENV_LINE.match(_body(line))
+        if match and match.group(2) in old:
+            lines[index] = old[match.group(2)] + line[len(_body(line)) :]
+    text = "".join(lines)
+    extra = [key for key in old if key not in template]
+    if extra:
+        text = _append(text, "")
+        text = _append(text, "# Kept from the previous .env (not in .env.example)")
+        for key in extra:
+            text = _append(text, old[key])
+    changed = [key for key in old if key in template and parse_env(old[key])[key] != template[key]]
+    return text, len(changed), len(extra)
 
 
 def missing_keys(template_text, env_text):
@@ -294,6 +345,37 @@ def specs_from_compose(compose_text):
     return specs or None, name.group(1) if name else None
 
 
+def port_services(compose_text):
+    """{VAR_PORT: compose service} for every `${VAR_PORT:-N}:<port>` mapping."""
+    found, service, child_indent, in_services = {}, None, None, False
+    for line in compose_text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent == 0:
+            in_services = stripped == "services:"
+            service = None
+            continue
+        if not in_services:
+            continue
+        if child_indent is None:
+            child_indent = indent
+        if indent == child_indent:
+            match = re.match(r"([A-Za-z0-9._-]+):\s*$", stripped)
+            service = match.group(1) if match else None
+            continue
+        if service:
+            for var, _default in _PUBLISHED_PORT.findall(line):
+                found.setdefault(var, service)
+    return found
+
+
+def names_network(compose_text):
+    """True when the compose file names its network after SERVICE_NAME."""
+    return bool(re.search(r"name:\s*['\"]?\$\{SERVICE_NAME[^}]*\}-network", compose_text))
+
+
 def container_suffixes(compose_text):
     """Service suffixes of `container_name: ${SERVICE_NAME…}-<suffix>` lines."""
     return re.findall(
@@ -301,7 +383,9 @@ def container_suffixes(compose_text):
     )
 
 
-def name_conflicts(service_name, suffixes, containers, networks, image_project, own_dir, project):
+def name_conflicts(
+    service_name, suffixes, containers, networks, image_project, own_dir, project, network=True
+):
     """Things named after SERVICE_NAME that another compose project already owns.
 
     Returns (errors, warnings). The image is only a warning: its label records
@@ -320,7 +404,7 @@ def name_conflicts(service_name, suffixes, containers, networks, image_project, 
             where = f" ({container.working_dir})" if container.working_dir else ""
             errors.append(f"container '{container.name}' already exists, owned by {owner}{where}")
     network_name = f"{service_name}-network"
-    for network in networks:
+    for network in networks if network else ():
         if network.name == network_name and network.project != project:
             owner = network.project or "something outside compose"
             errors.append(f"network '{network_name}' already exists, owned by {owner}")
@@ -385,6 +469,8 @@ def sync_derived(env_text, old_ports, new_ports):
             env_text = set_env(env_text, "DATABASE_URL", url)
         else:
             warnings.append(f"DATABASE_URL does not point at localhost:{old}; update it by hand")
+    elif old and new and old != new:
+        warnings.append(f"DATABASE_URL is not set; local (non-Docker) dev must use port {new}")
     for port_var, url_var in CLIENT_URLS.items():
         old, new = old_ports.get(port_var), new_ports.get(port_var)
         if not old or not new or old == new:
@@ -473,7 +559,10 @@ def sibling_config(directory, config_files):
         base += ["-f", path]
     for profile in (["--profile", "*"], []):
         try:
-            out = _run([*base, *profile, "config", "--format", "json"], directory, env, 20)
+            # --no-env-resolution: a clone that was never configured has no
+            # .env, and `env_file: .env` would fail the whole render.
+            args = [*base, *profile, "config", "--no-env-resolution", "--format", "json"]
+            out = _run(args, directory, env, 20)
             return ports_from_config(json.loads(out), os.path.basename(directory))
         except (DockerUnavailable, ValueError):
             continue
@@ -608,28 +697,49 @@ def load_host(project_dir, project):
 
 
 def _read(path):
-    # newline="" keeps CRLF line endings intact.
-    with open(path, encoding="utf-8", newline="") as handle:
+    # newline="" keeps CRLF line endings intact; surrogateescape round-trips a
+    # .env that is not UTF-8 (e.g. Latin-1 comments) byte-for-byte.
+    with open(path, encoding="utf-8", errors="surrogateescape", newline="") as handle:
         return handle.read()
 
 
 def _write_env(path, text):
-    """Replace the file atomically. A symlinked .env stays a symlink: the file it
-    points at is the one replaced."""
+    """Replace the file atomically, keeping its mode (and owner, when root).
+    A symlinked .env stays a symlink: the file it points at is replaced."""
     target = os.path.realpath(path)
-    tmp = target + ".tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
-        handle.write(text)
-    os.replace(tmp, target)
+    try:
+        before = os.stat(target)
+    except FileNotFoundError:
+        before = None
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(target), prefix=".env.tmp.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape", newline="") as out:
+            out.write(text)
+        if before is not None:
+            os.chmod(tmp, stat.S_IMODE(before.st_mode))
+            if hasattr(os, "geteuid") and os.geteuid() == 0:
+                os.chown(tmp, before.st_uid, before.st_gid)
+        os.replace(tmp, target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 def _backup(path):
-    """Byte-for-byte copy of the current file, mode 600."""
-    backup = f"{path}.bak.{time.strftime('%Y%m%d-%H%M%S')}"
-    shutil.copyfile(os.path.realpath(path), backup)
-    os.chmod(backup, 0o600)
-    return backup
+    """Byte-for-byte copy of the current file, created mode 600 (never readable
+    by others, not even briefly)."""
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    for attempt in range(100):
+        backup = f"{path}.bak.{stamp}" + (f"-{attempt}" if attempt else "")
+        try:
+            fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            continue
+        with os.fdopen(fd, "wb") as out, open(os.path.realpath(path), "rb") as src:
+            shutil.copyfileobj(src, out)
+        return backup
+    raise FileExistsError(f"{path}.bak.{stamp}")
 
 
 def _compose_text(project_dir):
@@ -641,18 +751,21 @@ def _compose_text(project_dir):
 
 
 def project_specs(project_dir):
-    """(port specs, default SERVICE_NAME) of this checkout, else the fallbacks."""
+    """(port specs, default SERVICE_NAME) declared by this checkout's compose
+    file: ([], "") when there is none."""
     specs, name = specs_from_compose(_compose_text(project_dir))
-    return specs or PORT_SPECS, name or DEFAULT_SERVICE_NAME
+    return specs or [], name or ""
+
+
+def _no_compose(project_dir):
+    print(f"No compose file with `${{X_PORT:-N}}:<port>` mappings found in {project_dir}.")
+    print("Nothing to assign; set the ports in .env by hand.")
+    return EXIT_INCOMPLETE
 
 
 def _configured_ports(env, specs):
     """The port each variable resolves to: the .env value, else compose's default."""
     return {var: _to_port(env.get(var)) or default for var, default in specs}
-
-
-def _suffixes(project_dir):
-    return container_suffixes(_compose_text(project_dir))
 
 
 def _explicit_project(env):
@@ -693,35 +806,75 @@ def _guard_help(project, manual=True):
     ]
 
 
+def _pending_moves(host, compose_text, ports):
+    """Ports .env now configures differently from what this checkout's running
+    containers publish: applied (silently) by the next `docker compose up`."""
+    own, _foreign = partition(host.containers, host.own_dir, host.project)
+    notes = []
+    for var, service in port_services(compose_text).items():
+        for container in own:
+            if (
+                container.service == service
+                and container.ports
+                and ports[var] not in container.ports
+            ):
+                published = ", ".join(map(str, container.ports))
+                notes.append(
+                    f"{var}={ports[var]}, but this checkout's '{service}' container publishes "
+                    f"{published}: the next `docker compose up -d` moves it"
+                )
+    return notes
+
+
 def cmd_check(args):
     env_text = _read(args.env) if os.path.isfile(args.env) else ""
     env = parse_env(env_text)
     own_dir = os.path.realpath(args.project_dir)
     project = effective_project(env, os.environ, own_dir)
     host = load_host(own_dir, project)
+    compose_text = _compose_text(own_dir)
     specs, default_name = project_specs(own_dir)
-    service_name = env.get("SERVICE_NAME") or default_name
+    service_name = env.get("SERVICE_NAME") or default_name or "?"
     ports = _configured_ports(env, specs)
 
     print(f"Instance check: SERVICE_NAME '{service_name}', Compose project '{project}'")
     problems = 0
 
     clashes = host.clashes(ports)
+    # Without Docker, a port that is merely listening may be our own running
+    # stack: report it, but don't call it a collision (or suggest --fix).
+    unsure = {}
+    if host.docker_error:
+        for var, claims in list(clashes.items()):
+            if all(claim.source == "listening" for claim in claims):
+                unsure[var] = clashes.pop(var)
     if clashes:
         print("\nPort clashes:")
         for var, _default in specs:
             for claim in clashes.get(var, []):
                 problems += 1
                 print(f"  {var}={claim.port}: {describe_claim(claim)}")
+    if unsure:
+        print("\nPorts in use (possibly this checkout's own stack; Docker is unavailable):")
+        for var, _default in specs:
+            if var in unsure:
+                print(f"  {var}={ports[var]}")
+
+    pending = _pending_moves(host, compose_text, ports)
+    if pending:
+        print("\nPending port changes:")
+        for line in pending:
+            print("  " + line)
 
     errors, warnings = name_conflicts(
         service_name,
-        _suffixes(own_dir),
+        container_suffixes(compose_text),
         host.containers,
         host.networks,
         "" if host.docker_error else image_project(service_name),
         own_dir,
         project,
+        network=names_network(compose_text),
     )
     if errors:
         problems += len(errors)
@@ -730,6 +883,10 @@ def cmd_check(args):
             print("  " + line)
 
     notes = list(warnings)
+    if not specs:
+        notes.append(
+            f"no compose file with `${{X_PORT:-N}}:<port>` mappings in {own_dir}: ports not checked"
+        )
     status, reason = project_guard(
         project,
         _explicit_project(env),
@@ -769,7 +926,7 @@ def cmd_check(args):
         if clashes:
             print("\nRun ./setup.sh --fix to move the clashing ports.")
         return EXIT_CLASH
-    if host.incomplete:
+    if host.incomplete or not specs:
         print("\nNo collisions found, but the check is incomplete (see notes).")
         return EXIT_INCOMPLETE
     print("\nNo collisions found.")
@@ -792,6 +949,8 @@ def cmd_fix(args):
         print("from other projects' without Docker. Nothing changed.")
         return EXIT_INCOMPLETE
     specs, _name = project_specs(own_dir)
+    if not specs:
+        return _no_compose(own_dir)
     current = _configured_ports(env, specs)
     assignments, errors = allocate(specs, current, host.is_free)
 
@@ -842,6 +1001,8 @@ def cmd_assign_ports(args):
     env_text = _read(args.env)
     own_dir = os.path.realpath(args.project_dir)
     specs, _name = project_specs(own_dir)
+    if not specs:
+        return _no_compose(own_dir)
     before = _configured_ports(parse_env(env_text), specs)
     current = {}
     for pair in args.current or []:
@@ -849,9 +1010,11 @@ def cmd_assign_ports(args):
         current[var] = value
     host = load_host(own_dir, effective_project(parse_env(env_text), os.environ, own_dir))
     if host.docker_error:
-        # Can't see our own containers: keep carried-over ports rather than
-        # bumping them away from what is probably our own stack.
-        host.assumed_own = {p for p in map(_to_port, current.values()) if p}
+        # Can't see our own containers: keep the ports this checkout would use
+        # (carried over, else the compose defaults) rather than bumping them
+        # away from what is probably our own running stack.
+        host.assumed_own = {_to_port(current.get(var)) or default for var, default in specs}
+        print("NOTE Docker is unavailable: ports this checkout would use are kept")
     assignments, errors = allocate(specs, current, host.is_free)
     for var, default in specs:
         env_text = set_env(env_text, var, str(assignments[var]))
@@ -867,20 +1030,28 @@ def cmd_assign_ports(args):
 
 
 def cmd_check_name(args):
+    if not VALID_SERVICE_NAME.match(args.name):
+        print(
+            f"ERROR '{args.name}' is not a valid name: lowercase letters and digits, "
+            "joined by single '-' or '_'"
+        )
+        return EXIT_CLASH
     env = parse_env(_read(args.env)) if os.path.isfile(args.env) else {}
     own_dir = os.path.realpath(args.project_dir)
+    compose_text = _compose_text(own_dir)
     try:
         containers, _volumes, networks = docker_state()
     except DockerUnavailable:
         return EXIT_OK
     errors, warnings = name_conflicts(
         args.name,
-        _suffixes(own_dir),
+        container_suffixes(compose_text),
         containers,
         networks,
         image_project(args.name),
         own_dir,
         effective_project(env, os.environ, own_dir),
+        network=names_network(compose_text),
     )
     for line in errors:
         print("ERROR " + line)
@@ -930,6 +1101,20 @@ def cmd_set(args):
     return EXIT_OK
 
 
+def cmd_backup(args):
+    """Byte copy of .env (mode 600); prints its path."""
+    print(_backup(args.env))
+    return EXIT_OK
+
+
+def cmd_carry(args):
+    """Bring the previous .env's values into the fresh template copy at --env."""
+    text, kept, appended = carry_env(_read(args.env), _read(args.previous), args.skip or ())
+    _write_env(args.env, text)
+    print(f"{kept} {appended}")
+    return EXIT_OK
+
+
 class _Parser(argparse.ArgumentParser):
     def error(self, message):
         self.print_usage(sys.stderr)
@@ -967,6 +1152,11 @@ def main(argv=None):
     setter.add_argument("key")
     setter.add_argument("value")
     setter.set_defaults(func=cmd_set)
+    sub.add_parser("backup").set_defaults(func=cmd_backup)
+    carry = sub.add_parser("carry")
+    carry.add_argument("previous", help="the previous .env (e.g. its backup)")
+    carry.add_argument("--skip", action="append", metavar="KEY")
+    carry.set_defaults(func=cmd_carry)
     args = parser.parse_args(argv)
     args.env = args.env or os.path.join(args.project_dir, ".env")
     args.template = args.template or os.path.join(args.project_dir, ".env.example")

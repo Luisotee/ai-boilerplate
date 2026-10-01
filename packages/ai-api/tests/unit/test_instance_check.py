@@ -83,12 +83,22 @@ class TestEnvFile:
     def test_set_keeps_export_quotes_and_crlf(self):
         text = 'export P=5440\r\nQ="8000" # api\r\nR=1\r\n'
         text = ic.set_env(ic.set_env(text, "P", "5441"), "Q", "8001")
-        assert text == 'export P=5441\r\nQ="8001"\r\nR=1\r\n'
+        assert text == 'export P=5441\r\nQ="8001" # api\r\nR=1\r\n'
         assert ic.set_env(text, "NEW", "1").endswith("R=1\r\nNEW=1\r\n")
 
     def test_set_appends_when_missing(self):
         assert ic.set_env("X=1", "P", "2") == "X=1\nP=2\n"
         assert ic.set_env("", "P", "2") == "P=2\n"
+
+    def test_set_keeps_an_inline_comment(self):
+        assert ic.set_env("X=1  # note\n", "X", "2") == "X=2  # note\n"
+
+    def test_set_quotes_a_value_that_would_misparse(self):
+        text = ic.set_env("X=1\n", "X", "a # b")
+        assert text == "X='a # b'\n" and ic.parse_env(text) == {"X": "a # b"}
+
+    def test_set_quotes_a_dollar_so_compose_does_not_interpolate(self):
+        assert ic.set_env("U=\n", "U", "pg://a:p$w@h/db") == "U='pg://a:p$w@h/db'\n"
 
     def test_set_value_is_literal(self):
         assert ic.set_env("U=old\n", "U", r"a\1b") == "U=a\\1b\n"
@@ -407,13 +417,41 @@ class TestSyncDerived:
 
 # ── Commands, against an injected host ─────────────────────────────────────
 
-ALL_PORTS = "".join(f"{var}={default}\n" for var, default in ic.PORT_SPECS)
+# The boilerplate's own ports; the `project` fixture declares them in a compose file.
+SPECS = [
+    ("POSTGRES_PORT", 5432),
+    ("REDIS_PORT", 6379),
+    ("ADMINER_PORT", 8080),
+    ("AI_API_PORT", 8000),
+    ("WHATSAPP_API_PORT", 3001),
+    ("WHATSAPP_CLOUD_PORT", 3002),
+    ("TELEGRAM_PORT", 3003),
+    ("WHISPER_PORT", 8771),
+]
+SERVICES = [
+    "postgres",
+    "redis",
+    "adminer",
+    "api",
+    "whatsapp",
+    "whatsapp-cloud",
+    "telegram",
+    "whisper",
+]
+COMPOSE = "services:\n" + "".join(
+    f"  {service}:\n"
+    f"    container_name: ${{SERVICE_NAME:-aiagent}}-{service}\n"
+    f"    ports:\n      - '127.0.0.1:${{{var}:-{port}}}:{port}'\n"
+    for service, (var, port) in zip(SERVICES, SPECS, strict=True)
+)
+ALL_PORTS = "".join(f"{var}={default}\n" for var, default in SPECS)
 
 
 @pytest.fixture
 def project(tmp_path, monkeypatch):
     """A checkout directory with a .env and template; Docker-free commands."""
     (tmp_path / ".env.example").write_text("SERVICE_NAME=aiagent\n" + ALL_PORTS)
+    (tmp_path / "docker-compose.yml").write_text(COMPOSE)
     monkeypatch.setattr(ic, "image_project", lambda _name: "")
     monkeypatch.delenv("COMPOSE_PROJECT_NAME", raising=False)
 
@@ -560,8 +598,20 @@ class TestProjectSpecs:
         assert name == env["SERVICE_NAME"]
         assert {var: str(port) for var, port in specs} == {var: env.get(var) for var, _ in specs}
 
-    def test_no_compose_file_uses_the_fallbacks(self, tmp_path):
-        assert ic.project_specs(str(tmp_path)) == (ic.PORT_SPECS, ic.DEFAULT_SERVICE_NAME)
+    def test_fixture_compose_declares_the_boilerplate_ports(self, project):
+        assert ic.project_specs(str(project)) == (SPECS, "aiagent")
+
+    def test_no_compose_file_means_nothing_declared(self, tmp_path):
+        assert ic.project_specs(str(tmp_path)) == ([], "")
+
+    def test_fix_and_assign_refuse_without_a_compose_file(self, project, capsys):
+        (project / "docker-compose.yml").unlink()
+        (project / ".env").write_text(ALL_PORTS)
+        assert _main(project, "fix", "--yes") == ic.EXIT_INCOMPLETE
+        assert _main(project, "assign-ports") == ic.EXIT_INCOMPLETE
+        assert (project / ".env").read_text() == ALL_PORTS
+        assert "TELEGRAM_PORT" not in capsys.readouterr().out
+        assert _main(project, "check") == ic.EXIT_INCOMPLETE
 
     def test_fix_uses_the_fork_ports_and_only_their_urls(self, project, use_host, capsys):
         (project / "docker-compose.yml").write_text(
@@ -600,6 +650,13 @@ class TestCmdAssignPorts:
         assert "PORT AI_API_PORT 9000 9000" in out
         assert "NOTE Docker state unavailable" in out
 
+    def test_without_docker_and_no_carried_ports_the_defaults_stay(self, project, use_host, capsys):
+        (project / ".env").write_text("SERVICE_NAME=aiagent\n")
+        use_host(ic.Host(str(project), docker_error="down", listening=lambda p: p in (8000, 3001)))
+        _main(project, "assign-ports")
+        out = capsys.readouterr().out
+        assert "PORT AI_API_PORT 8000 8000" in out and "PORT WHATSAPP_API_PORT 3001 3001" in out
+
 
 class TestGetSet:
     def test_get_and_set(self, project, capsys):
@@ -631,6 +688,7 @@ class TestSiblingConfig:
         assert cwd == "/srv/sib"
         assert args[:4] == ["docker", "compose", "-f", "/srv/sib/docker-compose.yml"]
         assert ["--profile", "*"] == args[4:6]
+        assert "--no-env-resolution" in args
         assert "AI_API_PORT" not in env and "COMPOSE_PROJECT_NAME" not in env
         assert env["DOCKER_HOST"] == "unix:///x"
         assert set(env) <= {"PATH", "HOME"} | {k for k in env if k.startswith("DOCKER_")}
@@ -651,3 +709,119 @@ def test_write_keeps_secrets_private(tmp_path):
     path = tmp_path / ".env"
     ic._write_env(str(path), "A=1\n")
     assert oct(os.stat(path).st_mode & 0o777) == "0o600"
+    assert os.listdir(tmp_path) == [".env"]
+
+
+def test_write_keeps_the_existing_mode(tmp_path):
+    path = tmp_path / ".env"
+    path.write_text("A=1\n")
+    path.chmod(0o640)
+    ic._write_env(str(path), "A=2\n")
+    assert oct(os.stat(path).st_mode & 0o777) == "0o640" and path.read_text() == "A=2\n"
+
+
+def test_latin1_env_round_trips(tmp_path):
+    path = tmp_path / ".env"
+    original = "# configura\xe7\xe3o\nAI_API_PORT=8000\n".encode("latin-1")
+    path.write_bytes(original)
+    ic._write_env(str(path), ic.set_env(ic._read(str(path)), "AI_API_PORT", "8002"))
+    assert path.read_bytes() == original.replace(b"8000", b"8002")
+
+
+def test_backup_never_overwrites_and_is_private(tmp_path):
+    path = tmp_path / ".env"
+    path.write_bytes(b"S=1\n")
+    first, second = ic._backup(str(path)), ic._backup(str(path))
+    assert first != second
+    for backup in (first, second):
+        assert open(backup, "rb").read() == b"S=1\n"
+        assert oct(os.stat(backup).st_mode & 0o777) == "0o600"
+
+
+class TestCarry:
+    def test_values_lines_and_extras_are_kept(self):
+        template = "# db\nPOSTGRES_PASSWORD=\nAI_API_PORT=8000\nNEW_KEY=default\nEMPTY=\n"
+        old = (
+            "POSTGRES_PASSWORD='pa$$ # x'\n"
+            "export AI_API_PORT=8002\n"
+            "EMPTY=\n"
+            "WHITELIST_PHONES=5511999\n"
+            "DATABASE_URL=postgresql://a:b@localhost:5432/c\n"
+            "OLD_ONLY=1 # note\n"
+        )
+        text, kept, appended = ic.carry_env(template, old, skip=("DATABASE_URL",))
+        assert (kept, appended) == (2, 2)
+        assert text == (
+            "# db\nPOSTGRES_PASSWORD='pa$$ # x'\nexport AI_API_PORT=8002\nNEW_KEY=default\nEMPTY=\n"
+            "\n# Kept from the previous .env (not in .env.example)\n"
+            "WHITELIST_PHONES=5511999\nOLD_ONLY=1 # note\n"
+        )
+        assert ic.parse_env(text)["POSTGRES_PASSWORD"] == "pa$$ # x"
+
+    def test_crlf_template_and_last_assignment_wins(self):
+        text, kept, appended = ic.carry_env("A=\r\nB=x\r\n", "A=1\nA=2\n")
+        assert text == "A=2\r\nB=x\r\n" and (kept, appended) == (1, 0)
+
+    def test_command(self, project, capsys):
+        (project / ".env").write_text("A=\nB=\n")
+        previous = project / ".env.bak.1"
+        previous.write_text("A=1\nC=3\n")
+        assert _main(project, "carry", str(previous)) == ic.EXIT_OK
+        assert capsys.readouterr().out == "1 1\n"
+        assert ic.parse_env((project / ".env").read_text()) == {"A": "1", "B": "", "C": "3"}
+
+
+class TestComposeText:
+    def test_port_services(self):
+        assert ic.port_services(COMPOSE)["WHATSAPP_API_PORT"] == "whatsapp"
+        assert ic.port_services(COMPOSE)["POSTGRES_PORT"] == "postgres"
+        assert ic.port_services("x:\n  a:\n    - '${A_PORT:-1}:1'\n") == {}
+
+    def test_network_check_follows_the_compose_file(self):
+        assert ic.names_network("networks:\n  n:\n    name: ${SERVICE_NAME:-aiagent}-network\n")
+        assert not ic.names_network("networks:\n  curupira-network:\n    driver: bridge\n")
+        owned = [ic.Resource("mybot-network", "other")]
+        assert ic.name_conflicts("mybot", [], [], owned, "", OWN, "p", network=False) == ([], [])
+        assert ic.name_conflicts("mybot", [], [], owned, "", OWN, "p")[0]
+
+
+class TestCheckEdges:
+    def test_pending_move_of_a_running_container(self, project, use_host, capsys):
+        (project / ".env").write_text(
+            ALL_PORTS.replace("WHATSAPP_API_PORT=3001", "WHATSAPP_API_PORT=3005")
+        )
+        ours = _inspect("aiagent-whatsapp", project.name, str(project), _bind(3001), "whatsapp")
+        use_host(ic.Host(str(project), project.name, _containers(ours), listening=lambda _p: False))
+        assert _main(project, "check") == ic.EXIT_OK
+        out = capsys.readouterr().out
+        assert (
+            "WHATSAPP_API_PORT=3005, but this checkout's 'whatsapp' container publishes 3001" in out
+        )
+
+    def test_without_docker_listening_ports_are_not_collisions(self, project, use_host, capsys):
+        (project / ".env").write_text(ALL_PORTS)
+        use_host(ic.Host(str(project), docker_error="down", listening=lambda p: p == 8000))
+        assert _main(project, "check") == ic.EXIT_INCOMPLETE
+        out = capsys.readouterr().out
+        assert "possibly this checkout's own stack" in out and "AI_API_PORT=8000" in out
+        assert "--fix" not in out
+
+    def test_without_docker_a_declared_clash_still_counts(self, project, use_host):
+        (project / ".env").write_text(ALL_PORTS)
+        host = ic.Host(str(project), declared=[_foreign_on(8000)], docker_error="down")
+        use_host(host)
+        assert _main(project, "check") == ic.EXIT_CLASH
+
+    @pytest.mark.parametrize("name", ["bot_", "a__b", "Bot", "a-", "a b"])
+    def test_invalid_service_names(self, project, name, capsys):
+        assert _main(project, "check-name", name) == ic.EXIT_CLASH
+        assert capsys.readouterr().out.startswith("ERROR ")
+
+    def test_fix_warns_when_database_url_is_not_set(self, project, use_host, capsys):
+        (project / ".env").write_text(ALL_PORTS)
+        use_host(ic.Host(str(project), declared=[_foreign_on(5432)], listening=lambda _p: False))
+        assert _main(project, "fix", "--yes") == ic.EXIT_OK
+        assert (
+            "DATABASE_URL is not set; local (non-Docker) dev must use port 5433"
+            in capsys.readouterr().out
+        )

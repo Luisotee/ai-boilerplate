@@ -59,14 +59,14 @@ docker compose logs --tail=50 api       # Last 50 lines
 curl -s http://localhost:8000/health     # AI API
 curl -s http://localhost:3001/health     # WhatsApp (Baileys)
 curl -s http://localhost:3002/health     # WhatsApp Cloud (requires --profile cloud)
-docker exec aiagent-postgres pg_isready -U aiagent
-docker exec aiagent-redis redis-cli ping
+docker compose exec postgres pg_isready -U aiagent
+docker compose exec redis redis-cli ping
 ```
 
 ### Database access
 ```bash
 # Adminer GUI: http://localhost:8080 (requires --profile dev)
-docker exec -it aiagent-postgres psql -U aiagent -d aiagent
+docker compose exec postgres psql -U aiagent -d aiagent
 ```
 
 ### Rebuild after code changes

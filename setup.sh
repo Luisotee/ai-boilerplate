@@ -46,6 +46,33 @@ env_value() {
   instance_check --env "$ENV_FILE" get "$1"
 }
 
+# Ask for KEY: ask_value KEY DEFAULT HINT [secret]. Enter keeps the value already
+# in .env (carried over from the previous .env on a re-run), else takes DEFAULT.
+# A changed value is written to .env; a kept one leaves its line untouched.
+# Sets ANSWER.
+ask_value() {
+  local key="$1" default="$2" hint="$3" hidden="${4:-}" current input
+  current=$(env_value "$key")
+  if [ -n "$current" ]; then
+    hint="Enter to keep the current one"
+  fi
+  if [ -n "$hidden" ]; then
+    read -rsp "  ${key}${hint:+ ($hint)}: " input
+    echo
+  else
+    read -rp "  ${key}${hint:+ ($hint)}: " input
+  fi
+  input=$(sanitize "$input")
+  if [ -z "$input" ] && [ -n "$current" ]; then
+    ANSWER="$current"
+    return 0
+  fi
+  ANSWER="${input:-$default}"
+  if [ -n "$ANSWER" ]; then
+    instance_check --env "$ENV_FILE" set "$key" "$ANSWER"
+  fi
+}
+
 # Compare semantic versions with sort -V; returns 0 if $2 >= $3.
 check_min_version() {
   local name="$1" current="$2" minimum="$3"
@@ -188,38 +215,40 @@ if [ "$SKIP_ENV" = false ]; then
     exit 1
   fi
 
-  # Carry the project's identity over an overwrite, read BEFORE the copy: the
-  # ports it already uses (kept while still free), its SERVICE_NAME, the *_BIND
-  # addresses (dropping one would republish a port on every interface), and a
-  # hand-set COMPOSE_PROJECT_NAME — losing that one would switch the stack to
-  # new, empty volumes.
-  OLD_SERVICE_NAME=$(env_value SERVICE_NAME)
-  if [[ ! "$OLD_SERVICE_NAME" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
-    OLD_SERVICE_NAME=""
-  fi
-  CARRY_KEYS=(COMPOSE_PROJECT_NAME AI_API_BIND WHATSAPP_API_BIND WHATSAPP_CLOUD_BIND TELEGRAM_BIND)
-  CARRY_VALUES=()
-  for key in "${CARRY_KEYS[@]}"; do
-    CARRY_VALUES+=("$(env_value "$key")")
-  done
+  # Re-running over an existing .env: keep a byte copy (mode 600), then carry
+  # its values into the fresh template — passwords, keys, whitelist, ports,
+  # *_BIND, COMPOSE_PROJECT_NAME (dropping that one would switch the stack to
+  # new, empty volumes) — so a re-run reconfigures instead of resetting. The
+  # prompts below default to the carried values; DATABASE_URL is rebuilt.
+  PREVIOUS_ENV=""
+  OLD_SERVICE_NAME=""
   CURRENT_PORT_ARGS=()
-  for var in POSTGRES_PORT REDIS_PORT ADMINER_PORT AI_API_PORT WHATSAPP_API_PORT \
-    WHATSAPP_CLOUD_PORT TELEGRAM_PORT WHISPER_PORT; do
-    old_port=$(env_value "$var")
-    if [ -n "$old_port" ]; then
-      CURRENT_PORT_ARGS+=(--current "$var=$old_port")
+  if [ -f "$ENV_FILE" ]; then
+    PREVIOUS_ENV=$(instance_check --env "$ENV_FILE" backup)
+    OLD_SERVICE_NAME=$(env_value SERVICE_NAME)
+    if [[ ! "$OLD_SERVICE_NAME" =~ ^[a-z0-9]+([_-][a-z0-9]+)*$ ]]; then
+      OLD_SERVICE_NAME=""
     fi
-  done
+    for var in POSTGRES_PORT REDIS_PORT ADMINER_PORT AI_API_PORT WHATSAPP_API_PORT \
+      WHATSAPP_CLOUD_PORT TELEGRAM_PORT WHISPER_PORT; do
+      old_port=$(env_value "$var")
+      if [ -n "$old_port" ]; then
+        CURRENT_PORT_ARGS+=(--current "$var=$old_port")
+      fi
+    done
+  fi
 
   cp "$ENV_EXAMPLE" "$ENV_FILE"
   chmod 600 "$ENV_FILE"
   print_success "Copied .env.example → .env (mode 600)"
-  for i in "${!CARRY_KEYS[@]}"; do
-    if [ -n "${CARRY_VALUES[$i]}" ]; then
-      instance_check --env "$ENV_FILE" set "${CARRY_KEYS[$i]}" "${CARRY_VALUES[$i]}"
-      print_success "Kept ${CARRY_KEYS[$i]}=${CARRY_VALUES[$i]}"
+  if [ -n "$PREVIOUS_ENV" ]; then
+    print_success "Backed up the previous .env to $PREVIOUS_ENV"
+    read -r KEPT APPENDED <<< "$(instance_check --env "$ENV_FILE" carry "$PREVIOUS_ENV" --skip DATABASE_URL)"
+    print_success "Kept $KEPT customised value(s) from the previous .env"
+    if [ "$APPENDED" -gt 0 ]; then
+      print_warning "$APPENDED key(s) not in .env.example were kept at the end of .env"
     fi
-  done
+  fi
 
   # Fail fast if .env.example is missing any key this script writes to —
   # otherwise sed substitutions silently no-op and the user ends up with a
@@ -257,23 +286,31 @@ if [ "$SKIP_ENV" = false ]; then
     read -rp "  SERVICE_NAME (Enter for '$DEFAULT_SERVICE_NAME'): " SERVICE_NAME
     SERVICE_NAME=$(sanitize "${SERVICE_NAME:-$DEFAULT_SERVICE_NAME}")
     SERVICE_NAME=$(printf '%s' "$SERVICE_NAME" | tr '[:upper:]' '[:lower:]')
-    if [[ ! "$SERVICE_NAME" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
-      print_error "Invalid name — must start with a letter/digit and contain only a-z 0-9 _ -"
+    # Words of a-z 0-9 joined by single '-' or '_': anything else (a trailing
+    # '_', 'a__b') makes an invalid image name and fails at `compose up --build`.
+    if [[ ! "$SERVICE_NAME" =~ ^[a-z0-9]+([_-][a-z0-9]+)*$ ]]; then
+      print_error "Invalid name — lowercase letters/digits, joined by single '-' or '_'"
       continue
     fi
-    # Refuse a name another compose project on this host already uses.
-    NAME_OK=true
-    NAME_REPORT=$(instance_check check-name "$SERVICE_NAME") || NAME_OK=false
+    # Refuse a name another compose project on this host already uses. Only an
+    # ERROR line means "taken": a failing helper must not reject every name.
+    NAME_STATUS=0
+    NAME_REPORT=$(instance_check check-name "$SERVICE_NAME" 2>&1) || NAME_STATUS=$?
+    NAME_TAKEN=false
     while IFS= read -r line; do
       case "$line" in
-        ERROR\ *) print_error "${line#ERROR }" ;;
+        ERROR\ *) print_error "${line#ERROR }"; NAME_TAKEN=true ;;
         WARN\ *) print_warning "${line#WARN }" ;;
       esac
     done <<< "$NAME_REPORT"
-    if [ "$NAME_OK" = true ]; then
-      break
+    if [ "$NAME_TAKEN" = true ]; then
+      print_error "Choose another name"
+      continue
     fi
-    print_error "'$SERVICE_NAME' is taken on this host — choose another name"
+    if [ "$NAME_STATUS" -ne 0 ]; then
+      print_warning "Name check failed (exit $NAME_STATUS) — '$SERVICE_NAME' not verified; run ./setup.sh --check later"
+    fi
+    break
   done
   sed -i "s|^SERVICE_NAME=.*|SERVICE_NAME=$(escape_sed "$SERVICE_NAME")|" "$ENV_FILE"
   print_success "Service name set to '$SERVICE_NAME'"
@@ -370,24 +407,18 @@ if [ "$SKIP_ENV" = false ]; then
   echo "  These are needed to run the project. Press Enter to auto-generate where possible."
   echo ""
 
-  # Postgres password
-  DEFAULT_PG_PASS=$(generate_password)
-  read -rp "  POSTGRES_PASSWORD (Enter to auto-generate): " PG_PASS
-  PG_PASS=$(sanitize "${PG_PASS:-$DEFAULT_PG_PASS}")
-
-  # Redis password
-  DEFAULT_REDIS_PASS=$(generate_password)
-  read -rp "  REDIS_PASSWORD (Enter to auto-generate): " REDIS_PASS
-  REDIS_PASS=$(sanitize "${REDIS_PASS:-$DEFAULT_REDIS_PASS}")
+  # Passwords: on a re-run, keep the current ones — the database volume was
+  # initialised with them, and a new one would lock api/worker out.
+  ask_value POSTGRES_PASSWORD "$(generate_password)" "Enter to auto-generate"
+  PG_PASS="$ANSWER"
+  ask_value REDIS_PASSWORD "$(generate_password)" "Enter to auto-generate"
 
   # Gemini API key
   echo ""
   echo -e "  ${YELLOW}Get your Gemini API key at: https://aistudio.google.com/apikey${NC}"
   while true; do
-    read -rsp "  GEMINI_API_KEY: " GEMINI_KEY
-    echo
-    GEMINI_KEY=$(sanitize "$GEMINI_KEY")
-    if [ -n "$GEMINI_KEY" ]; then
+    ask_value GEMINI_API_KEY "" "" secret
+    if [ -n "$ANSWER" ]; then
       break
     fi
     print_error "Gemini API key is required"
@@ -396,8 +427,7 @@ if [ "$SKIP_ENV" = false ]; then
   echo ""
   echo "  Chat model. The default is Google's cheapest tier; change it any time in"
   echo "  .env, or live via PATCH /admin/settings (no restart needed)."
-  read -rp "  GEMINI_MODEL (Enter for 'gemini-3.1-flash-lite'): " GEMINI_MODEL_IN
-  GEMINI_MODEL_IN=$(sanitize "${GEMINI_MODEL_IN:-gemini-3.1-flash-lite}")
+  ask_value GEMINI_MODEL "gemini-3.1-flash-lite" "Enter for 'gemini-3.1-flash-lite'"
 
   # Optional: DeepSeek as the primary model (Gemini becomes the fallback).
   # Deliberately NOT in REQUIRED_KEYS — without it the agent runs on Gemini alone.
@@ -423,13 +453,8 @@ if [ "$SKIP_ENV" = false ]; then
   # Inter-service auth keys
   echo ""
   echo "  Inter-service authentication keys (used internally between services)."
-  DEFAULT_AI_KEY=$(generate_hex_key)
-  read -rp "  AI_API_KEY (Enter to auto-generate): " AI_KEY
-  AI_KEY=$(sanitize "${AI_KEY:-$DEFAULT_AI_KEY}")
-
-  DEFAULT_WA_KEY=$(generate_hex_key)
-  read -rp "  WHATSAPP_API_KEY (Enter to auto-generate): " WA_KEY
-  WA_KEY=$(sanitize "${WA_KEY:-$DEFAULT_WA_KEY}")
+  ask_value AI_API_KEY "$(generate_hex_key)" "Enter to auto-generate"
+  ask_value WHATSAPP_API_KEY "$(generate_hex_key)" "Enter to auto-generate"
 
   # Construct DATABASE_URL — read defaults from .env.example so customizing
   # POSTGRES_USER/POSTGRES_DB there stays in sync.
@@ -442,16 +467,15 @@ if [ "$SKIP_ENV" = false ]; then
   # postgres:5432 internally, so this only affects host-side connections.
   DATABASE_URL="postgresql://${PG_USER}:${PG_PASS}@localhost:${PG_PORT}/${PG_DB}"
 
-  # Write values to .env
-  sed -i "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$(escape_sed "$PG_PASS")|" "$ENV_FILE"
-  sed -i "s|^REDIS_PASSWORD=.*|REDIS_PASSWORD=$(escape_sed "$REDIS_PASS")|" "$ENV_FILE"
-  sed -i "s|^GEMINI_API_KEY=.*|GEMINI_API_KEY=$(escape_sed "$GEMINI_KEY")|" "$ENV_FILE"
-  sed -i "s|^GEMINI_MODEL=.*|GEMINI_MODEL=$(escape_sed "$GEMINI_MODEL_IN")|" "$ENV_FILE"
-  sed -i "s|^AI_API_KEY=.*|AI_API_KEY=$(escape_sed "$AI_KEY")|" "$ENV_FILE"
-  sed -i "s|^WHATSAPP_API_KEY=.*|WHATSAPP_API_KEY=$(escape_sed "$WA_KEY")|" "$ENV_FILE"
-  sed -i "s|^DATABASE_URL=.*|DATABASE_URL=$(escape_sed "$DATABASE_URL")|" "$ENV_FILE"
+  # The secrets above were written by ask_value; `set` quotes a value with `$`
+  # or ` #` so Compose reads it back verbatim.
+  instance_check --env "$ENV_FILE" set DATABASE_URL "$DATABASE_URL"
 
   print_success "Required secrets configured"
+  if [ -n "$PREVIOUS_ENV" ]; then
+    echo ""
+    echo "  Values from the previous .env were kept: answering 'n' below leaves them as they are."
+  fi
 
   # ── Optional: Cloud API ───────────────────────────────
   echo ""

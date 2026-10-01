@@ -73,7 +73,7 @@ Key facts that won't change:
    ```
 3. **Provide the execution command**:
    ```bash
-   docker exec -it aiagent-postgres psql -U aiagent -d aiagent -c "SQL HERE"   # container is <SERVICE_NAME>-postgres (see .env)
+   docker compose exec postgres psql -U aiagent -d aiagent -c "SQL HERE"   # run in the checkout: targets this bot's postgres
    ```
 
 ### Creating indexes
@@ -133,5 +133,5 @@ Before starting any schema work, check your memory for recent changes that might
 Provide a summary of changes made:
 - Files modified (with paths)
 - The ALTER TABLE SQL to execute
-- The `docker exec` command ready to copy-paste
+- The `docker compose exec` command ready to copy-paste
 - Any follow-up steps (e.g. backfill data, create indexes, restart services)

@@ -162,7 +162,7 @@ Profiles are opt-in: without `--profile`, Adminer, the Cloud API client, and the
 
 ### Several bots on one server
 
-Each checkout needs its own `SERVICE_NAME` (container, network and image names) and its own host ports. `./setup.sh` takes care of both: it refuses a name another compose project already uses and picks ports that are free — counting other projects' stopped stacks and not-yet-started profiles, not just what is listening right now. Run `./setup.sh --check` on an existing deployment to see clashes and `./setup.sh --fix` to move the clashing ports (it keeps a byte-for-byte backup, changes only ports and the local-dev URLs that embed them, and refuses to run while Docker is unreachable). Re-running `./setup.sh` and overwriting `.env` keeps `SERVICE_NAME`, `COMPOSE_PROJECT_NAME`, the `*_BIND` addresses and the current ports.
+Each checkout needs its own `SERVICE_NAME` (container, network and image names) and its own host ports. `./setup.sh` takes care of both: it refuses a name another compose project already uses and picks ports that are free — counting other projects' stopped stacks and not-yet-started profiles, not just what is listening right now. Run `./setup.sh --check` on an existing deployment to see clashes and `./setup.sh --fix` to move the clashing ports (it keeps a byte-for-byte backup, changes only ports and the local-dev URLs that embed them, and refuses to run while Docker is unreachable). Re-running `./setup.sh` and overwriting `.env` backs the old file up and keeps its values — passwords, keys, whitelist, ports, `SERVICE_NAME`, `COMPOSE_PROJECT_NAME`, `*_BIND` — pressing Enter at a prompt keeps the current value.
 
 Volumes belong to the Compose project, which is named after the checkout's **directory**. Clone each bot into a differently named directory (or set `COMPOSE_PROJECT_NAME` before the first start); never change it afterwards, or the stack starts with empty volumes. A stopped bot that is not in a neighbouring directory can be included in the check with `SIBLING_DIRS=/path/a:/path/b ./setup.sh --check`.
 
@@ -277,7 +277,7 @@ pnpm format          # Format all code
 
 ### Database Access
 - **Adminer GUI:** http://localhost:8080 (postgres / aiagent / changeme)
-- **Direct:** `docker exec -it aiagent-postgres psql -U aiagent -d aiagent` (the container is `<SERVICE_NAME>-postgres`; substitute yours if you changed `SERVICE_NAME`)
+- **Direct:** `docker compose exec postgres psql -U aiagent -d aiagent` (run in the checkout; it reaches this bot's database whatever `SERVICE_NAME` is)
 
 ## Configuration
 

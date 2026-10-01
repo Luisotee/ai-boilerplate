@@ -8,7 +8,7 @@
 -- default credentials — substitute your POSTGRES_USER / POSTGRES_DB if you
 -- changed them):
 --
---   docker exec -i aiagent-postgres psql -U aiagent -d aiagent \
+--   docker compose exec -T postgres psql -U aiagent -d aiagent \
 --     < packages/ai-api/docs/migrations/2026-09-25-broadcast.sql
 --
 -- Safe to re-run (every statement is IF NOT EXISTS).
