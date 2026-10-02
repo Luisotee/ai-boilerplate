@@ -109,6 +109,7 @@ One human on WhatsApp and Telegram can share one `users` row (history, core memo
 ./setup.sh                              # Interactive: generates .env, installs Node + Python deps
 ./setup.sh --check                      # Report clashes with other bots on this host (read-only)
 ./setup.sh --fix                        # Move clashing ports in the existing .env (backup first)
+./setup.sh --update                     # Add settings new in .env.example to the existing .env (backup first)
 
 # Infrastructure (Docker Compose profiles)
 docker compose up -d                                    # Core: postgres, redis, api, worker, whatsapp
@@ -211,6 +212,7 @@ cd packages/ai-api && uv run pytest tests/unit  # AI API unit tests only
 ## Environment Config
 
 - Root `.env` loaded first (shared vars) — see @.env.example for all required variables
+- **Adding a variable**: put it in `.env.example` with a `#` comment line directly above it (the comment is copied along and shown as the prompt hint), and leave the value empty when it is a secret or opt-in. Existing deployments pick it up with `./setup.sh --update` (`instance_check.py update`): it appends only the keys `.env` lacks, each with its comment block, under `# Added by ./setup.sh --update (<date>)`, asks for the ones whose template value is empty (hidden input for `*_KEY`/`*_TOKEN`/`*_SECRET`/`*_PASSWORD`/`*_PASS`; Enter = leave empty), adds the rest with the template default, backs up first and never changes an existing line. Keys `.env` has but the template dropped are listed as possibly obsolete, never removed. `--yes` skips the prompts; the interactive `./setup.sh` offers it when you keep an existing `.env`, and `--check` mentions it when keys are missing
 - **Shared secrets live in root `.env` only.** Never duplicate credentials (API keys, DB passwords, Meta tokens, etc.) in package-level `.env.local` — they belong in root `.env` only, and `setup.sh` writes them there
 - **`.env.local` is for per-developer customization** (log level, port, feature flags). It loads with `override: true`, so any duplicated key silently wins over root — including empty `KEY=` lines that blank out the root value
 - The TS config loaders warn at startup when `.env.local` shadows a root key. If you see `[config] .env.local overrides root .env: X`, confirm it's intentional

@@ -825,3 +825,111 @@ class TestCheckEdges:
             "DATABASE_URL is not set; local (non-Docker) dev must use port 5433"
             in capsys.readouterr().out
         )
+
+
+TEMPLATE = (
+    "# === Identity ===\n"
+    "SERVICE_NAME=aiagent\n"
+    "# COMPOSE_PROJECT_NAME=\n"
+    "\n"
+    "# Host address each app port is published on.\n"
+    "AI_API_BIND=\n"
+    "WHATSAPP_API_BIND=\n"
+    "\n"
+    "# New provider key (https://example.com)\n"
+    "NEWLLM_API_KEY=\n"
+    "# Its model\n"
+    "NEWLLM_MODEL=fast-1  # default model\n"
+)
+
+
+class TestAddMissing:
+    def test_appends_in_template_order_with_one_comment_per_group(self):
+        env = "SERVICE_NAME=mybot\nAI_API_BIND=127.0.0.1\n"
+        text, added = ic.add_missing(env, TEMPLATE, stamp="2026-10-02")
+        assert added == ["WHATSAPP_API_BIND", "NEWLLM_API_KEY", "NEWLLM_MODEL"]
+        assert text == env + (
+            "\n# Added by ./setup.sh --update (2026-10-02) from .env.example\n"
+            "# Host address each app port is published on.\n"
+            "WHATSAPP_API_BIND=\n"
+            "\n# New provider key (https://example.com)\n"
+            "NEWLLM_API_KEY=\n"
+            "\n# Its model\n"
+            "NEWLLM_MODEL=fast-1  # default model\n"
+        )
+
+    def test_existing_and_commented_keys_are_left_alone(self):
+        env = "SERVICE_NAME=\nAI_API_BIND=\nWHATSAPP_API_BIND=\nNEWLLM_API_KEY=\nNEWLLM_MODEL=x\n"
+        assert ic.add_missing(env, TEMPLATE) == (env, [])
+
+    def test_values_are_quoted_and_crlf_is_kept(self):
+        env = "SERVICE_NAME=mybot\r\nAI_API_BIND=\r\nWHATSAPP_API_BIND=\r\nNEWLLM_MODEL=x\r\n"
+        text, added = ic.add_missing(env, TEMPLATE, {"NEWLLM_API_KEY": "s3c$ret"})
+        assert added == ["NEWLLM_API_KEY"]
+        assert text.startswith(env)
+        assert text.endswith("NEWLLM_API_KEY='s3c$ret'\r\n") and "\n" not in text.replace(
+            "\r\n", ""
+        )
+        assert ic.parse_env(text)["NEWLLM_API_KEY"] == "s3c$ret"
+
+    def test_hints(self):
+        hints = ic.template_hints(TEMPLATE)
+        assert hints["NEWLLM_API_KEY"] == "New provider key (https://example.com)"
+        assert hints["WHATSAPP_API_BIND"] == "Host address each app port is published on."
+
+
+class TestCmdUpdate:
+    @pytest.fixture
+    def old(self, project):
+        (project / ".env.example").write_text(TEMPLATE)
+        original = b"SERVICE_NAME=mybot\r\nAI_API_BIND=127.0.0.1\r\nGONE=1\r\n"
+        (project / ".env").write_bytes(original)
+        return original
+
+    def test_yes_adds_template_values_and_keeps_existing_bytes(self, project, old, capsys):
+        assert _main(project, "update", "--yes") == ic.EXIT_OK
+        data = (project / ".env").read_bytes()
+        assert data.startswith(old)
+        env = ic.parse_env(data.decode())
+        assert env["NEWLLM_API_KEY"] == "" and env["NEWLLM_MODEL"] == "fast-1"
+        backups = list(project.glob(".env.bak.*"))
+        assert len(backups) == 1 and backups[0].read_bytes() == old
+        out = capsys.readouterr().out
+        assert "possibly obsolete, left as is): GONE" in out
+        assert _main(project, "update", "--yes") == ic.EXIT_OK
+        assert "is up to date" in capsys.readouterr().out
+
+    def test_prompts_only_for_empty_template_values(self, project, old, monkeypatch):
+        asked = []
+        monkeypatch.setattr(ic.getpass, "getpass", lambda p: asked.append(p) or "k-123")
+        answers = iter(["", "y"])  # WHATSAPP_API_BIND left empty, then confirm
+        monkeypatch.setattr("builtins.input", lambda p: asked.append(p) or next(answers))
+        assert _main(project, "update") == ic.EXIT_OK
+        assert [p.split()[0] for p in asked] == ["WHATSAPP_API_BIND", "NEWLLM_API_KEY", "Add"]
+        env = ic.parse_env((project / ".env").read_text())
+        assert env["NEWLLM_API_KEY"] == "k-123" and env["WHATSAPP_API_BIND"] == ""
+
+    def test_confirmed_asks_values_but_not_the_final_question(self, project, old, monkeypatch):
+        asked = []
+        monkeypatch.setattr(ic.getpass, "getpass", lambda p: asked.append(p) or "")
+        monkeypatch.setattr("builtins.input", lambda p: asked.append(p) or "")
+        assert _main(project, "update", "--confirmed") == ic.EXIT_OK
+        assert not any(p.startswith("Add") for p in asked) and len(asked) == 2
+        assert "NEWLLM_MODEL=fast-1" in (project / ".env").read_text()
+
+    def test_declining_changes_nothing(self, project, old, monkeypatch):
+        monkeypatch.setattr(ic.getpass, "getpass", lambda p: "")
+        monkeypatch.setattr("builtins.input", lambda p: "n" if p.startswith("Add") else "")
+        assert _main(project, "update") == ic.EXIT_CLASH
+        assert (project / ".env").read_bytes() == old
+        assert not list(project.glob(".env.bak.*"))
+
+    def test_list_and_missing_env(self, project, old, capsys):
+        assert _main(project, "update", "--list") == ic.EXIT_OK
+        assert capsys.readouterr().out.split() == [
+            "WHATSAPP_API_BIND",
+            "NEWLLM_API_KEY",
+            "NEWLLM_MODEL",
+        ]
+        (project / ".env").unlink()
+        assert _main(project, "update", "--yes") == ic.EXIT_INCOMPLETE

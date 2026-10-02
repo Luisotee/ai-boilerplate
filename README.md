@@ -144,6 +144,7 @@ cd ai-boilerplate
 ./setup.sh             # interactive: generates .env, installs deps
 ./setup.sh --check     # any time: report clashes with other bots on this host
 ./setup.sh --fix       # move clashing ports in .env (keeps a backup)
+./setup.sh --update    # after pulling: add settings new in .env.example to .env
 ```
 
 The script checks prerequisites, creates `.env` from the template (auto-generating passwords and inter-service keys), prompts for `GEMINI_API_KEY` and any optional integrations (DeepSeek, Meta Cloud API, Groq), then runs `pnpm install:all`.

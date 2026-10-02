@@ -90,8 +90,9 @@ ENV_EXAMPLE=".env.example"
 # ── Instance check modes (no install, no prompts for secrets) ──
 #   ./setup.sh --check         report clashes with other bots on this host
 #   ./setup.sh --fix [--yes]   move clashing ports in the existing .env
+#   ./setup.sh --update [--yes]  add settings new in .env.example to .env
 case "${1:-}" in
-  --check | --fix)
+  --check | --fix | --update)
     if ! command -v python3 &>/dev/null; then
       print_error "python3 not found"
       exit 69
@@ -102,7 +103,7 @@ case "${1:-}" in
     ;;
   "") ;;
   *)
-    echo "Usage: ./setup.sh [--check | --fix [--yes]]"
+    echo "Usage: ./setup.sh [--check | --fix [--yes] | --update [--yes]]"
     exit 64
     ;;
 esac
@@ -196,9 +197,18 @@ if [ -f "$ENV_FILE" ]; then
   read -rp "  Overwrite it? (y/N): " OVERWRITE
   if [[ ! "$OVERWRITE" =~ ^[Yy]$ ]]; then
     print_warning "Keeping existing .env — skipping configuration"
-    print_warning "Verify your .env contains all required keys (diff against .env.example)"
     chmod 600 "$ENV_FILE" 2>/dev/null || true
     SKIP_ENV=true
+    # Settings added to .env.example since this .env was made (a new provider
+    # key, …): offer to append them; existing lines are never touched.
+    NEW_KEYS=$(instance_check update --list 2>/dev/null | wc -l) || NEW_KEYS=0
+    if [ "$NEW_KEYS" -gt 0 ]; then
+      echo ""
+      read -rp "  .env.example has $NEW_KEYS new setting(s). Add them now? (Y/n): " ADD_NEW
+      if [[ ! "$ADD_NEW" =~ ^[Nn]$ ]]; then
+        instance_check update --confirmed || true
+      fi
+    fi
     # Report-only: clashes with other bots on this host (ports, names, volumes).
     echo ""
     instance_check check | sed 's/^/  /' || true

@@ -10,6 +10,7 @@ file. `setup.sh` is a thin caller; run it directly for the same commands:
 
     python3 scripts/instance_check.py check          # read-only report
     python3 scripts/instance_check.py fix [--yes]    # move clashing ports
+    python3 scripts/instance_check.py update [--yes] # add new .env.example keys
 
 The port variables, their defaults and the default SERVICE_NAME are read from
 this checkout's compose file (every `${X_PORT:-N}:<port>` mapping), so a fork
@@ -23,6 +24,7 @@ Docker state is unavailable; 64 usage error.
 import argparse
 import contextlib
 import errno
+import getpass
 import glob
 import json
 import os
@@ -179,6 +181,75 @@ def carry_env(new_text, old_text, skip=()):
             text = _append(text, old[key])
     changed = [key for key in old if key in template and parse_env(old[key])[key] != template[key]]
     return text, len(changed), len(extra)
+
+
+def add_missing(env_text, template_text, values=None, stamp=""):
+    """Append every active template key .env lacks, in template order, each with
+    its template comment block (once per group of keys under one comment).
+
+    Existing lines are never touched. A key takes values[key] when given (quoted
+    if needed), else its template line verbatim. Returns (text, added keys).
+    """
+    values = values or {}
+    have = parse_env(env_text)
+    out, added, emitted = [], [], set()
+    block, block_id, prev_comment = [], None, False
+    for index, line in enumerate(template_text.splitlines()):
+        stripped = line.strip()
+        if not stripped:
+            block, block_id, prev_comment = [], None, False
+            continue
+        if stripped.startswith("#"):
+            if not prev_comment:
+                block, block_id = [], index
+            block.append(line)
+            prev_comment = True
+            continue
+        prev_comment = False
+        match = _ENV_LINE.match(line)
+        if not match or match.group(2) in have or match.group(2) in added:
+            continue
+        key = match.group(2)
+        if block_id is not None and block_id not in emitted:
+            emitted.add(block_id)
+            if out:
+                out.append("")
+            out.extend(block)
+        if key in values:
+            out.append(set_env("", key, values[key]).rstrip("\n"))
+        else:
+            out.append(line)
+        added.append(key)
+    if not added:
+        return env_text, []
+    header = (
+        "# Added by ./setup.sh --update" + (f" ({stamp})" if stamp else "") + " from .env.example"
+    )
+    text = _append(env_text, "")
+    text = _append(text, header)
+    for line in out:
+        text = _append(text, line)
+    return text, added
+
+
+def template_hints(template_text):
+    """{KEY: first line of its template comment block} for prompting."""
+    hints, block, prev_comment = {}, [], False
+    for line in template_text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            block, prev_comment = [], False
+        elif stripped.startswith("#"):
+            if not prev_comment:
+                block = []
+            block.append(stripped.lstrip("#").strip())
+            prev_comment = True
+        else:
+            prev_comment = False
+            match = _ENV_LINE.match(line)
+            if match and block:
+                hints.setdefault(match.group(2), block[0])
+    return hints
 
 
 def missing_keys(template_text, env_text):
@@ -915,6 +986,7 @@ def cmd_check(args):
             notes.append(
                 f".env lacks {len(absent)} key(s) from .env.example (defaults apply): "
                 + " ".join(absent)
+                + " — `./setup.sh --update` adds them"
             )
     notes += _host_notes(host)
     if notes:
@@ -1101,6 +1173,72 @@ def cmd_set(args):
     return EXIT_OK
 
 
+_SECRET_SUFFIXES = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASS")
+
+
+def _ask(prompt, secret):
+    sys.stdout.flush()
+    try:
+        return (getpass.getpass(prompt) if secret else input(prompt)).strip()
+    except EOFError:
+        return ""
+
+
+def cmd_update(args):
+    """Add the keys .env.example has and .env lacks; existing lines stay as-is."""
+    if not os.path.isfile(args.env):
+        print(f"No {args.env} found. Run ./setup.sh first.")
+        return EXIT_INCOMPLETE
+    if not os.path.isfile(args.template):
+        print(f"No {args.template} found.")
+        return EXIT_INCOMPLETE
+    env_text, template_text = _read(args.env), _read(args.template)
+    template = parse_env(template_text)
+    missing = missing_keys(template_text, env_text)
+    env_name, template_name = os.path.relpath(args.env), os.path.relpath(args.template)
+    if args.list:
+        for key in missing:
+            print(key)
+        return EXIT_OK
+    obsolete = [key for key in parse_env(env_text) if key not in template]
+    if not missing:
+        print(f"{env_name} is up to date with {template_name}.")
+    else:
+        print(f"New in {template_name}: {' '.join(missing)}")
+    if obsolete:
+        print(f"Not in {template_name} (possibly obsolete, left as is): {' '.join(obsolete)}")
+    if not missing:
+        return EXIT_OK
+
+    values = {}
+    if not args.yes:
+        hints = template_hints(template_text)
+        for key in missing:
+            if template[key]:
+                continue  # has a default: added as the template has it
+            if key in hints:
+                print(f"  {key}: {hints[key]}")
+            value = _ask(f"  {key} (Enter to leave empty): ", key.endswith(_SECRET_SUFFIXES))
+            if value:
+                values[key] = value
+        if not args.confirmed:
+            try:
+                sys.stdout.flush()
+                answer = input(f"Add {len(missing)} setting(s) to {env_name}? (Y/n): ")
+            except EOFError:
+                answer = ""
+            if answer.strip().lower() in ("n", "no"):
+                print("Nothing changed.")
+                return EXIT_CLASH
+
+    text, added = add_missing(env_text, template_text, values, time.strftime("%Y-%m-%d"))
+    backup = _backup(args.env)
+    _write_env(args.env, text)
+    print(f"Added {len(added)} setting(s) to {env_name} (backup: {os.path.relpath(backup)}).")
+    print("Restart the stack (`docker compose up -d`) to apply them.")
+    return EXIT_OK
+
+
 def cmd_backup(args):
     """Byte copy of .env (mode 600); prints its path."""
     print(_backup(args.env))
@@ -1152,6 +1290,11 @@ def main(argv=None):
     setter.add_argument("key")
     setter.add_argument("value")
     setter.set_defaults(func=cmd_set)
+    update = sub.add_parser("update")
+    update.add_argument("--yes", action="store_true", help="no prompts: template values")
+    update.add_argument("--list", action="store_true", help="only print the missing keys")
+    update.add_argument("--confirmed", action="store_true", help="ask values, skip the final y/n")
+    update.set_defaults(func=cmd_update)
     sub.add_parser("backup").set_defaults(func=cmd_backup)
     carry = sub.add_parser("carry")
     carry.add_argument("previous", help="the previous .env (e.g. its backup)")
