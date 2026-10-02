@@ -7,7 +7,10 @@
 #   ./upload-kb.sh                         # defaults to ./knowledge_base
 #
 # Environment:
-#   AI_API_URL   AI API base URL (default: http://localhost:8000)
+#   AI_API_URL   AI API base URL (default: http://localhost:<AI_API_PORT from
+#                ./.env>, else :8000 — so it reaches THIS checkout's API when
+#                several bots share the host; AI_API_BIND replaces localhost
+#                when it is one specific address)
 #   AI_API_KEY   API key; read from ./.env when not set in the environment
 #
 # Files already in the knowledge base (same SHA-256 content) are reported as
@@ -18,19 +21,41 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PDF_DIR="${1:-$SCRIPT_DIR/knowledge_base}"
-API_URL="${AI_API_URL:-http://localhost:8000}"
+ENV_FILE="$SCRIPT_DIR/.env"
 
-API_KEY="${AI_API_KEY:-}"
-if [ -z "$API_KEY" ]; then
-    ENV_FILE="$SCRIPT_DIR/.env"
-    if [ ! -f "$ENV_FILE" ]; then
-        echo "Error: AI_API_KEY is not set and no .env found at $ENV_FILE" >&2
-        exit 1
+# KEY's value in .env as Compose reads it: optional `export`, last assignment
+# wins, an inline ` # comment` and surrounding quotes are not part of the value.
+env_get() {
+    [ -f "$ENV_FILE" ] || return 0
+    tr -d '\r' < "$ENV_FILE" \
+        | sed -nE "s/^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*=(.*)\$/\\2/p" \
+        | tail -n1 \
+        | sed -E 's/^[[:space:]]+//' \
+        | sed -E "s/^\"([^\"]*)\".*\$/\\1/; t; s/^'([^']*)'.*\$/\\1/; t; s/[[:space:]]+#.*\$//; s/[[:space:]]+\$//"
+}
+
+# AI_API_URL in .env is the local-dev URL (always :8000), so it is not read here:
+# the Docker-published port is AI_API_PORT (which setup.sh moves on a clash),
+# reached on AI_API_BIND when that is one specific address.
+API_URL="${AI_API_URL:-}"
+if [ -z "$API_URL" ]; then
+    API_PORT=$(env_get AI_API_PORT)
+    if [ -n "$API_PORT" ] && ! [[ "$API_PORT" =~ ^[0-9]+$ ]]; then
+        echo "Warning: AI_API_PORT in $ENV_FILE is not a number; using 8000" >&2
+        API_PORT=""
     fi
-    API_KEY=$(grep -m1 '^AI_API_KEY=' "$ENV_FILE" | cut -d= -f2- | tr -d '"'"'"' \r')
+    API_HOST=$(env_get AI_API_BIND)
+    case "$API_HOST" in
+        "" | 0.0.0.0 | "::" | "[::]") API_HOST=localhost ;;
+        \[*) ;;
+        *:*) API_HOST="[$API_HOST]" ;;
+    esac
+    API_URL="http://${API_HOST}:${API_PORT:-8000}"
 fi
+
+API_KEY="${AI_API_KEY:-$(env_get AI_API_KEY)}"
 if [ -z "$API_KEY" ]; then
-    echo "Error: AI_API_KEY not found (environment or .env)" >&2
+    echo "Error: AI_API_KEY not found (environment or $ENV_FILE)" >&2
     exit 1
 fi
 

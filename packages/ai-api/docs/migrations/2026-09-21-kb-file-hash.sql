@@ -7,7 +7,7 @@
 -- existing ones need this applied by hand (Docker Compose setup, default
 -- credentials — substitute your POSTGRES_USER / POSTGRES_DB if you changed them):
 --
---   docker exec -i aiagent-postgres psql -U aiagent -d aiagent \
+--   docker compose exec -T postgres psql -U aiagent -d aiagent \
 --     < packages/ai-api/docs/migrations/2026-09-21-kb-file-hash.sql
 --
 -- Safe to re-run (both statements are IF NOT EXISTS).

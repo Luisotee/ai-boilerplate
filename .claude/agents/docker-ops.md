@@ -25,7 +25,9 @@ You are an operations agent for the AI WhatsApp Agent's Docker infrastructure.
 
 Worker runs: `python -m ai_api.scripts.run_stream_worker`. It reuses the image built by `api`, so starting `worker` without `api` in the same compose invocation requires the image to already exist.
 
-Infrastructure ports (5432 / 6379 / 8080) are bound to `127.0.0.1` only. Application ports (8000 / 3001 / 3002) are bound to all interfaces.
+**The `aiagent-*` names and the ports in this document are defaults.** Several bots can share a host, so read `SERVICE_NAME` and the `*_PORT` / `*_BIND` values from the root `.env` first and substitute them (containers are `<SERVICE_NAME>-<service>`, the network `<SERVICE_NAME>-network`). `./setup.sh --check` reports clashes with other compose projects.
+
+Infrastructure ports (5432 / 6379 / 8080 / 8771) are bound to `127.0.0.1` only. Application ports (8000 / 3001 / 3002 / 3003) are bound to all interfaces unless `AI_API_BIND` / `WHATSAPP_API_BIND` / `WHATSAPP_CLOUD_BIND` / `TELEGRAM_BIND` set a host address.
 
 ## Common Operations
 
@@ -57,14 +59,14 @@ docker compose logs --tail=50 api       # Last 50 lines
 curl -s http://localhost:8000/health     # AI API
 curl -s http://localhost:3001/health     # WhatsApp (Baileys)
 curl -s http://localhost:3002/health     # WhatsApp Cloud (requires --profile cloud)
-docker exec aiagent-postgres pg_isready -U aiagent
-docker exec aiagent-redis redis-cli ping
+docker compose exec postgres pg_isready -U aiagent
+docker compose exec redis redis-cli ping
 ```
 
 ### Database access
 ```bash
 # Adminer GUI: http://localhost:8080 (requires --profile dev)
-docker exec -it aiagent-postgres psql -U aiagent -d aiagent
+docker compose exec postgres psql -U aiagent -d aiagent
 ```
 
 ### Rebuild after code changes
@@ -102,8 +104,8 @@ From root `.env`:
 4. **API won't start**: Check `AI_API_KEY` and `GEMINI_API_KEY` are set
 5. **Worker not processing**: Worker depends on api health — if api is unhealthy, worker won't start
 6. **WhatsApp disconnected**: Delete `whatsapp-session` volume and re-scan QR code
-7. **Services can't reach each other**: All must be on `aiagent-network`. Use container names as hostnames (e.g., `http://api:8000` not `localhost`)
-8. **Port conflicts**: Check nothing else is using 5432, 6379, 8000, 8080, 3001, or 3002
+7. **Services can't reach each other**: All must be on `<SERVICE_NAME>-network` (default `aiagent-network`). Use container names as hostnames (e.g., `http://api:8000` not `localhost`)
+8. **Port conflicts**: Run `./setup.sh --check` — it lists every published port another compose project holds or declares (including stopped stacks), and `./setup.sh --fix` moves ours
 9. **`adminer` or `whatsapp-cloud` missing**: They are gated behind `--profile dev` and `--profile cloud` respectively. Add the flag to `docker compose up`, logs, etc.
 
 ## Important

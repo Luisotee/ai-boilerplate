@@ -112,7 +112,10 @@ services:
       WHATSAPP_CLOUD_CLIENT_URL: http://whatsapp-cloud:3002
       TELEGRAM_CLIENT_URL: http://telegram:3003
     ports:
-      - '${AI_API_PORT:-8000}:8000'
+      # *_BIND is the host address the port is published on. Unset/empty keeps
+      # the historical behaviour (every interface, IPv4 and IPv6) — do not
+      # default it to 0.0.0.0, which would drop IPv6.
+      - '${AI_API_BIND:-}:${AI_API_PORT:-8000}:8000'
     volumes:
       - knowledge-base-data:/app/knowledge_base
     depends_on:
@@ -206,7 +209,7 @@ services:
       # the healthcheck and http://whatsapp:3001 used by the API).
       WHATSAPP_API_PORT: 3001
     ports:
-      - '${WHATSAPP_API_PORT:-3001}:3001'
+      - '${WHATSAPP_API_BIND:-}:${WHATSAPP_API_PORT:-3001}:3001'
     volumes:
       - whatsapp-session:/app/packages/whatsapp-client/auth_info_baileys
     depends_on:
@@ -334,7 +337,7 @@ services:
       # Pin the in-cluster listen port (see whatsapp service above).
       WHATSAPP_CLOUD_PORT: 3002
     ports:
-      - '${WHATSAPP_CLOUD_PORT:-3002}:3002'
+      - '${WHATSAPP_CLOUD_BIND:-}:${WHATSAPP_CLOUD_PORT:-3002}:3002'
     depends_on:
       api:
         condition: service_healthy
@@ -375,7 +378,7 @@ services:
     # TELEGRAM_MODE=polling: no inbound traffic from Telegram at all — the port
     # only serves the AI API (over aiagent-network), /health and /docs.
     ports:
-      - '${TELEGRAM_PORT:-3003}:3003'
+      - '${TELEGRAM_BIND:-}:${TELEGRAM_PORT:-3003}:3003'
     # Polling mode drains in-flight replies on SIGTERM (up to
     # TELEGRAM_SHUTDOWN_DRAIN_MS, default 130s) — Docker's default 10s grace
     # period would SIGKILL them mid-reply.

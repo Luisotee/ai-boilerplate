@@ -1,0 +1,1310 @@
+#!/usr/bin/env python3
+"""Keep several checkouts of this project from colliding on one host.
+
+Everything host-global is checked against what Docker already knows about the
+OTHER compose projects on the machine: published ports, container / network /
+image names, and the Compose project name (which owns the volumes).
+
+Standard library only and no imports from the repo, so a fork can copy this one
+file. `setup.sh` is a thin caller; run it directly for the same commands:
+
+    python3 scripts/instance_check.py check          # read-only report
+    python3 scripts/instance_check.py fix [--yes]    # move clashing ports
+    python3 scripts/instance_check.py update [--yes] # add new .env.example keys
+
+The port variables, their defaults and the default SERVICE_NAME are read from
+this checkout's compose file (every `${X_PORT:-N}:<port>` mapping), so a fork
+with other services or ports uses this file unchanged.
+
+Exit codes: 0 clean; 1 collisions found (the check may also be incomplete, see
+its notes); 2 check incomplete and nothing found, or `fix` refused because
+Docker state is unavailable; 64 usage error.
+"""
+
+import argparse
+import contextlib
+import errno
+import getpass
+import glob
+import json
+import os
+import re
+import shutil
+import socket
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+from collections import namedtuple
+
+# Local-dev callback URLs that follow a client port.
+CLIENT_URLS = {
+    "WHATSAPP_API_PORT": "WHATSAPP_CLIENT_URL",
+    "WHATSAPP_CLOUD_PORT": "WHATSAPP_CLOUD_CLIENT_URL",
+    "TELEGRAM_PORT": "TELEGRAM_CLIENT_URL",
+}
+# Lowercase words joined by single "-" or "_": always a valid container and
+# image name (a trailing "_" or "a__b" would make `<name>-api` an invalid tag).
+VALID_SERVICE_NAME = re.compile(r"^[a-z0-9]+([_-][a-z0-9]+)*$")
+COMPOSE_FILES = ("compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml")
+PORT_SPAN = 100
+
+EXIT_OK = 0
+EXIT_CLASH = 1
+EXIT_INCOMPLETE = 2
+EXIT_USAGE = 64
+
+L_PROJECT = "com.docker.compose.project"
+L_WORKDIR = "com.docker.compose.project.working_dir"
+L_FILES = "com.docker.compose.project.config_files"
+L_SERVICE = "com.docker.compose.service"
+
+# source: "bound" (a container exists with this port), "declared" (a compose
+# file publishes it, container not created), "listening" (a non-Docker socket).
+Claim = namedtuple("Claim", "port owner service source")
+Container = namedtuple("Container", "name project working_dir config_files service ports")
+# name + compose project label ("" when not created by compose)
+Resource = namedtuple("Resource", "name project")
+
+GUARD_OK = "OK"
+GUARD_OFFER = "OFFER"
+GUARD_REFUSE = "REFUSE"
+
+
+# ── .env files (Compose's dotenv rules) ─────────────────────────────────────
+
+_ENV_LINE = re.compile(r"^\s*(export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$")
+
+
+def _unquote(raw):
+    """Value of a dotenv assignment: quoted up to the matching quote, otherwise
+    up to an inline ` #` comment, trimmed."""
+    raw = raw.strip()
+    if raw[:1] in ("'", '"'):
+        end = raw.find(raw[0], 1)
+        return raw[1:end] if end != -1 else raw[1:]
+    comment = re.search(r"\s#", raw)
+    return (raw[: comment.start()] if comment else raw).strip()
+
+
+def _body(line):
+    return line.rstrip("\r\n")
+
+
+def parse_env(text):
+    """Active assignments of a .env file. As in Compose, the last one wins."""
+    env = {}
+    for line in text.splitlines():
+        match = _ENV_LINE.match(line)
+        if match:
+            env[match.group(2)] = _unquote(match.group(3))
+    return env
+
+
+def _quote_and_tail(raw):
+    """(quote char, text after the value) of an assignment's right-hand side:
+    the tail is an inline comment, kept when the value is rewritten."""
+    stripped = raw.lstrip()
+    if stripped[:1] in ("'", '"'):
+        end = stripped.find(stripped[0], 1)
+        return stripped[0], ("" if end == -1 else stripped[end + 1 :])
+    comment = re.search(r"\s+#", stripped)
+    return "", (stripped[comment.start() :] if comment else "")
+
+
+def _needs_quotes(value):
+    # `$` too: Compose interpolates unquoted and double-quoted values.
+    return bool(re.search(r"\s#|^\s|\s$|^['\"]|\$", value))
+
+
+def _newline(text):
+    return "\r\n" if "\r\n" in text else "\n"
+
+
+def _append(text, line):
+    newline = _newline(text)
+    if text and not text.endswith("\n"):
+        text += newline
+    return text + line + newline
+
+
+def set_env(text, key, value):
+    """Rewrite every assignment of KEY in place, or append one.
+
+    An `export ` prefix, the value's quote style, an inline comment and each
+    line's own ending (LF or CRLF) are kept; no other line is touched.
+    """
+    lines = text.splitlines(keepends=True)
+    found = False
+    for index, line in enumerate(lines):
+        match = _ENV_LINE.match(_body(line))
+        if not match or match.group(2) != key:
+            continue
+        found = True
+        quote, tail = _quote_and_tail(match.group(3))
+        if not quote and _needs_quotes(value):
+            quote = '"' if "'" in value else "'"
+        ending = line[len(_body(line)) :]
+        lines[index] = f"{match.group(1) or ''}{key}={quote}{value}{quote}{tail}{ending}"
+    if found:
+        return "".join(lines)
+    quote = ('"' if "'" in value else "'") if _needs_quotes(value) else ""
+    return _append(text, f"{key}={quote}{value}{quote}")
+
+
+def carry_env(new_text, old_text, skip=()):
+    """Bring every non-empty value of a previous .env into a fresh template copy.
+
+    Each line is copied verbatim (quoting and `$` escaping stay exactly as the
+    operator wrote them); keys the template lacks are appended. Returns
+    (text, kept, appended), where kept counts the values that differ from the
+    template's.
+    """
+    old = {}
+    for line in old_text.splitlines():
+        match = _ENV_LINE.match(line)
+        if match and match.group(2) not in skip and _unquote(match.group(3)):
+            old[match.group(2)] = line.strip()
+    template = parse_env(new_text)
+    lines = new_text.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        match = _ENV_LINE.match(_body(line))
+        if match and match.group(2) in old:
+            lines[index] = old[match.group(2)] + line[len(_body(line)) :]
+    text = "".join(lines)
+    extra = [key for key in old if key not in template]
+    if extra:
+        text = _append(text, "")
+        text = _append(text, "# Kept from the previous .env (not in .env.example)")
+        for key in extra:
+            text = _append(text, old[key])
+    changed = [key for key in old if key in template and parse_env(old[key])[key] != template[key]]
+    return text, len(changed), len(extra)
+
+
+def add_missing(env_text, template_text, values=None, stamp=""):
+    """Append every active template key .env lacks, in template order, each with
+    its template comment block (once per group of keys under one comment).
+
+    Existing lines are never touched. A key takes values[key] when given (quoted
+    if needed), else its template line verbatim. Returns (text, added keys).
+    """
+    values = values or {}
+    have = parse_env(env_text)
+    out, added, emitted = [], [], set()
+    block, block_id, prev_comment = [], None, False
+    for index, line in enumerate(template_text.splitlines()):
+        stripped = line.strip()
+        if not stripped:
+            block, block_id, prev_comment = [], None, False
+            continue
+        if stripped.startswith("#"):
+            if not prev_comment:
+                block, block_id = [], index
+            block.append(line)
+            prev_comment = True
+            continue
+        prev_comment = False
+        match = _ENV_LINE.match(line)
+        if not match or match.group(2) in have or match.group(2) in added:
+            continue
+        key = match.group(2)
+        if block_id is not None and block_id not in emitted:
+            emitted.add(block_id)
+            if out:
+                out.append("")
+            out.extend(block)
+        if key in values:
+            out.append(set_env("", key, values[key]).rstrip("\n"))
+        else:
+            out.append(line)
+        added.append(key)
+    if not added:
+        return env_text, []
+    header = (
+        "# Added by ./setup.sh --update" + (f" ({stamp})" if stamp else "") + " from .env.example"
+    )
+    text = _append(env_text, "")
+    text = _append(text, header)
+    for line in out:
+        text = _append(text, line)
+    return text, added
+
+
+def template_hints(template_text):
+    """{KEY: first line of its template comment block} for prompting."""
+    hints, block, prev_comment = {}, [], False
+    for line in template_text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            block, prev_comment = [], False
+        elif stripped.startswith("#"):
+            if not prev_comment:
+                block = []
+            block.append(stripped.lstrip("#").strip())
+            prev_comment = True
+        else:
+            prev_comment = False
+            match = _ENV_LINE.match(line)
+            if match and block:
+                hints.setdefault(match.group(2), block[0])
+    return hints
+
+
+def missing_keys(template_text, env_text):
+    """Template keys absent from .env, in template order."""
+    env = parse_env(env_text)
+    return [key for key in parse_env(template_text) if key not in env]
+
+
+# ── Pure helpers ────────────────────────────────────────────────────────────
+
+
+def normalize_project_name(basename):
+    """Compose's rule for a directory-derived project name."""
+    name = re.sub(r"[^a-z0-9_-]", "", basename.lower())
+    return name.lstrip("_-")
+
+
+def effective_project(env, shell_env, dirname):
+    """The Compose project name this checkout resolves to (no top-level `name:`)."""
+    explicit = shell_env.get("COMPOSE_PROJECT_NAME") or env.get("COMPOSE_PROJECT_NAME")
+    return explicit or normalize_project_name(os.path.basename(dirname.rstrip("/")))
+
+
+def _to_port(value):
+    try:
+        port = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return port if 0 < port < 65536 else None
+
+
+def _expand_ports(value):
+    """ "8000" -> [8000]; "8000-8002" -> [8000, 8001, 8002]; anything else -> []."""
+    if value is None:
+        return []
+    text = str(value).strip()
+    if "-" in text:
+        low, _, high = text.partition("-")
+        low, high = _to_port(low), _to_port(high)
+        if low is None or high is None or high < low or high - low > 1000:
+            return []
+        return list(range(low, high + 1))
+    port = _to_port(text)
+    return [port] if port is not None else []
+
+
+def parse_containers(inspected):
+    """`docker inspect` output (list of objects) -> [Container] with TCP host ports."""
+    containers = []
+    for item in inspected or []:
+        labels = (item.get("Config") or {}).get("Labels") or {}
+        bindings = (item.get("HostConfig") or {}).get("PortBindings") or {}
+        ports = []
+        for key, hosts in bindings.items():
+            if key.endswith("/udp"):
+                continue
+            for host in hosts or []:
+                ports.extend(_expand_ports((host or {}).get("HostPort") or None))
+        containers.append(
+            Container(
+                name=(item.get("Name") or "").lstrip("/"),
+                project=labels.get(L_PROJECT, ""),
+                working_dir=labels.get(L_WORKDIR, ""),
+                config_files=[f for f in labels.get(L_FILES, "").split(",") if f],
+                service=labels.get(L_SERVICE, ""),
+                ports=sorted(set(ports)),
+            )
+        )
+    return containers
+
+
+def ports_from_config(config, fallback_owner=""):
+    """`docker compose config --format json` -> [Claim] for every published TCP port."""
+    config = config or {}
+    owner = config.get("name") or fallback_owner
+    claims = []
+    for service, spec in (config.get("services") or {}).items():
+        for port in (spec or {}).get("ports") or []:
+            if not isinstance(port, dict) or port.get("protocol", "tcp") != "tcp":
+                continue
+            for number in _expand_ports(port.get("published")):
+                claims.append(Claim(number, owner, service, "declared"))
+    return claims
+
+
+def same_dir(path_a, path_b):
+    if not path_a or not path_b:
+        return False
+    return os.path.realpath(path_a) == os.path.realpath(path_b)
+
+
+def is_moved(container, project, exists=os.path.isdir):
+    """A container of our project whose recorded directory is gone: this
+    checkout was moved or renamed after the stack was created."""
+    return bool(
+        project
+        and container.project == project
+        and container.working_dir
+        and not exists(container.working_dir)
+    )
+
+
+def partition(containers, own_dir, project="", exists=os.path.isdir):
+    """Split into (ours, foreign) by the compose working directory. A container
+    started with plain `docker run` has no label and counts as foreign."""
+    own, foreign = [], []
+    for container in containers:
+        mine = same_dir(container.working_dir, own_dir) or is_moved(container, project, exists)
+        (own if mine else foreign).append(container)
+    return own, foreign
+
+
+def claims_from_containers(containers):
+    return [
+        Claim(port, c.project or c.name, c.service or c.name, "bound")
+        for c in containers
+        for port in c.ports
+    ]
+
+
+def allocate(specs, current, is_free, span=PORT_SPAN):
+    """Pick a host port per variable.
+
+    A variable keeps its current port while that port is free; otherwise it gets
+    the first free port at or above its default. No port is handed out twice.
+    Returns (assignments, errors): `errors` lists the variables for which nothing
+    was free within `span`; they keep their current (or default) value.
+    """
+    assignments, errors, chosen = {}, [], set()
+    for var, _default in specs:
+        port = _to_port(current.get(var))
+        if port is not None and port not in chosen and is_free(port):
+            assignments[var] = port
+            chosen.add(port)
+    for var, default in specs:
+        if var in assignments:
+            continue
+        for port in range(default, default + span + 1):
+            if port not in chosen and is_free(port):
+                assignments[var] = port
+                chosen.add(port)
+                break
+        else:
+            errors.append(var)
+            assignments[var] = _to_port(current.get(var)) or default
+    return assignments, errors
+
+
+_PUBLISHED_PORT = re.compile(r"\$\{([A-Z][A-Z0-9_]*_PORT):-(\d+)\}:\d+")
+_SERVICE_DEFAULT = re.compile(r"\$\{SERVICE_NAME:-([a-z0-9][a-z0-9_-]*)\}")
+
+
+def specs_from_compose(compose_text):
+    """(port specs, default SERVICE_NAME) declared by a compose file.
+
+    Port specs are the `${VAR_PORT:-N}:container` host ports, in file order;
+    either part is None when the file declares none.
+    """
+    specs = []
+    for var, default in _PUBLISHED_PORT.findall(compose_text):
+        if var not in (v for v, _d in specs):
+            specs.append((var, int(default)))
+    name = _SERVICE_DEFAULT.search(compose_text)
+    return specs or None, name.group(1) if name else None
+
+
+def port_services(compose_text):
+    """{VAR_PORT: compose service} for every `${VAR_PORT:-N}:<port>` mapping."""
+    found, service, child_indent, in_services = {}, None, None, False
+    for line in compose_text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent == 0:
+            in_services = stripped == "services:"
+            service = None
+            continue
+        if not in_services:
+            continue
+        if child_indent is None:
+            child_indent = indent
+        if indent == child_indent:
+            match = re.match(r"([A-Za-z0-9._-]+):\s*$", stripped)
+            service = match.group(1) if match else None
+            continue
+        if service:
+            for var, _default in _PUBLISHED_PORT.findall(line):
+                found.setdefault(var, service)
+    return found
+
+
+def names_network(compose_text):
+    """True when the compose file names its network after SERVICE_NAME."""
+    return bool(re.search(r"name:\s*['\"]?\$\{SERVICE_NAME[^}]*\}-network", compose_text))
+
+
+def container_suffixes(compose_text):
+    """Service suffixes of `container_name: ${SERVICE_NAME…}-<suffix>` lines."""
+    return re.findall(
+        r"container_name:\s*['\"]?\$\{SERVICE_NAME[^}]*\}-([A-Za-z0-9_.-]+)", compose_text
+    )
+
+
+def name_conflicts(
+    service_name, suffixes, containers, networks, image_project, own_dir, project, network=True
+):
+    """Things named after SERVICE_NAME that another compose project already owns.
+
+    Returns (errors, warnings). The image is only a warning: its label records
+    the last project that built the tag, which may be long gone.
+    """
+    errors, warnings = [], []
+    wanted = {f"{service_name}-{suffix}" for suffix in suffixes}
+    _own, foreign = partition(containers, own_dir, project)
+    for container in foreign:
+        if wanted:
+            clash = container.name in wanted
+        else:
+            clash = container.name.startswith(service_name + "-")
+        if clash:
+            owner = container.project or "a non-compose container"
+            where = f" ({container.working_dir})" if container.working_dir else ""
+            errors.append(f"container '{container.name}' already exists, owned by {owner}{where}")
+    network_name = f"{service_name}-network"
+    for network in networks if network else ():
+        if network.name == network_name and network.project != project:
+            owner = network.project or "something outside compose"
+            errors.append(f"network '{network_name}' already exists, owned by {owner}")
+    if image_project and image_project != project:
+        warnings.append(
+            f"image '{service_name}-api:latest' was last built by project '{image_project}'; "
+            "building here replaces that tag"
+        )
+    return errors, warnings
+
+
+def project_guard(project, explicit, containers, volumes, networks, own_dir, fresh, candidate):
+    """Is the Compose project name (= volume owner) shared with another checkout?
+
+    OK      nothing else uses it, COMPOSE_PROJECT_NAME is set explicitly, or only
+            volumes/networks are left and a .env already exists (a stopped stack
+            of this checkout; the reason then carries a note).
+    OFFER   safe to set COMPOSE_PROJECT_NAME=<candidate>: this is a first setup
+            (no .env before, no containers of ours) and the candidate is unused.
+    REFUSE  another checkout's containers use it, and changing the name here
+            could orphan existing volumes.
+    Returns (status, reason).
+    """
+    if explicit:
+        return GUARD_OK, ""
+    own, foreign = partition(containers, own_dir, project)
+    foreign_same = [c for c in foreign if c.project == project]
+    leftovers = [r.name for r in list(volumes) + list(networks) if r.project == project]
+    if foreign_same:
+        dirs = sorted({c.working_dir for c in foreign_same if c.working_dir})
+        where = ", ".join(dirs) or "unknown directory"
+        reason = f"another checkout uses the Compose project name '{project}': {where}"
+    elif leftovers and not own:
+        listed = ", ".join(sorted(leftovers)[:4])
+        if not fresh:
+            return GUARD_OK, (
+                f"volumes/networks of project '{project}' exist without containers ({listed}); "
+                "assumed to be this checkout's stopped stack"
+            )
+        reason = f"volumes/networks of a Compose project named '{project}' already exist ({listed})"
+    else:
+        return GUARD_OK, ""
+    used = {c.project for c in containers} | {r.project for r in list(volumes) + list(networks)}
+    if fresh and not own and candidate and candidate != project and candidate not in used:
+        return GUARD_OFFER, reason
+    return GUARD_REFUSE, reason
+
+
+def sync_derived(env_text, old_ports, new_ports):
+    """Follow a port change in the local-dev URLs that embed it.
+
+    Only a URL that still has the exact expected shape is rewritten; anything
+    hand-edited is left alone and reported. Returns (text, warnings).
+    """
+    env = parse_env(env_text)
+    warnings = []
+    old, new = old_ports.get("POSTGRES_PORT"), new_ports.get("POSTGRES_PORT")
+    if old and new and old != new and "DATABASE_URL" in env:
+        pattern = re.compile(rf"@(localhost|127\.0\.0\.1):{old}/")
+        if pattern.search(env["DATABASE_URL"]):
+            url = pattern.sub(rf"@\g<1>:{new}/", env["DATABASE_URL"])
+            env_text = set_env(env_text, "DATABASE_URL", url)
+        else:
+            warnings.append(f"DATABASE_URL does not point at localhost:{old}; update it by hand")
+    elif old and new and old != new:
+        warnings.append(f"DATABASE_URL is not set; local (non-Docker) dev must use port {new}")
+    for port_var, url_var in CLIENT_URLS.items():
+        old, new = old_ports.get(port_var), new_ports.get(port_var)
+        if not old or not new or old == new:
+            continue
+        if url_var not in env or env[url_var] == f"http://localhost:{old}":
+            env_text = set_env(env_text, url_var, f"http://localhost:{new}")
+        else:
+            warnings.append(f"{url_var} is customised; point it at port {new} by hand")
+    return env_text, warnings
+
+
+def port_clashes(ports, claims):
+    """{var: [Claim, …]} for every configured port someone else claims."""
+    by_port = {}
+    for claim in claims:
+        by_port.setdefault(claim.port, []).append(claim)
+    return {var: by_port[port] for var, port in ports.items() if port in by_port}
+
+
+def describe_claim(claim):
+    if claim.source == "listening":
+        return "in use by a process on this host"
+    state = "container exists" if claim.source == "bound" else "stack not created"
+    return f"{claim.owner} ({claim.service}, {state})"
+
+
+# ── Docker / host I/O ───────────────────────────────────────────────────────
+
+
+class DockerUnavailable(Exception):
+    pass
+
+
+def _run(args, cwd=None, env=None, timeout=15):
+    try:
+        done = subprocess.run(args, cwd=cwd, env=env, timeout=timeout, capture_output=True)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise DockerUnavailable(type(exc).__name__) from exc
+    if done.returncode != 0:
+        lines = done.stderr.decode("utf-8", "replace").strip().splitlines()
+        raise DockerUnavailable(lines[-1] if lines else f"exit {done.returncode}")
+    return done.stdout.decode("utf-8", "replace")
+
+
+def _labelled(kind):
+    fmt = '{{.Name}}\t{{.Label "' + L_PROJECT + '"}}'
+    out = _run(["docker", kind, "ls", "--format", fmt])
+    rows = [line.split("\t") for line in out.splitlines() if line.strip()]
+    return [Resource(row[0], row[1] if len(row) > 1 else "") for row in rows]
+
+
+def docker_state():
+    """(containers, volumes, networks). Raises DockerUnavailable."""
+    if not shutil.which("docker"):
+        raise DockerUnavailable("docker is not installed")
+    ids = _run(["docker", "ps", "-aq"]).split()
+    try:
+        inspected = json.loads(_run(["docker", "inspect", *ids])) if ids else []
+    except ValueError as exc:
+        raise DockerUnavailable("unreadable docker inspect output") from exc
+    return parse_containers(inspected), _labelled("volume"), _labelled("network")
+
+
+def image_project(service_name):
+    """Compose project that last built <service_name>-api:latest ('' if none)."""
+    fmt = '{{index .Config.Labels "' + L_PROJECT + '"}}'
+    try:
+        out = _run(["docker", "image", "inspect", f"{service_name}-api:latest", "--format", fmt])
+    except DockerUnavailable:
+        return ""
+    out = out.strip()
+    return "" if out == "<no value>" else out
+
+
+def sibling_config(directory, config_files):
+    """Every port a neighbouring compose project publishes, profiles included.
+
+    The rendered config contains that project's secrets: it is parsed for ports
+    and dropped, never printed. Returns None when it cannot be rendered.
+    """
+    # Only what docker needs: an exported AI_API_PORT or COMPOSE_* in our shell
+    # would otherwise override the neighbour's own .env.
+    env = {k: v for k, v in os.environ.items() if k in ("PATH", "HOME") or k.startswith("DOCKER_")}
+    base = ["docker", "compose"]
+    for path in config_files:
+        base += ["-f", path]
+    for profile in (["--profile", "*"], []):
+        try:
+            # --no-env-resolution: a clone that was never configured has no
+            # .env, and `env_file: .env` would fail the whole render.
+            args = [*base, *profile, "config", "--no-env-resolution", "--format", "json"]
+            out = _run(args, directory, env, 20)
+            return ports_from_config(json.loads(out), os.path.basename(directory))
+        except (DockerUnavailable, ValueError):
+            continue
+    return None
+
+
+def sibling_dirs(own_dir, foreign):
+    """{dir: config files} of other compose projects: those Docker has containers
+    for, the neighbours of this checkout, and anything in SIBLING_DIRS."""
+    found = {}
+    for container in foreign:
+        if container.working_dir and os.path.isdir(container.working_dir):
+            files = [f for f in container.config_files if os.path.isfile(f)]
+            found.setdefault(os.path.realpath(container.working_dir), files)
+    extra = [d for d in os.environ.get("SIBLING_DIRS", "").split(":") if d]
+    for directory in glob.glob(os.path.join(os.path.dirname(own_dir), "*")) + extra:
+        if any(os.path.isfile(os.path.join(directory, name)) for name in COMPOSE_FILES):
+            found.setdefault(os.path.realpath(directory), [])
+    found.pop(os.path.realpath(own_dir), None)
+    return found
+
+
+def is_listening(port):
+    """True if a TCP socket on this host already listens on the port (any address)."""
+    for family, address in ((socket.AF_INET, "0.0.0.0"), (socket.AF_INET6, "::")):
+        try:
+            probe = socket.socket(family, socket.SOCK_STREAM)
+        except OSError:
+            continue
+        try:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if family == socket.AF_INET6:
+                probe.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            probe.bind((address, port))
+        except OSError as exc:
+            if exc.errno == errno.EADDRINUSE:
+                return True
+        finally:
+            probe.close()
+    return False
+
+
+class Host:
+    """Everything known about the host. Built from data so tests can inject it;
+    `Host.from_docker` gathers the real state."""
+
+    def __init__(
+        self,
+        own_dir,
+        project="",
+        containers=(),
+        volumes=(),
+        networks=(),
+        declared=(),
+        docker_error="",
+        unreadable=(),
+        listening=is_listening,
+    ):
+        self.own_dir = os.path.realpath(own_dir)
+        self.project = project
+        self.containers, self.volumes, self.networks = (
+            list(containers),
+            list(volumes),
+            list(networks),
+        )
+        self.docker_error = docker_error
+        self.unreadable = list(unreadable)
+        self.listening = listening
+        own, foreign = partition(self.containers, self.own_dir, project)
+        self.own_ports = {port for c in own for port in c.ports}
+        # Ports presumed ours without proof (set when Docker can't tell).
+        self.assumed_own = set()
+        self.moved = [c.name for c in own if not same_dir(c.working_dir, self.own_dir)]
+        claims = claims_from_containers(foreign)
+        seen = {(c.port, c.owner) for c in claims}
+        for claim in declared:
+            if (claim.port, claim.owner) not in seen:
+                seen.add((claim.port, claim.owner))
+                claims.append(claim)
+        self.claims = claims
+        self.claimed = {c.port for c in claims}
+
+    @classmethod
+    def from_docker(cls, project_dir, project):
+        own_dir = os.path.realpath(project_dir)
+        containers, volumes, networks, error = [], [], [], ""
+        try:
+            containers, volumes, networks = docker_state()
+        except DockerUnavailable as exc:
+            error = str(exc) or "unknown error"
+        _own, foreign = partition(containers, own_dir, project)
+        declared, unreadable = [], []
+        if shutil.which("docker"):
+            for directory, files in sorted(sibling_dirs(own_dir, foreign).items()):
+                claims = sibling_config(directory, files)
+                if claims is None:
+                    unreadable.append(directory)
+                else:
+                    declared.extend(claims)
+        return cls(own_dir, project, containers, volumes, networks, declared, error, unreadable)
+
+    @property
+    def incomplete(self):
+        return bool(self.docker_error or self.unreadable)
+
+    def is_free(self, port):
+        # Another project's claim wins even when our own container has the port
+        # too: that is exactly the clash `fix` exists to move.
+        if port in self.claimed:
+            return False
+        if port in self.own_ports or port in self.assumed_own:
+            return True
+        return not self.listening(port)
+
+    def clashes(self, ports):
+        """{var: [Claim]} including ports held by a non-Docker process."""
+        found = port_clashes(ports, self.claims)
+        for var, port in ports.items():
+            if var in found or port in self.own_ports or port in self.assumed_own:
+                continue
+            if self.listening(port):
+                found[var] = [Claim(port, "", "", "listening")]
+        return found
+
+
+def load_host(project_dir, project):
+    """Seam for tests: the commands never build a Host any other way."""
+    return Host.from_docker(project_dir, project)
+
+
+# ── Commands ────────────────────────────────────────────────────────────────
+
+
+def _read(path):
+    # newline="" keeps CRLF line endings intact; surrogateescape round-trips a
+    # .env that is not UTF-8 (e.g. Latin-1 comments) byte-for-byte.
+    with open(path, encoding="utf-8", errors="surrogateescape", newline="") as handle:
+        return handle.read()
+
+
+def _write_env(path, text):
+    """Replace the file atomically, keeping its mode (and owner, when root).
+    A symlinked .env stays a symlink: the file it points at is replaced."""
+    target = os.path.realpath(path)
+    try:
+        before = os.stat(target)
+    except FileNotFoundError:
+        before = None
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(target), prefix=".env.tmp.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape", newline="") as out:
+            out.write(text)
+        if before is not None:
+            os.chmod(tmp, stat.S_IMODE(before.st_mode))
+            if hasattr(os, "geteuid") and os.geteuid() == 0:
+                os.chown(tmp, before.st_uid, before.st_gid)
+        os.replace(tmp, target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def _backup(path):
+    """Byte-for-byte copy of the current file, created mode 600 (never readable
+    by others, not even briefly)."""
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    for attempt in range(100):
+        backup = f"{path}.bak.{stamp}" + (f"-{attempt}" if attempt else "")
+        try:
+            fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            continue
+        with os.fdopen(fd, "wb") as out, open(os.path.realpath(path), "rb") as src:
+            shutil.copyfileobj(src, out)
+        return backup
+    raise FileExistsError(f"{path}.bak.{stamp}")
+
+
+def _compose_text(project_dir):
+    for name in COMPOSE_FILES:
+        path = os.path.join(project_dir, name)
+        if os.path.isfile(path):
+            return _read(path)
+    return ""
+
+
+def project_specs(project_dir):
+    """(port specs, default SERVICE_NAME) declared by this checkout's compose
+    file: ([], "") when there is none."""
+    specs, name = specs_from_compose(_compose_text(project_dir))
+    return specs or [], name or ""
+
+
+def _no_compose(project_dir):
+    print(f"No compose file with `${{X_PORT:-N}}:<port>` mappings found in {project_dir}.")
+    print("Nothing to assign; set the ports in .env by hand.")
+    return EXIT_INCOMPLETE
+
+
+def _configured_ports(env, specs):
+    """The port each variable resolves to: the .env value, else compose's default."""
+    return {var: _to_port(env.get(var)) or default for var, default in specs}
+
+
+def _explicit_project(env):
+    return bool(os.environ.get("COMPOSE_PROJECT_NAME") or env.get("COMPOSE_PROJECT_NAME"))
+
+
+def _host_notes(host):
+    notes = []
+    if host.moved:
+        notes.append(
+            "containers recorded under a directory that no longer exists are treated as this "
+            f"checkout's (moved or renamed?): {', '.join(host.moved)}"
+        )
+    for directory in host.unreadable:
+        notes.append(
+            f"could not render the compose config in {directory}; its unstarted services are not counted"
+        )
+    if host.docker_error:
+        notes.append(
+            f"Docker state unavailable ({host.docker_error}): only live sockets and "
+            "neighbouring compose files were checked"
+        )
+    return notes
+
+
+def _guard_help(project, manual=True):
+    lines = [
+        f"Both checkouts would share the '{project}_*' volumes (database, WhatsApp session, uploads)",
+        "and `docker compose up/down` in one would replace the other's containers.",
+    ]
+    if not manual:
+        return lines
+    return [
+        *lines,
+        "Fix by hand: stop the stack, decide which checkout owns those volumes, and set",
+        "COMPOSE_PROJECT_NAME=<unique name> in the OTHER checkout's .env (it starts with empty volumes).",
+        f"If this directory was simply moved or renamed, set COMPOSE_PROJECT_NAME={project} here instead.",
+    ]
+
+
+def _pending_moves(host, compose_text, ports):
+    """Ports .env now configures differently from what this checkout's running
+    containers publish: applied (silently) by the next `docker compose up`."""
+    own, _foreign = partition(host.containers, host.own_dir, host.project)
+    notes = []
+    for var, service in port_services(compose_text).items():
+        for container in own:
+            if (
+                container.service == service
+                and container.ports
+                and ports[var] not in container.ports
+            ):
+                published = ", ".join(map(str, container.ports))
+                notes.append(
+                    f"{var}={ports[var]}, but this checkout's '{service}' container publishes "
+                    f"{published}: the next `docker compose up -d` moves it"
+                )
+    return notes
+
+
+def cmd_check(args):
+    env_text = _read(args.env) if os.path.isfile(args.env) else ""
+    env = parse_env(env_text)
+    own_dir = os.path.realpath(args.project_dir)
+    project = effective_project(env, os.environ, own_dir)
+    host = load_host(own_dir, project)
+    compose_text = _compose_text(own_dir)
+    specs, default_name = project_specs(own_dir)
+    service_name = env.get("SERVICE_NAME") or default_name or "?"
+    ports = _configured_ports(env, specs)
+
+    print(f"Instance check: SERVICE_NAME '{service_name}', Compose project '{project}'")
+    problems = 0
+
+    clashes = host.clashes(ports)
+    # Without Docker, a port that is merely listening may be our own running
+    # stack: report it, but don't call it a collision (or suggest --fix).
+    unsure = {}
+    if host.docker_error:
+        for var, claims in list(clashes.items()):
+            if all(claim.source == "listening" for claim in claims):
+                unsure[var] = clashes.pop(var)
+    if clashes:
+        print("\nPort clashes:")
+        for var, _default in specs:
+            for claim in clashes.get(var, []):
+                problems += 1
+                print(f"  {var}={claim.port}: {describe_claim(claim)}")
+    if unsure:
+        print("\nPorts in use (possibly this checkout's own stack; Docker is unavailable):")
+        for var, _default in specs:
+            if var in unsure:
+                print(f"  {var}={ports[var]}")
+
+    pending = _pending_moves(host, compose_text, ports)
+    if pending:
+        print("\nPending port changes:")
+        for line in pending:
+            print("  " + line)
+
+    errors, warnings = name_conflicts(
+        service_name,
+        container_suffixes(compose_text),
+        host.containers,
+        host.networks,
+        "" if host.docker_error else image_project(service_name),
+        own_dir,
+        project,
+        network=names_network(compose_text),
+    )
+    if errors:
+        problems += len(errors)
+        print("\nName clashes (choose another SERVICE_NAME in .env):")
+        for line in errors:
+            print("  " + line)
+
+    notes = list(warnings)
+    if not specs:
+        notes.append(
+            f"no compose file with `${{X_PORT:-N}}:<port>` mappings in {own_dir}: ports not checked"
+        )
+    status, reason = project_guard(
+        project,
+        _explicit_project(env),
+        host.containers,
+        host.volumes,
+        host.networks,
+        own_dir,
+        False,
+        "",
+    )
+    if status == GUARD_OK:
+        if reason:
+            notes.append(reason)
+    else:
+        problems += 1
+        print("\nShared Compose project name: " + reason)
+        for line in _guard_help(project):
+            print("  " + line)
+
+    if os.path.isfile(args.template):
+        template_text = _read(args.template)
+        defaults = parse_env(template_text)
+        # A key the template leaves empty is optional: absent means the same.
+        absent = [k for k in missing_keys(template_text, env_text) if defaults[k]]
+        if absent:
+            notes.append(
+                f".env lacks {len(absent)} key(s) from .env.example (defaults apply): "
+                + " ".join(absent)
+                + " — `./setup.sh --update` adds them"
+            )
+    notes += _host_notes(host)
+    if notes:
+        print("\nNotes:")
+        for line in notes:
+            print("  " + line)
+
+    if problems:
+        if clashes:
+            print("\nRun ./setup.sh --fix to move the clashing ports.")
+        return EXIT_CLASH
+    if host.incomplete or not specs:
+        print("\nNo collisions found, but the check is incomplete (see notes).")
+        return EXIT_INCOMPLETE
+    print("\nNo collisions found.")
+    return EXIT_OK
+
+
+def cmd_fix(args):
+    if not os.path.isfile(args.env):
+        print(f"No {args.env} found. Run ./setup.sh first.")
+        return EXIT_CLASH
+    env_text = _read(args.env)
+    env = parse_env(env_text)
+    own_dir = os.path.realpath(args.project_dir)
+    host = load_host(own_dir, effective_project(env, os.environ, own_dir))
+    if host.docker_error:
+        # Without Docker our own running stack looks like any other listener,
+        # and "fixing" would move the ports away from it.
+        print(f"Docker state unavailable ({host.docker_error}).")
+        print("Refusing to change ports: this checkout's containers can't be told apart")
+        print("from other projects' without Docker. Nothing changed.")
+        return EXIT_INCOMPLETE
+    specs, _name = project_specs(own_dir)
+    if not specs:
+        return _no_compose(own_dir)
+    current = _configured_ports(env, specs)
+    assignments, errors = allocate(specs, current, host.is_free)
+
+    moved = [(v, current[v], assignments[v]) for v, _d in specs if assignments[v] != current[v]]
+    pinned = [var for var, _d in specs if var not in env]
+    for line in _host_notes(host):
+        print(line)
+    defaults = dict(specs)
+    for var in errors:
+        print(f"No free port near {defaults[var]} for {var}: set it by hand in .env")
+    if not moved and not pinned:
+        print("Ports are fine; nothing to change.")
+        return EXIT_CLASH if errors else EXIT_OK
+
+    for var, old, new in moved:
+        print(f"  {var}: {old} -> {new}")
+    if pinned:
+        print(f"  written explicitly (were implicit defaults): {' '.join(pinned)}")
+    if not args.yes:
+        try:
+            answer = input(f"Apply to {args.env}? (y/N): ")
+        except EOFError:
+            answer = ""
+        if answer.strip().lower() not in ("y", "yes"):
+            print("Nothing changed.")
+            return EXIT_CLASH if moved else EXIT_OK
+
+    backup = _backup(args.env)
+    new_text = env_text
+    for var, _default in specs:
+        if var in pinned or assignments[var] != current[var]:
+            new_text = set_env(new_text, var, str(assignments[var]))
+    new_text, warnings = sync_derived(new_text, current, assignments)
+    _write_env(args.env, new_text)
+    print(f"Updated {args.env} (backup: {backup})")
+    for line in warnings:
+        print("  ! " + line)
+    if moved:
+        print("Apply with `docker compose up -d`. Anything that targets the old ports from outside")
+        print("(reverse proxy, webhook URL, FleetView base URL, firewall rules) must follow.")
+    return EXIT_CLASH if errors else EXIT_OK
+
+
+def cmd_assign_ports(args):
+    """First-time allocation for setup.sh. Prints one line per port:
+    `PORT VAR from to` (from = the carried-over value, else the default),
+    `ERROR VAR default` when nothing near the default is free, and `NOTE text`."""
+    env_text = _read(args.env)
+    own_dir = os.path.realpath(args.project_dir)
+    specs, _name = project_specs(own_dir)
+    if not specs:
+        return _no_compose(own_dir)
+    before = _configured_ports(parse_env(env_text), specs)
+    current = {}
+    for pair in args.current or []:
+        var, _, value = pair.partition("=")
+        current[var] = value
+    host = load_host(own_dir, effective_project(parse_env(env_text), os.environ, own_dir))
+    if host.docker_error:
+        # Can't see our own containers: keep the ports this checkout would use
+        # (carried over, else the compose defaults) rather than bumping them
+        # away from what is probably our own running stack.
+        host.assumed_own = {_to_port(current.get(var)) or default for var, default in specs}
+        print("NOTE Docker is unavailable: ports this checkout would use are kept")
+    assignments, errors = allocate(specs, current, host.is_free)
+    for var, default in specs:
+        env_text = set_env(env_text, var, str(assignments[var]))
+        if var in errors:
+            print(f"ERROR {var} {default}")
+        else:
+            print(f"PORT {var} {_to_port(current.get(var)) or default} {assignments[var]}")
+    env_text, _warnings = sync_derived(env_text, before, assignments)
+    _write_env(args.env, env_text)
+    for line in _host_notes(host):
+        print("NOTE " + line)
+    return EXIT_OK
+
+
+def cmd_check_name(args):
+    if not VALID_SERVICE_NAME.match(args.name):
+        print(
+            f"ERROR '{args.name}' is not a valid name: lowercase letters and digits, "
+            "joined by single '-' or '_'"
+        )
+        return EXIT_CLASH
+    env = parse_env(_read(args.env)) if os.path.isfile(args.env) else {}
+    own_dir = os.path.realpath(args.project_dir)
+    compose_text = _compose_text(own_dir)
+    try:
+        containers, _volumes, networks = docker_state()
+    except DockerUnavailable:
+        return EXIT_OK
+    errors, warnings = name_conflicts(
+        args.name,
+        container_suffixes(compose_text),
+        containers,
+        networks,
+        image_project(args.name),
+        own_dir,
+        effective_project(env, os.environ, own_dir),
+        network=names_network(compose_text),
+    )
+    for line in errors:
+        print("ERROR " + line)
+    for line in warnings:
+        print("WARN " + line)
+    return EXIT_CLASH if errors else EXIT_OK
+
+
+def cmd_project_guard(args):
+    env = parse_env(_read(args.env)) if os.path.isfile(args.env) else {}
+    own_dir = os.path.realpath(args.project_dir)
+    try:
+        containers, volumes, networks = docker_state()
+    except DockerUnavailable:
+        print(GUARD_OK)
+        return EXIT_OK
+    project = effective_project(env, os.environ, own_dir)
+    status, reason = project_guard(
+        project,
+        _explicit_project(env),
+        containers,
+        volumes,
+        networks,
+        own_dir,
+        args.fresh,
+        args.candidate,
+    )
+    print(status)
+    if status != GUARD_OK:
+        print(reason)
+        for line in _guard_help(project, manual=status == GUARD_REFUSE):
+            print(line)
+    return EXIT_OK
+
+
+def cmd_get(args):
+    """Print each KEY's value as Compose reads it ('' when unset)."""
+    env = parse_env(_read(args.env)) if os.path.isfile(args.env) else {}
+    for key in args.keys:
+        print(env.get(key, ""))
+    return EXIT_OK
+
+
+def cmd_set(args):
+    """Set KEY=VALUE in .env, keeping every other line byte-for-byte."""
+    _write_env(args.env, set_env(_read(args.env), args.key, args.value))
+    return EXIT_OK
+
+
+_SECRET_SUFFIXES = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASS")
+
+
+def _ask(prompt, secret):
+    sys.stdout.flush()
+    try:
+        return (getpass.getpass(prompt) if secret else input(prompt)).strip()
+    except EOFError:
+        return ""
+
+
+def cmd_update(args):
+    """Add the keys .env.example has and .env lacks; existing lines stay as-is."""
+    if not os.path.isfile(args.env):
+        print(f"No {args.env} found. Run ./setup.sh first.")
+        return EXIT_INCOMPLETE
+    if not os.path.isfile(args.template):
+        print(f"No {args.template} found.")
+        return EXIT_INCOMPLETE
+    env_text, template_text = _read(args.env), _read(args.template)
+    template = parse_env(template_text)
+    missing = missing_keys(template_text, env_text)
+    env_name, template_name = os.path.relpath(args.env), os.path.relpath(args.template)
+    if args.list:
+        for key in missing:
+            print(key)
+        return EXIT_OK
+    obsolete = [key for key in parse_env(env_text) if key not in template]
+    if not missing:
+        print(f"{env_name} is up to date with {template_name}.")
+    else:
+        print(f"New in {template_name}: {' '.join(missing)}")
+    if obsolete:
+        print(f"Not in {template_name} (possibly obsolete, left as is): {' '.join(obsolete)}")
+    if not missing:
+        return EXIT_OK
+
+    values = {}
+    if not args.yes:
+        hints = template_hints(template_text)
+        for key in missing:
+            if template[key]:
+                continue  # has a default: added as the template has it
+            if key in hints:
+                print(f"  {key}: {hints[key]}")
+            value = _ask(f"  {key} (Enter to leave empty): ", key.endswith(_SECRET_SUFFIXES))
+            if value:
+                values[key] = value
+        if not args.confirmed:
+            try:
+                sys.stdout.flush()
+                answer = input(f"Add {len(missing)} setting(s) to {env_name}? (Y/n): ")
+            except EOFError:
+                answer = ""
+            if answer.strip().lower() in ("n", "no"):
+                print("Nothing changed.")
+                return EXIT_CLASH
+
+    text, added = add_missing(env_text, template_text, values, time.strftime("%Y-%m-%d"))
+    backup = _backup(args.env)
+    _write_env(args.env, text)
+    print(f"Added {len(added)} setting(s) to {env_name} (backup: {os.path.relpath(backup)}).")
+    print("Restart the stack (`docker compose up -d`) to apply them.")
+    return EXIT_OK
+
+
+def cmd_backup(args):
+    """Byte copy of .env (mode 600); prints its path."""
+    print(_backup(args.env))
+    return EXIT_OK
+
+
+def cmd_carry(args):
+    """Bring the previous .env's values into the fresh template copy at --env."""
+    text, kept, appended = carry_env(_read(args.env), _read(args.previous), args.skip or ())
+    _write_env(args.env, text)
+    print(f"{kept} {appended}")
+    return EXIT_OK
+
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        self.exit(EXIT_USAGE, f"{self.prog}: error: {message}\n")
+
+
+def main(argv=None):
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    parser = _Parser(description=__doc__.splitlines()[0])
+    parser.add_argument("--project-dir", default=root)
+    parser.add_argument(
+        "--env", default=None, help=".env to read/write (default: <project-dir>/.env)"
+    )
+    parser.add_argument("--template", default=None, help="default: <project-dir>/.env.example")
+    sub = parser.add_subparsers(dest="command", parser_class=_Parser)
+    sub.required = True
+    sub.add_parser("check").set_defaults(func=cmd_check)
+    fix = sub.add_parser("fix")
+    fix.add_argument("--yes", action="store_true")
+    fix.set_defaults(func=cmd_fix)
+    assign = sub.add_parser("assign-ports")
+    assign.add_argument("--current", action="append", metavar="VAR=PORT")
+    assign.set_defaults(func=cmd_assign_ports)
+    name = sub.add_parser("check-name")
+    name.add_argument("name")
+    name.set_defaults(func=cmd_check_name)
+    guard = sub.add_parser("project-guard")
+    guard.add_argument("--fresh", action="store_true")
+    guard.add_argument("--candidate", default="")
+    guard.set_defaults(func=cmd_project_guard)
+    get = sub.add_parser("get")
+    get.add_argument("keys", nargs="+")
+    get.set_defaults(func=cmd_get)
+    setter = sub.add_parser("set")
+    setter.add_argument("key")
+    setter.add_argument("value")
+    setter.set_defaults(func=cmd_set)
+    update = sub.add_parser("update")
+    update.add_argument("--yes", action="store_true", help="no prompts: template values")
+    update.add_argument("--list", action="store_true", help="only print the missing keys")
+    update.add_argument("--confirmed", action="store_true", help="ask values, skip the final y/n")
+    update.set_defaults(func=cmd_update)
+    sub.add_parser("backup").set_defaults(func=cmd_backup)
+    carry = sub.add_parser("carry")
+    carry.add_argument("previous", help="the previous .env (e.g. its backup)")
+    carry.add_argument("--skip", action="append", metavar="KEY")
+    carry.set_defaults(func=cmd_carry)
+    args = parser.parse_args(argv)
+    args.env = args.env or os.path.join(args.project_dir, ".env")
+    args.template = args.template or os.path.join(args.project_dir, ".env.example")
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -5,6 +5,9 @@ dist/
 .env
 .env.local
 .env.*.local
+# setup.sh --fix backups and its atomic-write temp file (both hold secrets)
+.env.bak.*
+.env.tmp*
 
 # Python
 __pycache__/

@@ -94,7 +94,7 @@ When the user describes an issue, determine WHERE in the pipeline it occurs:
 - Python settings: `packages/ai-api/src/ai_api/config.py` (~45 settings)
 - TypeScript config: `packages/whatsapp-client/src/config.ts`
 - Environment: root `.env` + package-level `.env.local`
-- Docker networking: `docker-compose.yml` (services communicate via `aiagent-network`)
+- Docker networking: `docker-compose.yml` (services communicate via `<SERVICE_NAME>-network`, default `aiagent-network`)
 
 ## Log Patterns
 

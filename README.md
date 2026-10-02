@@ -142,6 +142,9 @@ packages/
 git clone <repo>
 cd ai-boilerplate
 ./setup.sh             # interactive: generates .env, installs deps
+./setup.sh --check     # any time: report clashes with other bots on this host
+./setup.sh --fix       # move clashing ports in .env (keeps a backup)
+./setup.sh --update    # after pulling: add settings new in .env.example to .env
 ```
 
 The script checks prerequisites, creates `.env` from the template (auto-generating passwords and inter-service keys), prompts for `GEMINI_API_KEY` and any optional integrations (DeepSeek, Meta Cloud API, Groq), then runs `pnpm install:all`.
@@ -156,7 +159,13 @@ docker compose --profile whisper up -d                  # + self-hosted Whisper 
 docker compose --profile dev --profile cloud up -d      # everything
 ```
 
-Profiles are opt-in: without `--profile`, Adminer, the Cloud API client, and the self-hosted Whisper server stay stopped. Infrastructure ports (`5432`, `6379`, `8080`, `8771`) bind to `127.0.0.1` only — application services (`8000`, `3001`, `3002`) remain on all interfaces so they can be reached from host tooling and the WhatsApp client.
+Profiles are opt-in: without `--profile`, Adminer, the Cloud API client, and the self-hosted Whisper server stay stopped. Infrastructure ports (`5432`, `6379`, `8080`, `8771`) bind to `127.0.0.1` only — application services (`8000`, `3001`, `3002`) remain on all interfaces so they can be reached from host tooling and the WhatsApp client. Set `AI_API_BIND` / `WHATSAPP_API_BIND` / `WHATSAPP_CLOUD_BIND` / `TELEGRAM_BIND` to `127.0.0.1` to publish one on loopback only.
+
+### Several bots on one server
+
+Each checkout needs its own `SERVICE_NAME` (container, network and image names) and its own host ports. `./setup.sh` takes care of both: it refuses a name another compose project already uses and picks ports that are free — counting other projects' stopped stacks and not-yet-started profiles, not just what is listening right now. Run `./setup.sh --check` on an existing deployment to see clashes and `./setup.sh --fix` to move the clashing ports (it keeps a byte-for-byte backup, changes only ports and the local-dev URLs that embed them, and refuses to run while Docker is unreachable). Re-running `./setup.sh` and overwriting `.env` backs the old file up and keeps its values — passwords, keys, whitelist, ports, `SERVICE_NAME`, `COMPOSE_PROJECT_NAME`, `*_BIND` — pressing Enter at a prompt keeps the current value.
+
+Volumes belong to the Compose project, which is named after the checkout's **directory**. Clone each bot into a differently named directory (or set `COMPOSE_PROJECT_NAME` before the first start); never change it afterwards, or the stack starts with empty volumes. A stopped bot that is not in a neighbouring directory can be included in the check with `SIBLING_DIRS=/path/a:/path/b ./setup.sh --check`.
 
 The images run as non-root users (uid 1000). **Upgrading a deployment built from the older root images?** Chown the existing Baileys session and upload volumes once, or the WhatsApp session and uploads can't be written:
 
@@ -228,7 +237,7 @@ The free tier covers 10M records/month and is hard-capped at $0 — it can never
 | GET | `/knowledge-base/status/{id}` | Processing status |
 | DELETE | `/knowledge-base/documents/{id}` | Delete document |
 
-Bulk-load a folder of PDFs with `./upload-kb.sh /path/to/pdfs` (uses `AI_API_KEY` from the environment or `.env`; `AI_API_URL` defaults to `http://localhost:8000`). Re-running it is safe: files already in the knowledge base are rejected as duplicates.
+Bulk-load a folder of PDFs with `./upload-kb.sh /path/to/pdfs` (uses `AI_API_KEY` from the environment or `.env`; `AI_API_URL` defaults to `http://localhost:<AI_API_PORT from .env>`, i.e. this checkout's published API port). Re-running it is safe: files already in the knowledge base are rejected as duplicates.
 
 ### Broadcasts (admin)
 | Method | Endpoint | Description |
@@ -269,7 +278,7 @@ pnpm format          # Format all code
 
 ### Database Access
 - **Adminer GUI:** http://localhost:8080 (postgres / aiagent / changeme)
-- **Direct:** `docker exec -it aiagent-postgres psql -U aiagent -d aiagent` (the container is `<SERVICE_NAME>-postgres`; substitute yours if you changed `SERVICE_NAME`)
+- **Direct:** `docker compose exec postgres psql -U aiagent -d aiagent` (run in the checkout; it reaches this bot's database whatever `SERVICE_NAME` is)
 
 ## Configuration
 
