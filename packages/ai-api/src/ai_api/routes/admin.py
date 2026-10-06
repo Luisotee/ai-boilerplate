@@ -249,8 +249,10 @@ def _validate_cross_constraints(coerced: dict[str, object]) -> None:
     if "bot_name" in coerced:
         _validate_bot_name(coerced["bot_name"])
     _validate_broadcast_settings(coerced, effective)
-    if coerced.get("bug_reports_per_user_per_hour", 0) < 0:
-        raise HTTPException(status_code=400, detail="bug_reports_per_user_per_hour must be >= 0")
+    # >= 1: an emptied number box must not silently stop reports
+    # (bug_reports_enabled is the off switch).
+    if coerced.get("bug_reports_per_user_per_hour", 1) < 1:
+        raise HTTPException(status_code=400, detail="bug_reports_per_user_per_hour must be >= 1")
     if "whitelist_phones" in coerced:
         # Deliberately no *format* check: entry shapes are forward-compatible
         # (future JID schemes land in the id set and simply never match), and

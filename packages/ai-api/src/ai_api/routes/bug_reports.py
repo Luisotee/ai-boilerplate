@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..database import BugReport, User, get_db
@@ -95,8 +96,12 @@ async def list_bug_reports(
         .offset(offset)
         .all()
     )
+    # Same source filter as the list, so counts_by_status agrees with total.
     counts = dict.fromkeys(_STATUSES, 0)
-    for value, n in db.query(BugReport.status, func.count(BugReport.id)).group_by(BugReport.status):
+    count_query = db.query(BugReport.status, func.count(BugReport.id))
+    if source:
+        count_query = count_query.filter(BugReport.source == source)
+    for value, n in count_query.group_by(BugReport.status):
         if value in counts:
             counts[value] = n
     return BugReportsResponse(
@@ -121,18 +126,27 @@ async def update_bug_report(
 ):
     """Triage a report: open / resolved / ignored, with an optional note.
 
-    ``resolved_at`` is set when it becomes resolved and cleared otherwise.
-    Reopening makes it absorb repeats of its fingerprint again.
+    ``resolved_at`` is set when it becomes resolved (kept if it already was)
+    and cleared otherwise. ``resolution_note``: omitted = unchanged, ``null``
+    = cleared. Reopening makes it absorb repeats of its fingerprint again, so
+    it is a 409 while another open report already tracks the same error.
     """
     report, user_name = _get_or_404(db, report_id)
     try:
+        if body.status != "resolved":
+            report.resolved_at = None
+        elif report.status != "resolved" or report.resolved_at is None:
+            report.resolved_at = datetime.now(UTC).replace(tzinfo=None)
         report.status = body.status
-        report.resolved_at = (
-            datetime.now(UTC).replace(tzinfo=None) if body.status == "resolved" else None
-        )
-        if body.resolution_note is not None:
+        if "resolution_note" in body.model_fields_set:
             report.resolution_note = body.resolution_note
         db.commit()
+    except IntegrityError:
+        # uq_bug_reports_open_fingerprint: one open report per fingerprint.
+        db.rollback()
+        raise HTTPException(
+            status_code=409, detail="Another open report already tracks this error"
+        ) from None
     except Exception:
         db.rollback()
         logger.error(f"Failed to update bug report {report_id}", exc_info=True)

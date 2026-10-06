@@ -39,7 +39,7 @@ from ..database import SessionLocal
 from ..kb_models import KnowledgeBaseDocument
 from ..logger import logger
 from ..processing import is_retriable_error, process_pdf_document
-from ..services.bug_reports import record_auto_report
+from ..services.bug_reports import normalize_message, record_auto_report
 from ..whatsapp import create_whatsapp_client
 from .manager import (
     acknowledge_pdf_message,
@@ -157,15 +157,16 @@ async def _handle_failure(
         why = "max retries exhausted" if retriable else "non-retriable error"
         logger.warning(f"[PDF] Document {document_id} permanently failed ({why}): {reason}")
         await dead_letter_pdf_job(redis, fields, f"{why}: {reason}")
-        # The reason starts with the exception type (or a fixed phrase), which
-        # is stable; the rest carries ids and paths, so it stays out of the
-        # fingerprint.
+        # Grouped by the exception type plus the normalised reason (ids, paths
+        # and numbers stripped): one ValueError type covers many unrelated
+        # causes (empty parse, no pages, missing API key, no chunks).
         await asyncio.to_thread(
             record_auto_report,
             "pdf_failure",
             title=f"PDF permanently failed to process ({why})",
             error_type=reason.split(":", 1)[0][:120],
             error_detail=f"{why}: {reason}",
+            location=f"{why}|{normalize_message(reason)}",
             whatsapp_jid=fields.get("whatsapp_jid"),
             client_id=fields.get("client_id"),
             document_id=document_id,
@@ -228,6 +229,16 @@ async def process_pdf_job(redis: Redis, message_id: str, data: dict) -> None:
         logger.warning(f"[PDF] Document {document_id} finished with status {status!r}")
         await acknowledge_pdf_message(redis, message_id)
         await _send_reaction(fields, "❌")
+        await asyncio.to_thread(
+            record_auto_report,
+            "pdf_failure",
+            title=f"PDF only partly processed (status {status!r})",
+            error_type=str(status)[:120],
+            error_detail="Some chunks could not be embedded; the document is not searchable.",
+            whatsapp_jid=fields.get("whatsapp_jid"),
+            client_id=fields.get("client_id"),
+            document_id=document_id,
+        )
 
 
 async def _handle_reclaimed(redis: Redis, message_id: str, data: dict) -> None:

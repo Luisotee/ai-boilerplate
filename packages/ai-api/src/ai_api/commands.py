@@ -21,7 +21,7 @@ from .database import (
 )
 from .kb_models import KnowledgeBaseDocument
 from .logger import logger
-from .services.bug_reports import clear_user_context
+from .services.bug_reports import scrub_user_reports
 
 # Supported language codes
 SUPPORTED_LANGUAGES = {"en", "es", "pt", "fr", "de"}
@@ -254,8 +254,9 @@ def handle_clean_command(
         .filter(ConversationMessage.user_id == user_id)
         .delete(synchronize_session=False)
     )
-    # Bug reports keep a copy of the chat's last messages; /clean drops it too.
-    clear_user_context(db, user_id)
+    # Bug reports copy the chat (messages, traceback, the agent's write-up);
+    # /clean removes those too and keeps only the reports' metadata.
+    scrub_user_reports(db, user_id)
 
     doc_count = 0
     files_to_delete: list[Path] = []

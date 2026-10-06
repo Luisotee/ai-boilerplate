@@ -110,64 +110,108 @@ class TestSnapshotContext:
         assert ctx[0]["at"] == "2026-10-06T12:00:00"
 
 
-def _session(bumped: int):
-    db = MagicMock()
-    db.query.return_value.filter.return_value.update.return_value = bumped
-    return db
+def _upsert_sql(db) -> str:
+    from sqlalchemy.dialects import postgresql
+
+    stmt = db.execute.call_args.args[0]
+    return str(stmt.compile(dialect=postgresql.dialect()))
 
 
 class TestRecordAutoReport:
-    def _record(self, db, **kwargs):
+    def _record(self, db, settings=None, **kwargs):
+        kwargs.setdefault("exc", _raised(KeyError("k")))
+        kwargs.setdefault("user_id", "u1")
         with (
-            _settings(**kwargs.pop("settings", {})),
+            _settings(**(settings or {})),
             patch.object(br, "SessionLocal", return_value=db),
-            patch.object(br, "snapshot_context", return_value=[{"role": "user"}]),
+            patch.object(br, "snapshot_context", return_value=[{"role": "user"}]) as snap,
         ):
-            br.record_auto_report(
-                "job_crash",
-                title="Chat job crashed",
-                exc=_raised(KeyError("k")),
-                user_id="u1",
-                job_id="job-2",
-                **kwargs,
-            )
+            br.record_auto_report("job_crash", title="Chat job crashed", job_id="job-2", **kwargs)
+        return snap
 
-    def test_new_fingerprint_inserts_a_row(self):
-        db = _session(bumped=0)
+    def test_upserts_on_the_open_fingerprint_index(self):
+        db = MagicMock()
         self._record(db)
-        report = db.add.call_args.args[0]
-        assert report.source == "job_crash"
-        assert report.error_type == "KeyError"
-        assert "KeyError" in report.error_detail
-        assert report.context == [{"role": "user"}]
-        assert len(report.fingerprint) == 64
+        sql = _upsert_sql(db)
+        assert "INSERT INTO bug_reports" in sql
+        assert "ON CONFLICT (fingerprint) WHERE status = 'open' DO UPDATE" in sql
+        assert "occurrences = (bug_reports.occurrences + " in sql
         db.commit.assert_called_once()
         db.close.assert_called_once()
 
-    def test_open_duplicate_only_bumps_the_counter(self):
-        db = _session(bumped=1)
+    def test_a_bump_replaces_the_whole_sample(self):
+        """Every per-occurrence column comes from the same (latest) occurrence,
+        so a row never shows one user's chat next to another user's job."""
+        db = MagicMock()
         self._record(db)
-        db.add.assert_not_called()
-        values = db.query.return_value.filter.return_value.update.call_args.args[0]
-        assert br.BugReport.job_id in values
-        assert br.BugReport.occurrences in values
-        db.commit.assert_called_once()
+        set_clause = _upsert_sql(db).split("DO UPDATE SET", 1)[1]
+        for col in br._SAMPLE_COLUMNS:
+            assert f"{col} = excluded.{col}" in set_clause
+        assert "created_at" not in set_clause  # stays "first seen"
+
+    def test_values(self):
+        db = MagicMock()
+        self._record(db)
+        params = db.execute.call_args.args[0].compile().params
+        assert params["source"] == "job_crash"
+        assert params["error_type"] == "KeyError"
+        assert "KeyError" in params["error_detail"]
+        assert params["context"] == [{"role": "user"}]
+        assert len(params["fingerprint"]) == 64
+
+    def test_locks_the_user_row_before_snapshotting(self):
+        db = MagicMock()
+        order = []
+        db.query.return_value.filter.return_value.with_for_update.side_effect = (
+            lambda: order.append("lock") or MagicMock(first=MagicMock(return_value=object()))
+        )
+        with (
+            _settings(),
+            patch.object(br, "SessionLocal", return_value=db),
+            patch.object(br, "snapshot_context", side_effect=lambda *a: order.append("snap")),
+        ):
+            br.record_auto_report("job_crash", title="t", exc=_raised(KeyError()), user_id="u1")
+        assert order == ["lock", "snap"]
+
+    def test_deleted_user_is_not_referenced(self):
+        db = MagicMock()
+        db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = None
+        with (
+            _settings(),
+            patch.object(br, "SessionLocal", return_value=db),
+            patch.object(br, "get_conversation_messages") as get,
+        ):
+            br.record_auto_report("job_crash", title="t", exc=_raised(KeyError()), user_id="u1")
+        params = db.execute.call_args.args[0].compile().params
+        assert params["user_id"] is None
+        assert params["context"] is None
+        get.assert_not_called()
+
+    def test_explicit_location_changes_the_fingerprint(self):
+        fps = []
+        for location in ("x|empty result", "x|gemini_api_key not configured"):
+            db = MagicMock()
+            with _settings(), patch.object(br, "SessionLocal", return_value=db):
+                br.record_auto_report(
+                    "pdf_failure", title="t", error_type="ValueError", location=location
+                )
+            fps.append(db.execute.call_args.args[0].compile().params["fingerprint"])
+        assert fps[0] != fps[1]
 
     def test_disabled_does_nothing(self):
-        db = _session(bumped=0)
+        db = MagicMock()
         self._record(db, settings={"bug_reports_enabled": False})
-        db.query.assert_not_called()
-        db.add.assert_not_called()
+        db.execute.assert_not_called()
 
     def test_never_raises(self):
-        db = _session(bumped=0)
-        db.commit.side_effect = RuntimeError("db down")
+        db = MagicMock()
+        db.execute.side_effect = RuntimeError("db down")
         self._record(db)  # must not raise
         db.rollback.assert_called_once()
         db.close.assert_called_once()
 
     def test_without_exception_uses_given_type(self):
-        db = _session(bumped=0)
+        db = MagicMock()
         with _settings(), patch.object(br, "SessionLocal", return_value=db):
             br.record_auto_report(
                 "pdf_failure",
@@ -176,10 +220,33 @@ class TestRecordAutoReport:
                 error_detail="non-retriable error: ValueError: bad pdf",
                 document_id="doc-1",
             )
-        report = db.add.call_args.args[0]
-        assert report.error_type == "ValueError"
-        assert report.document_id == "doc-1"
-        assert report.context is None  # no user: no snapshot
+        params = db.execute.call_args.args[0].compile().params
+        assert params["error_type"] == "ValueError"
+        assert params["document_id"] == "doc-1"
+        assert params["context"] is None  # no user: no snapshot
+
+
+class TestNormalizeMessage:
+    def test_strips_ids_paths_and_numbers(self):
+        a = br.normalize_message(
+            "ValueError: Document 3f2a9c1e-1111-2222-3333-444455556666 at /data/a.pdf has 0 pages"
+        )
+        b = br.normalize_message(
+            "ValueError: Document 9b8a7c6d-aaaa-bbbb-cccc-ddddeeeeffff at /data/b.pdf has 12 pages"
+        )
+        assert a == b
+        assert "<id>" in a and "<path>" in a
+
+    def test_different_causes_stay_different(self):
+        assert br.normalize_message(
+            "ValueError: LlamaParse returned an empty result (no markdown pages)."
+        ) != br.normalize_message("ValueError: GEMINI_API_KEY not configured")
+
+    def test_slash_inside_a_word_is_not_a_path(self):
+        assert br.normalize_message("and/or") == "and/or"
+
+    def test_truncated(self):
+        assert len(br.normalize_message("x" * 500)) == 80
 
 
 class TestFileReport:
@@ -219,21 +286,28 @@ class TestFileReport:
             self._file(MagicMock(), recent=0, bug_reports_per_user_per_hour=0)
 
 
-class TestClearUserContext:
-    def test_sets_sql_null(self):
+class TestScrubUserReports:
+    def test_clears_everything_copied_from_the_chat(self):
+        from sqlalchemy.dialects import postgresql
+
         db = MagicMock()
-        br.clear_user_context(db, "u1")
+        br.scrub_user_reports(db, "u1")
+        db.query.return_value.filter.return_value.with_for_update.assert_called_once()
         values = db.query.return_value.filter.return_value.update.call_args.args[0]
         # null(), not None: None would store JSON 'null' on a JSONB column.
         assert str(values[br.BugReport.context]) == "NULL"
+        assert str(values[br.BugReport.error_detail]) == "NULL"
+        assert values[br.BugReport.description] == ""
+        title = str(values[br.BugReport.title].compile(dialect=postgresql.dialect()))
+        assert "CASE WHEN" in title and "bug_reports.source IN" in title
 
-    def test_clean_command_clears_snapshots(self):
+    def test_clean_command_scrubs_reports(self):
         from ai_api import commands
 
         db = MagicMock()
-        with patch.object(commands, "clear_user_context") as clear:
+        with patch.object(commands, "scrub_user_reports") as scrub:
             commands.handle_clean_command(db, "u1", "1@s.whatsapp.net", level="messages")
-        clear.assert_called_once_with(db, "u1")
+        scrub.assert_called_once_with(db, "u1")
 
 
 def test_short_ref():

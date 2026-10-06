@@ -8,6 +8,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -257,6 +258,16 @@ class BugReport(Base):
     """
 
     __tablename__ = "bug_reports"
+    # At most one OPEN report per fingerprint: record_auto_report upserts on it,
+    # so concurrent identical failures bump one row instead of adding two.
+    __table_args__ = (
+        Index(
+            "uq_bug_reports_open_fingerprint",
+            "fingerprint",
+            unique=True,
+            postgresql_where=text("status = 'open'"),
+        ),
+    )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     # 'user' | 'agent' | 'model_error' | 'job_crash' | 'pdf_failure'

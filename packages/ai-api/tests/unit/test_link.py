@@ -6,7 +6,7 @@ MagicMock for the SQLAlchemy session (no real database).
 """
 
 import uuid
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import fakeredis.aioredis
 import pytest
@@ -202,6 +202,29 @@ class TestConsumeLinkCodeErrors:
 
 
 class TestConsumeLinkCodeHappyPath:
+    async def test_scrubs_the_orphans_bug_reports_before_deleting_it(self, redis):
+        from ai_api.services import link
+
+        whatsapp_id, telegram_id = str(uuid.uuid4()), str(uuid.uuid4())
+        code = await generate_link_code(redis, whatsapp_id, "whatsapp")
+        whatsapp_user = MagicMock(id=uuid.UUID(whatsapp_id), telegram_jid=None)
+        whatsapp_user.whatsapp_jid = "555@s.whatsapp.net"
+        telegram_user = MagicMock(id=uuid.UUID(telegram_id), telegram_jid=None)
+        telegram_user.whatsapp_jid = "tg:42"
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.side_effect = [
+            whatsapp_user,
+            telegram_user,
+        ]
+        order = []
+        db.delete.side_effect = lambda _row: order.append("delete")
+        with patch.object(
+            link, "scrub_user_reports", side_effect=lambda _db, uid: order.append(uid)
+        ):
+            result = await consume_link_code(db, redis, code, telegram_id, "telegram")
+        assert result.success is True
+        assert order == [telegram_user.id, "delete"]
+
     async def test_whatsapp_initiates_link_with_telegram(self, redis):
         whatsapp_id = str(uuid.uuid4())
         telegram_id = str(uuid.uuid4())

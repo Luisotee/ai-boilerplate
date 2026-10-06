@@ -13,6 +13,17 @@ from pydantic_ai.exceptions import (
     UnexpectedModelBehavior,
 )
 
+
+@pytest.fixture(autouse=True)
+def _no_bug_reports():
+    """Keep the real recorder (its own DB session) out of these tests; the
+    TestAutomaticBugReports cases patch it again to assert on it."""
+    from ai_api.streams import processor as proc_module
+
+    with patch.object(proc_module, "record_auto_report"):
+        yield
+
+
 FALLBACK_TEXT = "Sorry, something went wrong while processing your message. Please try again."
 
 
@@ -409,6 +420,31 @@ class TestAutomaticBugReports:
             await _run_processor(_make_failing_agent(RuntimeError("boom")), raises=RuntimeError)
         assert record.call_args.args[0] == "job_crash"
         assert isinstance(record.call_args.kwargs["exc"], RuntimeError)
+
+    @pytest.mark.asyncio
+    async def test_recorded_after_the_job_status_is_published(self):
+        """The recorder runs last, off the event loop: a slow DB must not delay
+        the fallback reply or the failed status the client is polling for."""
+        from ai_api.streams import processor as proc_module
+
+        seen = []
+        real_to_thread = proc_module.asyncio.to_thread
+
+        async def to_thread(fn, *args, **kwargs):
+            # The harness's set_job_metadata mock is live while the job runs.
+            seen.append((args[0], proc_module.set_job_metadata.await_count))
+            return await real_to_thread(fn, *args, **kwargs)
+
+        for exc, raises in (
+            (ModelHTTPError(status_code=503, model_name="gemini", body=None), None),
+            (RuntimeError("boom"), RuntimeError),
+        ):
+            with (
+                patch.object(proc_module, "record_auto_report"),
+                patch.object(proc_module.asyncio, "to_thread", to_thread),
+            ):
+                await _run_processor(_make_failing_agent(exc), raises=raises)
+        assert seen == [("model_error", 1), ("job_crash", 1)]
 
     @pytest.mark.asyncio
     async def test_success_is_not_reported(self):

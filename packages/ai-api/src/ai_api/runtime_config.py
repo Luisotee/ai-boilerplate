@@ -116,7 +116,8 @@ REGISTRY: tuple[SettingSpec, ...] = (
         "int",
         True,
         "conversation",
-        "Maximum bug reports the agent may file per chat per hour.",
+        "Maximum bug reports the agent may file per chat per hour (at least 1; "
+        "turn reports off with bug_reports_enabled).",
     ),
     SettingSpec(
         "core_memory_max_length",

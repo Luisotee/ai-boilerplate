@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy.exc import IntegrityError
 
 AUTH = {"X-API-Key": "test-api-key"}
 NOW = datetime.now(UTC).replace(tzinfo=None)
@@ -117,6 +118,13 @@ class TestList:
         assert joined.filter.call_count == 1
         assert joined.filter.return_value.filter.call_count == 1
 
+    async def test_status_counts_follow_the_source_filter(self, client_for):
+        db = make_db()
+        db.query.return_value.filter.return_value.group_by.return_value = [("open", 2)]
+        async with client_for(db) as c:
+            resp = await c.get("/admin/bug-reports?source=agent", headers=AUTH)
+        assert resp.json()["counts_by_status"] == {"open": 2, "resolved": 0, "ignored": 0}
+
     async def test_unknown_status_rejected(self, client_for):
         async with client_for(make_db()) as c:
             resp = await c.get("/admin/bug-reports?status=closed", headers=AUTH)
@@ -175,6 +183,41 @@ class TestUpdate:
             )
         assert resp.json()["resolved_at"] is None
 
+    async def test_resolving_again_keeps_the_timestamp(self, client_for):
+        earlier = datetime(2026, 1, 1)
+        r = report(status="resolved", resolved_at=earlier)
+        async with client_for(make_db(found=(r, None))) as c:
+            resp = await c.patch(
+                f"/admin/bug-reports/{r.id}", json={"status": "resolved"}, headers=AUTH
+            )
+        assert resp.json()["resolved_at"] == earlier.isoformat()
+
+    async def test_note_omitted_is_unchanged_and_null_clears_it(self, client_for):
+        r = report(resolution_note="old note")
+        async with client_for(make_db(found=(r, None))) as c:
+            resp = await c.patch(
+                f"/admin/bug-reports/{r.id}", json={"status": "ignored"}, headers=AUTH
+            )
+            assert resp.json()["resolution_note"] == "old note"
+            resp = await c.patch(
+                f"/admin/bug-reports/{r.id}",
+                json={"status": "ignored", "resolution_note": None},
+                headers=AUTH,
+            )
+        assert resp.json()["resolution_note"] is None
+
+    async def test_reopening_while_another_is_open_is_409(self, client_for):
+        r = report(status="resolved", resolved_at=NOW)
+        db = make_db(found=(r, None))
+        db.commit.side_effect = IntegrityError("UPDATE", {}, Exception("uq_bug_reports_open"))
+        async with client_for(db) as c:
+            resp = await c.patch(
+                f"/admin/bug-reports/{r.id}", json={"status": "open"}, headers=AUTH
+            )
+        assert resp.status_code == 409
+        assert "uq_bug_reports" not in resp.text
+        db.rollback.assert_called_once()
+
     async def test_invalid_status_422(self, client_for):
         r = report()
         async with client_for(make_db(found=(r, None))) as c:
@@ -228,3 +271,14 @@ class TestSettingValidation:
                 headers=AUTH,
             )
         assert resp.status_code == 400
+
+    async def test_zero_cap_rejected(self, client_for):
+        """An emptied number box in FleetView must not silently stop reports."""
+        async with client_for(make_db()) as c:
+            resp = await c.patch(
+                "/admin/settings",
+                json={"overrides": {"bug_reports_per_user_per_hour": 0}},
+                headers=AUTH,
+            )
+        assert resp.status_code == 400
+        assert ">= 1" in resp.text

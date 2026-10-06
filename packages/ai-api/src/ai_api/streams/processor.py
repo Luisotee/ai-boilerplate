@@ -2,6 +2,8 @@
 Core chat processing logic, called by the Redis Streams consumer.
 """
 
+import asyncio
+
 import httpx
 
 from ..agent import AgentDeps, format_message_history, get_ai_response
@@ -231,16 +233,6 @@ async def process_chat_job_direct(
                     full_response += token
             except MODEL_ERRORS as model_error:
                 logger.error(f"[Job {job_id}] AI model error: {model_error}", exc_info=True)
-                record_auto_report(
-                    "model_error",
-                    title="AI model failed to answer",
-                    exc=model_error,
-                    user_id=user_id,
-                    whatsapp_jid=whatsapp_jid,
-                    client_id=client_id,
-                    conversation_type=conversation_type,
-                    job_id=job_id,
-                )
                 # Deliver the fallback text as a normal COMPLETED job (no "status":
                 # "failed"): the clients treat "failed" as an exception and answer
                 # it with their OWN error text + ❌, so publishing this text AND
@@ -276,6 +268,19 @@ async def process_chat_job_direct(
                         "user_message_id": user_message_id,
                         "model_error": True,
                     },
+                )
+                # After the user-facing steps, and off the event loop: it opens
+                # its own DB connection, which can stall while the DB is in trouble.
+                await asyncio.to_thread(
+                    record_auto_report,
+                    "model_error",
+                    title="AI model failed to answer",
+                    exc=model_error,
+                    user_id=user_id,
+                    whatsapp_jid=whatsapp_jid,
+                    client_id=client_id,
+                    conversation_type=conversation_type,
+                    job_id=job_id,
                 )
 
                 return {
@@ -354,16 +359,6 @@ async def process_chat_job_direct(
 
         except Exception as e:
             logger.error(f"[Job {job_id}] ❌ Error processing chat: {e}", exc_info=True)
-            record_auto_report(
-                "job_crash",
-                title="Chat job crashed",
-                exc=e,
-                user_id=user_id,
-                whatsapp_jid=whatsapp_jid,
-                client_id=client_id,
-                conversation_type=conversation_type,
-                job_id=job_id,
-            )
 
             # Save partial response if any
             if full_response:
@@ -403,6 +398,19 @@ async def process_chat_job_direct(
                 logger.info(f"[Job {job_id}] Wrote failed-status metadata")
             except Exception as meta_err:
                 logger.error(f"[Job {job_id}] Failed to write failure metadata: {meta_err}")
+
+            # After the failed status is published, off the event loop (see above).
+            await asyncio.to_thread(
+                record_auto_report,
+                "job_crash",
+                title="Chat job crashed",
+                exc=e,
+                user_id=user_id,
+                whatsapp_jid=whatsapp_jid,
+                client_id=client_id,
+                conversation_type=conversation_type,
+                job_id=job_id,
+            )
 
             # Re-raise exception
             raise

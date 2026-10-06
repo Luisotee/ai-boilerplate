@@ -53,7 +53,7 @@ A production-ready AI agent system that brings conversational AI to WhatsApp wit
 ### Bug Reports
 - Users can ask the bot to report a problem; the bot also files one on its own when the user complains or it notices it got something wrong
 - Model failures, crashed chat jobs and PDFs that fail to process are recorded automatically, deduplicated (one open report with an occurrence count)
-- Each report keeps the chat's last messages (removed by `/clean`); operators triage them through `/admin/bug-reports`
+- Each report keeps the chat's last messages; `/clean` removes them along with the report's write-up and traceback. Operators triage reports through `/admin/bug-reports`
 
 ### Command System
 | Command | Description |
@@ -64,7 +64,7 @@ A production-ready AI agent system that brings conversational AI to WhatsApp wit
 | `/stt lang [code\|auto]` | Set transcription language |
 | `/clean` | Delete conversation messages |
 | `/clean data` | Delete messages + conversation documents |
-| `/clean all` | Full reset (messages, documents, memories, preferences) |
+| `/clean all` | Full reset (messages, documents, memories, preferences; bug reports keep only their metadata) |
 | `/memories` | Show saved core memories |
 | `/memories clear` | Delete all core memories |
 | `/link` | Get a code to link this account to your other platform (WhatsApp ↔ Telegram) |
