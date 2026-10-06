@@ -21,6 +21,7 @@ from .database import (
 )
 from .kb_models import KnowledgeBaseDocument
 from .logger import logger
+from .services.bug_reports import clear_user_context
 
 # Supported language codes
 SUPPORTED_LANGUAGES = {"en", "es", "pt", "fr", "de"}
@@ -253,6 +254,8 @@ def handle_clean_command(
         .filter(ConversationMessage.user_id == user_id)
         .delete(synchronize_session=False)
     )
+    # Bug reports keep a copy of the chat's last messages; /clean drops it too.
+    clear_user_context(db, user_id)
 
     doc_count = 0
     files_to_delete: list[Path] = []

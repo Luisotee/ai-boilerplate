@@ -13,6 +13,7 @@ from ..formatting import markdown_to_whatsapp
 from ..logger import logger
 from ..queue.connection import get_redis_client
 from ..queue.utils import delete_job_image, get_job_image, save_job_chunk, set_job_metadata
+from ..services.bug_reports import record_auto_report
 from ..whatsapp import WhatsAppClient, create_whatsapp_client
 from .manager import enqueue_pdf_processing
 
@@ -199,6 +200,7 @@ async def process_chat_job_direct(
                 current_message_id=whatsapp_message_id,
                 client_id=client_id,
                 is_group_admin=is_group_admin,
+                job_id=job_id,
             )
 
             # Step 4: Format message with sender name for group context
@@ -229,6 +231,16 @@ async def process_chat_job_direct(
                     full_response += token
             except MODEL_ERRORS as model_error:
                 logger.error(f"[Job {job_id}] AI model error: {model_error}", exc_info=True)
+                record_auto_report(
+                    "model_error",
+                    title="AI model failed to answer",
+                    exc=model_error,
+                    user_id=user_id,
+                    whatsapp_jid=whatsapp_jid,
+                    client_id=client_id,
+                    conversation_type=conversation_type,
+                    job_id=job_id,
+                )
                 # Deliver the fallback text as a normal COMPLETED job (no "status":
                 # "failed"): the clients treat "failed" as an exception and answer
                 # it with their OWN error text + ❌, so publishing this text AND
@@ -342,6 +354,16 @@ async def process_chat_job_direct(
 
         except Exception as e:
             logger.error(f"[Job {job_id}] ❌ Error processing chat: {e}", exc_info=True)
+            record_auto_report(
+                "job_crash",
+                title="Chat job crashed",
+                exc=e,
+                user_id=user_id,
+                whatsapp_jid=whatsapp_jid,
+                client_id=client_id,
+                conversation_type=conversation_type,
+                job_id=job_id,
+            )
 
             # Save partial response if any
             if full_response:

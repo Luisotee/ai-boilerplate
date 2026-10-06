@@ -247,6 +247,7 @@ class OverviewResponse(BaseModel):
     users: int
     messages: int
     knowledge_base_documents: int
+    open_bug_reports: int = 0
 
 
 class WhatsAppStatusResponse(BaseModel):
@@ -414,3 +415,63 @@ class BroadcastRecipientsResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+# --- Bug reports (/admin/bug-reports) ---
+# BugReportSource and BugReportStatus are a FleetView contract (closed enums in
+# its Zod schemas): adding a value breaks the dashboard. `category` is open.
+
+BugReportSource = Literal["user", "agent", "model_error", "job_crash", "pdf_failure"]
+BugReportStatus = Literal["open", "resolved", "ignored"]
+
+
+class BugReportSummary(BaseModel):
+    id: str
+    source: BugReportSource
+    status: BugReportStatus
+    category: str | None = Field(
+        None,
+        description="Open string: user_request, wrong_answer, user_complaint, tool_failure, other",
+    )
+    title: str
+    whatsapp_jid: str | None = None
+    user_name: str | None = None
+    client_id: str | None = None
+    conversation_type: str | None = None
+    error_type: str | None = None
+    occurrences: int
+    created_at: datetime
+    last_seen_at: datetime
+    resolved_at: datetime | None = None
+
+
+class BugReportContextMessage(BaseModel):
+    role: str
+    sender: str | None = None
+    content: str
+    at: str | None = Field(None, description="Naive-UTC ISO timestamp")
+
+
+class BugReportDetail(BugReportSummary):
+    description: str
+    job_id: str | None = None
+    document_id: str | None = None
+    models: str | None = Field(None, description="Model chain configured when it was filed")
+    error_detail: str | None = Field(None, description="Exception and traceback (operator-only)")
+    context: list[BugReportContextMessage] | None = Field(
+        None, description="The chat's last messages when filed; null after /clean"
+    )
+    resolution_note: str | None = None
+
+
+class BugReportsResponse(BaseModel):
+    reports: list[BugReportSummary]
+    total: int
+    limit: int
+    offset: int
+    counts_by_status: dict[BugReportStatus, int]
+
+
+class BugReportUpdateRequest(BaseModel):
+    status: BugReportStatus
+    resolution_note: str | None = Field(None, max_length=4000)

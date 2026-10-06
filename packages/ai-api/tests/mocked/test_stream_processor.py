@@ -382,3 +382,38 @@ class TestMarkdownSanitising:
         )
 
         assert mock_save_message.call_args.args[3] == "[Partial - Error] *Half* an answer"
+
+
+class TestAutomaticBugReports:
+    """Model errors and crashed jobs are recorded as bug reports, and a failing
+    recorder never changes what the job does."""
+
+    @pytest.mark.asyncio
+    async def test_model_error_is_reported(self):
+        from ai_api.streams import processor as proc_module
+
+        exc = ModelHTTPError(status_code=503, model_name="gemini", body=None)
+        with patch.object(proc_module, "record_auto_report") as record:
+            result, *_ = await _run_processor_with_model_error(exc)
+        assert result["model_error"] is True
+        record.assert_called_once()
+        assert record.call_args.args[0] == "model_error"
+        assert record.call_args.kwargs["exc"] is exc
+        assert record.call_args.kwargs["job_id"] == "job-test-001"
+
+    @pytest.mark.asyncio
+    async def test_crash_is_reported_and_still_raised(self):
+        from ai_api.streams import processor as proc_module
+
+        with patch.object(proc_module, "record_auto_report") as record:
+            await _run_processor(_make_failing_agent(RuntimeError("boom")), raises=RuntimeError)
+        assert record.call_args.args[0] == "job_crash"
+        assert isinstance(record.call_args.kwargs["exc"], RuntimeError)
+
+    @pytest.mark.asyncio
+    async def test_success_is_not_reported(self):
+        from ai_api.streams import processor as proc_module
+
+        with patch.object(proc_module, "record_auto_report") as record:
+            await _run_processor(_make_streaming_agent(["ok"]))
+        record.assert_not_called()

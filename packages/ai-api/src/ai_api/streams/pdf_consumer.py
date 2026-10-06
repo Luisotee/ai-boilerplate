@@ -39,6 +39,7 @@ from ..database import SessionLocal
 from ..kb_models import KnowledgeBaseDocument
 from ..logger import logger
 from ..processing import is_retriable_error, process_pdf_document
+from ..services.bug_reports import record_auto_report
 from ..whatsapp import create_whatsapp_client
 from .manager import (
     acknowledge_pdf_message,
@@ -156,6 +157,19 @@ async def _handle_failure(
         why = "max retries exhausted" if retriable else "non-retriable error"
         logger.warning(f"[PDF] Document {document_id} permanently failed ({why}): {reason}")
         await dead_letter_pdf_job(redis, fields, f"{why}: {reason}")
+        # The reason starts with the exception type (or a fixed phrase), which
+        # is stable; the rest carries ids and paths, so it stays out of the
+        # fingerprint.
+        await asyncio.to_thread(
+            record_auto_report,
+            "pdf_failure",
+            title=f"PDF permanently failed to process ({why})",
+            error_type=reason.split(":", 1)[0][:120],
+            error_detail=f"{why}: {reason}",
+            whatsapp_jid=fields.get("whatsapp_jid"),
+            client_id=fields.get("client_id"),
+            document_id=document_id,
+        )
         if error_message is not None:
             await asyncio.to_thread(_update_document_status, document_id, "failed", error_message)
         await _send_reaction(fields, "❌")

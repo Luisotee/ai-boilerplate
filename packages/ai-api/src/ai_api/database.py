@@ -245,6 +245,49 @@ class BroadcastRecipient(Base):
     broadcast = relationship("Broadcast", back_populates="recipients")
 
 
+class BugReport(Base):
+    """One bug report: filed by the agent (asked by a user, or on its own
+    judgement) or captured automatically from a failure.
+
+    Written by ``services/bug_reports.py``, read and triaged through
+    ``/admin/bug-reports``. ``source`` and ``status`` are closed enums mirrored
+    by FleetView's Zod schemas: adding a value breaks it. ``category`` is open.
+    Automatic reports carry a ``fingerprint``: a repeat of an OPEN report bumps
+    its ``occurrences`` instead of adding a row.
+    """
+
+    __tablename__ = "bug_reports"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    # 'user' | 'agent' | 'model_error' | 'job_crash' | 'pdf_failure'
+    source = Column(String(16), nullable=False, index=True)
+    # 'open' | 'resolved' | 'ignored'
+    status = Column(String(16), nullable=False, index=True, default="open")
+    category = Column(String(32), nullable=True)
+    title = Column(String(200), nullable=False)
+    description = Column(Text, nullable=False, default="")
+    # SET NULL: the report outlives a deleted user row (e.g. a /link orphan).
+    user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    whatsapp_jid = Column(String, nullable=True)
+    client_id = Column(String(16), nullable=True)
+    conversation_type = Column(String(16), nullable=True)
+    job_id = Column(String(64), nullable=True)
+    document_id = Column(String(64), nullable=True)
+    models = Column(String(255), nullable=True)  # model chain configured when filed
+    error_type = Column(String(255), nullable=True)
+    error_detail = Column(Text, nullable=True)
+    # Last messages of the chat when filed; set to NULL by /clean.
+    context = Column(JSONB(none_as_null=True), nullable=True)
+    fingerprint = Column(String(64), nullable=True, index=True)
+    occurrences = Column(Integer, nullable=False, default=1)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    last_seen_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    resolved_at = Column(DateTime, nullable=True)
+    resolution_note = Column(Text, nullable=True)
+
+
 def init_db():
     """Initialize database tables"""
     logger.info("Initializing database...")

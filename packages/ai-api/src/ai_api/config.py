@@ -106,6 +106,13 @@ class Settings(BaseSettings):
     # post into groups on a member's behalf. Overridable at runtime via /admin.
     shared_group_tools_enabled: bool = False
 
+    # Bug reports (services/bug_reports.py, /admin/bug-reports): the report_bug
+    # agent tool plus automatic reports from model errors, crashed chat jobs and
+    # failed PDFs. Each report copies the chat's last messages for the operator.
+    # Both overridable at runtime via /admin.
+    bug_reports_enabled: bool = True
+    bug_reports_per_user_per_hour: int = 5
+
     # Broadcasts (POST /admin/broadcasts, sent by the stream worker). All hot via
     # /admin. The Baileys pacing is the anti-ban layer: a bulk send to every chat
     # the account ever talked to is exactly what WhatsApp's spam detection looks
