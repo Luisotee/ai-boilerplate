@@ -24,6 +24,7 @@ from .queue.connection import close_arq_redis, get_arq_redis
 from .routes import (
     admin_router,
     broadcasts_router,
+    bug_reports_router,
     chat_router,
     health_router,
     knowledge_base_router,
@@ -226,3 +227,4 @@ app.include_router(speech_router)
 app.include_router(preferences_router)
 app.include_router(admin_router)
 app.include_router(broadcasts_router)
+app.include_router(bug_reports_router)

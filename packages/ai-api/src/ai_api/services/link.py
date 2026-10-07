@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from ..database import User, is_telegram_jid
 from ..logger import logger
+from .bug_reports import scrub_user_reports
 
 LINK_CODE_TTL_SECONDS = 600  # 10 minutes
 _CODE_KEY = "link:code:{code}"
@@ -189,6 +190,8 @@ async def consume_link_code(
         whatsapp_user.broadcast_opt_out = bool(
             whatsapp_user.broadcast_opt_out or telegram_user.broadcast_opt_out
         )
+        # The orphan's messages are discarded, so are its reports' copies of them.
+        scrub_user_reports(db, telegram_user.id)
         db.delete(telegram_user)  # cascade clears messages/prefs/core_memory
         db.commit()
     except Exception as exc:

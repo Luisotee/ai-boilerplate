@@ -563,3 +563,80 @@ class TestConsumerGroupRecovery:
             await asyncio.gather(task, return_exceptions=True)
             await client.aclose()
         assert calls["n"] >= 2
+
+
+# ---------------------------------------------------------------------------
+# Bug reports
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def bug_reports(monkeypatch):
+    """Autouse: keeps the real recorder (its own DB session) out of every test."""
+    calls: list[tuple] = []
+
+    def _fake(source, **kwargs):
+        calls.append((source, kwargs))
+
+    monkeypatch.setattr(pdf_consumer, "record_auto_report", _fake)
+    return calls
+
+
+class TestPdfBugReports:
+    async def test_permanent_failure_is_reported(
+        self, redis, settings_override, status_updates, reactions, bug_reports
+    ):
+        await enqueue_pdf_processing(
+            redis, "doc-1", "/data/doc-1.pdf", whatsapp_jid=CHAT_JID, whatsapp_message_id="w1"
+        )
+        mid, data = await _read_one(redis)
+        with patch.object(
+            pdf_consumer, "process_pdf_document", AsyncMock(side_effect=ValueError("bad pdf"))
+        ):
+            await pdf_consumer.process_pdf_job(redis, mid, data)
+
+        assert len(bug_reports) == 1
+        source, kwargs = bug_reports[0]
+        assert source == "pdf_failure"
+        # Only the exception type: the message carries ids/paths and would
+        # split one bug into many reports.
+        assert kwargs["error_type"] == "ValueError"
+        assert "bad pdf" in kwargs["error_detail"]
+        assert kwargs["document_id"] == "doc-1"
+        assert kwargs["whatsapp_jid"] == CHAT_JID
+        assert kwargs["location"] == "non-retriable error|valueerror: bad pdf"
+
+    async def test_unrelated_valueerrors_get_different_locations(
+        self, redis, settings_override, status_updates, reactions, bug_reports
+    ):
+        for message in ("LlamaParse returned an empty result", "GEMINI_API_KEY not configured"):
+            await enqueue_pdf_processing(redis, "doc-1", "/data/doc-1.pdf")
+            mid, data = await _read_one(redis)
+            with patch.object(
+                pdf_consumer, "process_pdf_document", AsyncMock(side_effect=ValueError(message))
+            ):
+                await pdf_consumer.process_pdf_job(redis, mid, data)
+        first, second = (kwargs["location"] for _source, kwargs in bug_reports)
+        assert first != second
+
+    async def test_partial_document_is_reported(
+        self, redis, settings_override, status_updates, reactions, bug_reports
+    ):
+        await enqueue_pdf_processing(redis, "doc-1", "/data/doc-1.pdf")
+        mid, data = await _read_one(redis)
+        with patch.object(pdf_consumer, "process_pdf_document", AsyncMock(return_value="partial")):
+            await pdf_consumer.process_pdf_job(redis, mid, data)
+        ((source, kwargs),) = bug_reports
+        assert source == "pdf_failure"
+        assert kwargs["error_type"] == "partial"
+
+    async def test_scheduled_retry_is_not_reported(
+        self, redis, settings_override, status_updates, reactions, bug_reports
+    ):
+        await enqueue_pdf_processing(redis, "doc-1", "/data/doc-1.pdf")
+        mid, data = await _read_one(redis)
+        with patch.object(
+            pdf_consumer, "process_pdf_document", AsyncMock(side_effect=TimeoutError())
+        ):
+            await pdf_consumer.process_pdf_job(redis, mid, data)
+        assert bug_reports == []

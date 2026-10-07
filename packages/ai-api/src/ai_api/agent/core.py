@@ -39,6 +39,8 @@ class AgentDeps:
     #: (None = private chat or unknown). Tools that change a GROUP's settings
     #: must require `is True` — fail closed, like the admin slash commands.
     is_group_admin: bool | None = None
+    #: Stream job id of the message being answered (recorded on bug reports).
+    job_id: str | None = None
 
 
 # Startup default: DeepSeek -> Gemini when DEEPSEEK_API_KEY is set, else Gemini
@@ -166,8 +168,12 @@ DEFAULT_SYSTEM_PROMPT = """You are a helpful AI assistant communicating via What
         bot's operators send (e.g. "stop sending me updates", "unsubscribe")
         In a group, only a group admin may change it
 
+    19. report_bug - File a bug report for the bot's operators
+        Use when the user asks you to report a problem, or when you got
+        something wrong (see the BUG REPORTS section)
+
     Memory Tools:
-    19. update_core_memory - Rewrite your persistent notes (replaces entire document)
+    20. update_core_memory - Rewrite your persistent notes (replaces entire document)
         Pass the FULL new content — anything not included will be lost
         To forget something, rewrite the document without it; to forget
         everything, pass an empty string (in a group, only an admin may clear it)
@@ -269,6 +275,34 @@ async def shared_group_guidance(ctx: RunContext[AgentDeps]) -> str:
     their ``prepare`` hook, and survives an ``/admin`` prompt override.
     """
     return _SHARED_GROUP_GUIDANCE if runtime_config.get("shared_group_tools_enabled") else ""
+
+
+_BUG_REPORT_GUIDANCE = (
+    "\n\n== BUG REPORTS ==\n"
+    "report_bug files a report for the people who run this bot, with this chat's recent "
+    "messages attached. Call it:\n"
+    "- when the user asks you to report a bug or problem (category user_request);\n"
+    "- when the user clearly says your answer was wrong, or is frustrated with how you "
+    "handled something (user_complaint);\n"
+    "- when you realise you gave wrong or made-up information (wrong_answer);\n"
+    "- when a tool keeps failing for something you should be able to do (tool_failure).\n"
+    "Do NOT report ordinary disagreement, matters of taste, or requests outside what you "
+    "can do. File one report per issue, not one per message. Write a factual title and a "
+    "description of what was asked, what happened and what was expected; never include "
+    "passwords or other secrets. After filing, tell the user briefly that it was reported "
+    "and give the reference — and still try to help with their actual request.\n"
+    "== END BUG REPORTS =="
+)
+
+
+@agent.instructions
+async def bug_report_guidance(ctx: RunContext[AgentDeps]) -> str:
+    """Describe ``report_bug`` — only when bug reports are enabled.
+
+    An instructions hook so it survives an ``/admin`` prompt override and
+    follows BUG_REPORTS_ENABLED, which also hides the tool (``prepare`` hook).
+    """
+    return _BUG_REPORT_GUIDANCE if runtime_config.get("bug_reports_enabled") else ""
 
 
 @agent.instructions

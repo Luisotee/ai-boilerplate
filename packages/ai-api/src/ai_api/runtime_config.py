@@ -103,6 +103,23 @@ REGISTRY: tuple[SettingSpec, ...] = (
         "Telegram only.",
     ),
     SettingSpec(
+        "bug_reports_enabled",
+        "bool",
+        True,
+        "conversation",
+        "Bug reports: the report_bug agent tool and automatic reports from model "
+        "errors, crashed chat jobs and failed PDFs (read via /admin/bug-reports). "
+        "Each report keeps a copy of the chat's last messages.",
+    ),
+    SettingSpec(
+        "bug_reports_per_user_per_hour",
+        "int",
+        True,
+        "conversation",
+        "Maximum bug reports the agent may file per chat per hour (at least 1; "
+        "turn reports off with bug_reports_enabled).",
+    ),
+    SettingSpec(
         "core_memory_max_length",
         "int",
         True,

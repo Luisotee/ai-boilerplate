@@ -35,6 +35,7 @@ from sqlalchemy.orm import Session
 
 from ..database import User, is_group_jid, is_telegram_jid
 from ..logger import logger
+from .bug_reports import scrub_user_reports
 
 # Error codes
 ERROR_GROUP_JID = "GROUP_JID"
@@ -227,6 +228,8 @@ def try_autolink(
         whatsapp_user.broadcast_opt_out = bool(
             whatsapp_user.broadcast_opt_out or telegram_user.broadcast_opt_out
         )
+        # The orphan's messages are discarded, so are its reports' copies of them.
+        scrub_user_reports(db, telegram_user.id)
         db.delete(telegram_user)  # cascade clears messages/prefs/core_memory
         db.commit()
     except Exception:

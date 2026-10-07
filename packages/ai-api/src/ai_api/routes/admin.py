@@ -20,6 +20,7 @@ from ..agent.core import DEFAULT_SYSTEM_PROMPT
 from ..broadcast_pacing import SETTING_MAXIMA, parse_send_window, parse_timezone
 from ..config import get_whatsapp_api_key, get_whatsapp_client_url, settings
 from ..database import (
+    BugReport,
     ConversationMessage,
     User,
     clear_active_prompt,
@@ -248,6 +249,10 @@ def _validate_cross_constraints(coerced: dict[str, object]) -> None:
     if "bot_name" in coerced:
         _validate_bot_name(coerced["bot_name"])
     _validate_broadcast_settings(coerced, effective)
+    # >= 1: an emptied number box must not silently stop reports
+    # (bug_reports_enabled is the off switch).
+    if coerced.get("bug_reports_per_user_per_hour", 1) < 1:
+        raise HTTPException(status_code=400, detail="bug_reports_per_user_per_hour must be >= 1")
     if "whitelist_phones" in coerced:
         # Deliberately no *format* check: entry shapes are forward-compatible
         # (future JID schemes land in the id set and simply never match), and
@@ -460,6 +465,7 @@ async def overview(db: Session = Depends(get_db)):
         users=db.query(User).count(),
         messages=db.query(ConversationMessage).count(),
         knowledge_base_documents=db.query(KnowledgeBaseDocument).count(),
+        open_bug_reports=db.query(BugReport).filter(BugReport.status == "open").count(),
     )
 
 

@@ -794,13 +794,19 @@ class TestConversationViewer:
     async def test_overview(self, *_):
         mock_db = _make_mock_db()
         mock_db.query.return_value.count.side_effect = [3, 10, 2]
+        mock_db.query.return_value.filter.return_value.count.return_value = 4
         app = _app_with_db(mock_db)
         try:
             async with _client(app) as client:
                 resp = await client.get("/admin/overview", headers=AUTH_HEADERS)
             assert resp.status_code == 200
             data = resp.json()
-            assert data == {"users": 3, "messages": 10, "knowledge_base_documents": 2}
+            assert data == {
+                "users": 3,
+                "messages": 10,
+                "knowledge_base_documents": 2,
+                "open_bug_reports": 4,
+            }
         finally:
             _cleanup()
 

@@ -50,6 +50,11 @@ A production-ready AI agent system that brings conversational AI to WhatsApp wit
 - Location sharing and contact cards (vCard)
 - Voice messages with TTS responses
 
+### Bug Reports
+- Users can ask the bot to report a problem; the bot also files one on its own when the user complains or it notices it got something wrong
+- Model failures, crashed chat jobs and PDFs that fail to process are recorded automatically, deduplicated (one open report with an occurrence count)
+- Each report keeps the chat's last messages; `/clean` removes them along with the report's write-up and traceback. Operators triage reports through `/admin/bug-reports`
+
 ### Command System
 | Command | Description |
 |---------|-------------|
@@ -59,7 +64,7 @@ A production-ready AI agent system that brings conversational AI to WhatsApp wit
 | `/stt lang [code\|auto]` | Set transcription language |
 | `/clean` | Delete conversation messages |
 | `/clean data` | Delete messages + conversation documents |
-| `/clean all` | Full reset (messages, documents, memories, preferences) |
+| `/clean all` | Full reset (messages, documents, memories, preferences; bug reports keep only their metadata) |
 | `/memories` | Show saved core memories |
 | `/memories clear` | Delete all core memories |
 | `/link` | Get a code to link this account to your other platform (WhatsApp ↔ Telegram) |
@@ -252,6 +257,14 @@ Bulk-load a folder of PDFs with `./upload-kb.sh /path/to/pdfs` (uses `AI_API_KEY
 
 Broadcasts go to every chat the bot has talked to that hasn't opted out (users send `/broadcast off` or just ask the bot; each message carries an opt-out footer). On Baileys they are deliberately slow (random 20–60s gaps, a 10-minute pause every 15 messages, 150/day, 09:00–21:00) to avoid a WhatsApp ban; tune via `BROADCAST_*`.
 
+### Bug reports (admin)
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/admin/bug-reports` | List reports (`status`, `source`, paging) with counts per status |
+| GET | `/admin/bug-reports/{id}` | One report with description, error detail and chat context |
+| PATCH | `/admin/bug-reports/{id}` | Set `status` (`open`/`resolved`/`ignored`) and a `resolution_note` |
+| DELETE | `/admin/bug-reports/{id}` | Delete a report |
+
 ### Speech
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -302,6 +315,8 @@ pnpm format          # Format all code
 | `SHARED_GROUP_TOOLS_ENABLED` | `false` (default). When `true`, users can, in a private chat, read/search groups they share with the bot and ask it to post into one (Baileys + Telegram). Group transcripts then reach the LLM provider inside private conversations — see CLAUDE.md "Shared-group tools". Hot via `PATCH /admin/settings` |
 | `TELEGRAM_MODE` | `webhook` (default — Telegram POSTs to `/webhook`, needs a public HTTPS URL + `TELEGRAM_WEBHOOK_SECRET`) or `polling` (long polling via `@grammyjs/runner`: no public URL or tunnel; one process per bot token). Group chats need privacy mode OFF in @BotFather (`/setprivacy` → Disable; then remove and re-add the bot) |
 | `GROUP_GATING` | How a group gets in scope when the whitelist is set: `jid` (default — the group's own id must be listed) or `membership` (Baileys: any group with a whitelisted member; Telegram: any group; the bot saves all messages there but replies only to whitelisted senders). Read by the AI API and the Baileys/Telegram clients |
+| `BUG_REPORTS_ENABLED` | `true` (default). The `report_bug` agent tool plus automatic reports of model errors, crashed jobs and failed PDFs. Hot via `PATCH /admin/settings` |
+| `BUG_REPORTS_PER_USER_PER_HOUR` | Cap on reports the agent files per chat per hour (default `5`) |
 | `BROADCAST_*` | Broadcast footer and Baileys anti-ban pacing (delays, batch pause, daily cap, send window, time zone). Hot via `PATCH /admin/settings` |
 | `LOGFIRE_TOKEN` | Pydantic Logfire write token for LLM token/cost tracking (optional; empty disables it) |
 | `LOGFIRE_ENVIRONMENT` | Environment label shown in the Logfire UI (default `development`) |

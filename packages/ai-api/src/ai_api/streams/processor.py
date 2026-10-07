@@ -2,6 +2,8 @@
 Core chat processing logic, called by the Redis Streams consumer.
 """
 
+import asyncio
+
 import httpx
 
 from ..agent import AgentDeps, format_message_history, get_ai_response
@@ -13,6 +15,7 @@ from ..formatting import markdown_to_whatsapp
 from ..logger import logger
 from ..queue.connection import get_redis_client
 from ..queue.utils import delete_job_image, get_job_image, save_job_chunk, set_job_metadata
+from ..services.bug_reports import record_auto_report
 from ..whatsapp import WhatsAppClient, create_whatsapp_client
 from .manager import enqueue_pdf_processing
 
@@ -199,6 +202,7 @@ async def process_chat_job_direct(
                 current_message_id=whatsapp_message_id,
                 client_id=client_id,
                 is_group_admin=is_group_admin,
+                job_id=job_id,
             )
 
             # Step 4: Format message with sender name for group context
@@ -264,6 +268,19 @@ async def process_chat_job_direct(
                         "user_message_id": user_message_id,
                         "model_error": True,
                     },
+                )
+                # After the user-facing steps, and off the event loop: it opens
+                # its own DB connection, which can stall while the DB is in trouble.
+                await asyncio.to_thread(
+                    record_auto_report,
+                    "model_error",
+                    title="AI model failed to answer",
+                    exc=model_error,
+                    user_id=user_id,
+                    whatsapp_jid=whatsapp_jid,
+                    client_id=client_id,
+                    conversation_type=conversation_type,
+                    job_id=job_id,
                 )
 
                 return {
@@ -381,6 +398,19 @@ async def process_chat_job_direct(
                 logger.info(f"[Job {job_id}] Wrote failed-status metadata")
             except Exception as meta_err:
                 logger.error(f"[Job {job_id}] Failed to write failure metadata: {meta_err}")
+
+            # After the failed status is published, off the event loop (see above).
+            await asyncio.to_thread(
+                record_auto_report,
+                "job_crash",
+                title="Chat job crashed",
+                exc=e,
+                user_id=user_id,
+                whatsapp_jid=whatsapp_jid,
+                client_id=client_id,
+                conversation_type=conversation_type,
+                job_id=job_id,
+            )
 
             # Re-raise exception
             raise

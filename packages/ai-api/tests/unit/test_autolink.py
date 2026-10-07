@@ -8,7 +8,7 @@ refuse by default: there is one test per refusal condition, and the happy path
 is the only route to a merge.
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -188,6 +188,21 @@ class TestAutolinkHappyPath:
         # The Telegram orphan is dropped; cascade clears its messages/prefs.
         db.delete.assert_called_once_with(caller)
         assert db.commit.called
+
+    def test_scrubs_the_orphans_bug_reports_before_deleting_it(self):
+        """The orphan's messages are discarded, so are its reports' copies of
+        them — otherwise they'd sit under user_id NULL where /clean can't reach."""
+        from ai_api.services import autolink
+
+        caller = _tg_user()
+        db = _db([_wa_user()])
+        order = []
+        db.delete.side_effect = lambda _row: order.append("delete")
+        with patch.object(
+            autolink, "scrub_user_reports", side_effect=lambda _db, uid: order.append(uid)
+        ):
+            try_autolink(db, caller, "5511987654321", SENDER_ID, SENDER_ID)
+        assert order == ["tg-uuid", "delete"]
 
     @pytest.mark.parametrize(
         "wa_out,tg_out,expected", [(False, True, True), (True, False, True), (False, False, False)]
