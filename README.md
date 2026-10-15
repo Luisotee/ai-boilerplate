@@ -100,7 +100,7 @@ A production-ready AI agent system that brings conversational AI to WhatsApp wit
 ```
 
 **Key Patterns:**
-- Pydantic AI agent with tool system (6 tools: search, reactions, location, contacts, etc.)
+- Pydantic AI agent with a tool system (search, history, memory, settings, reactions, location, contacts, web, bug reports, and more)
 - Dependency injection for testable, modular code
 - Graceful degradation when optional APIs unavailable
 - Background job processing with Redis Streams consumer groups
@@ -109,28 +109,26 @@ A production-ready AI agent system that brings conversational AI to WhatsApp wit
 
 ```
 packages/
-├── whatsapp-client/           # TypeScript - WhatsApp interface
-│   └── src/
-│       ├── main.ts            # Fastify server (port 3001)
-│       ├── whatsapp.ts        # Baileys connection + message events
-│       ├── handlers/          # Text and audio message processors
-│       ├── routes/            # REST API (messaging, media, operations)
-│       ├── services/          # Baileys abstraction layer
-│       └── utils/             # JID, reactions, vCard utilities
-│
-└── ai-api/                    # Python - AI service
+├── whatsapp-client/     # TypeScript — Baileys (WhatsApp Web) client, Fastify on port 3001
+├── whatsapp-cloud/      # TypeScript — Meta WhatsApp Cloud API client, Fastify on port 3002
+├── telegram-client/     # TypeScript — Telegram (grammY) client, Fastify on port 3003
+│   (each: src/handlers/, routes/, services/, schemas/, utils/; tests/unit|integration)
+└── ai-api/              # Python — FastAPI on port 8000
     └── src/ai_api/
-        ├── main.py            # FastAPI app (port 8000)
-        ├── agent.py           # Pydantic AI agent + tools
-        ├── commands.py        # Command parser
-        ├── database.py        # SQLAlchemy models
-        ├── embeddings.py      # Vector embedding generation
-        ├── transcription.py   # Groq Whisper STT
-        ├── tts.py             # Gemini TTS synthesis
-        ├── processing.py      # PDF parsing (Docling)
-        ├── rag/               # RAG implementations
-        ├── queue/             # Redis job utilities
-        └── streams/           # Background processor
+        ├── main.py          # FastAPI app
+        ├── agent/           # Pydantic AI agent (core.py), model chain, tools/
+        ├── routes/          # chat, knowledge base, speech, preferences, admin, broadcasts, bug reports
+        ├── services/        # broadcasts, bug reports, /link + phone auto-link, shared groups
+        ├── streams/         # Redis Stream consumers: chat, PDF processing, broadcasts
+        ├── rag/             # conversation + knowledge-base retrieval
+        ├── queue/           # Redis connection, job metadata, response chunks
+        ├── whatsapp/        # HTTP client for the chat clients
+        ├── scripts/         # stream worker entrypoint
+        ├── commands.py      # slash commands
+        ├── database.py      # SQLAlchemy models (+ kb_models.py)
+        └── runtime_config.py  # settings overridable via /admin
+scripts/
+└── instance_check.py    # port / name / volume checks behind setup.sh
 ```
 
 ## Quick Start

@@ -43,7 +43,7 @@ gh pr diff <NUMBER>
 gh pr view <NUMBER> --json comments
 ```
 
-After gathering the diff, **always re-read CLAUDE.md** to refresh your knowledge of project conventions. Conventions change frequently — never rely on cached knowledge.
+After gathering the diff, **always re-read CLAUDE.md** to refresh your knowledge of project conventions, plus every nested `CLAUDE.md` in or above the changed files' directories and any file the root file's "Subsystem docs" table lists for the subsystems the diff touches (they cross folders — e.g. a change to `routes/broadcasts.py` needs `services/CLAUDE.md`). Subsystem rules live there, not in the root file. Conventions change frequently — never rely on cached knowledge.
 
 ## Step 2: Classify Changed Files
 

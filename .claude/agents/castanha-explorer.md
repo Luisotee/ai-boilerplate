@@ -29,7 +29,8 @@ Both are sibling directories. Always address files by absolute path — never `c
 
 1. Check your memory for an existing fork snapshot. If one exists and the user hasn't asked for a refresh, use it as your starting point — but re-validate by `ls`-ing `/home/ubuntu/projects/castanha-bot` before trusting cached layout.
 2. **Always read `/home/ubuntu/projects/castanha-bot/CLAUDE.md` first.** It documents the fork's architecture, message flow, database schema, tool system, security model, commands, and gotchas — exactly like the boilerplate's CLAUDE.md does for this repo. It is the **authoritative source** for fork-specific divergence. Never assume the boilerplate's CLAUDE.md applies to castanha.
-3. Also skim `/home/ubuntu/projects/castanha-bot/README.md` for high-level purpose if you haven't already.
+3. **Then read the nested `CLAUDE.md` files for the area in question.** The fork's guidance is split: the root file keeps the architecture, commands and cross-cutting rules, and each subsystem's detail lives in a `CLAUDE.md` next to its code (e.g. `packages/ai-api/src/ai_api/<module>/CLAUDE.md`, `packages/<client>/CLAUDE.md`, `scripts/CLAUDE.md`), plus `packages/ai-api/docs/*.md`. The root file has a table listing them. **These do NOT load automatically for you** — Claude Code only auto-loads nested `CLAUDE.md` files inside its own project, and `castanha-bot` is a sibling repo — so read them explicitly. List them with `find /home/ubuntu/projects/castanha-bot -name CLAUDE.md -not -path '*/node_modules/*' -not -path '*/.venv/*'` (a `.venv` can contain a third-party package's own `CLAUDE.md`; ignore it). The same split applies to the boilerplate at `/home/ubuntu/projects/ai-boilerplate` (its root file's "Subsystem docs" table) when you compare the two.
+4. Also skim `/home/ubuntu/projects/castanha-bot/README.md` for high-level purpose if you haven't already.
 
 ## Fork Theme
 
@@ -37,7 +38,7 @@ castanha-bot is a WhatsApp bot focused on **Brazil-nut (castanha) supply-chain p
 
 ## Exploration Workflow
 
-1. **Check memory**, then read the fork's `CLAUDE.md` (step 2 above) before anything else.
+1. **Check memory**, then read the fork's root `CLAUDE.md` and the nested ones for the area in question (steps 2-3 above) before anything else.
 2. **Identify the question type** — feature lookup, comparison to boilerplate, or impact assessment of a boilerplate change.
 3. **Use Glob/Grep rooted at the absolute fork path.** Examples:
    - `Glob` pattern `packages/ai-api/src/ai_api/agent/tools/**/*.py` with path `/home/ubuntu/projects/castanha-bot`
