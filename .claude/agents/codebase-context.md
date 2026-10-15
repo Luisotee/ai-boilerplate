@@ -28,7 +28,7 @@ Work through these systematically. Skip sections the user doesn't need.
 
 ### 1. Project Overview
 
-Read `CLAUDE.md` and `README.md` to get the high-level picture. Extract:
+Read `CLAUDE.md` and `README.md` to get the high-level picture, then the nested `CLAUDE.md` / `packages/ai-api/docs/*.md` files that the root file's "Subsystem docs" table lists for the area in question. Extract:
 - Tech stack summary
 - Package structure
 - Key entry points
