@@ -1,0 +1,16 @@
+{
+  "auto-format": {
+    "PostToolUse": [
+      {
+        "matcher": "edit_file|write_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "eval \"$(python3 -c 'import json, shlex, sys; d = json.load(sys.stdin); p = (d.get(\"toolCall\") or {}).get(\"args\", {}).get(\"Path\", \"\"); w = (d.get(\"workspacePaths\") or [\"..\"])[0]; print(f\"FILE_PATH={shlex.quote(p)}; ROOT={shlex.quote(w)}\")' 2>/dev/null)\"; if [ -n \"$FILE_PATH\" ] && [ -f \"$FILE_PATH\" ]; then case \"$FILE_PATH\" in *.ts|*.tsx|*.js|*.jsx|*.json|*.md|*.yaml|*.yml) (cd \"$ROOT\" && npx prettier --write \"$FILE_PATH\" >/dev/null 2>&1) || true ;; *.py) (cd \"$ROOT\" && uvx ruff format \"$FILE_PATH\" >/dev/null 2>&1) || true ;; esac; fi; printf '{}\\n'",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository. Keep both `CLAUDE.md` and `AGENTS.md` (plus folder `CLAUDE.md` files, symlinked as `AGENTS.md`) updated with important changes; keep root `AGENTS.md` under 24 KB (`24,000` bytes) so Antigravity (`agy`) never truncates it.
 
 AI chat-agent system: Node.js/TypeScript clients (Baileys + Meta Cloud API + Telegram/grammY) + Python/FastAPI API (Pydantic AI + Gemini).
 
@@ -186,11 +186,15 @@ cd packages/ai-api && uv run pytest tests/mocked/test_model_chain_fallback.py -k
 
 ## Related Projects
 
-Sibling repos under `/home/ubuntu/projects/`, each with its own `CLAUDE.md` (authoritative for that repo; this file's rules don't carry over). Explore them via the read-only subagents rather than reading them inline:
+Sibling repos under `/home/ubuntu/projects/`, each with its own `CLAUDE.md` / `AGENTS.md` (authoritative for that repo; this file's rules don't carry over):
 
-- **curupira-bot** (`curupira-explorer`): fork for fire alerts. Users subscribe to municipalities in Brazil (`fire_poller/`, fire-alert tools); the persona is "Curupira". Features often start here and get ported back to the boilerplate (the shared-group tools, `get_chat_history`)
-- **castanha-bot** (`castanha-explorer`): fork for Brazil-nut supply-chain prices. It integrates the external *cadeia-produtiva* platform (`cadeia` tools), sends a weekly recap and uses Portuguese commands (`/regiao`). It has no Telegram client
-- **fleetview** (`fleetview-explorer`): Next.js 16 dashboard, not a fork. It is the control plane for the whole bot fleet and keeps an encrypted registry of bots (base URL + `X-API-Key`). It calls each bot's `/admin/*`, `/health` and `/knowledge-base/*` server-side, for health, conversations, KB, prompt, settings and WhatsApp QR pairing. **Its Zod schemas mirror `routes/admin.py`, `schemas.py` and the `runtime_config.py` REGISTRY strictly** (only health is lenient). Renaming or removing a field, route or setting attribute (`hot`/`secret`/`choices`) therefore breaks the dashboard for every bot. So does a new value in a closed enum: setting `type`, KB status, QR `status`, `conversation_type`. Check `fleetview-explorer` before you change that contract. A new field is safe (unknown keys are stripped, not rejected)
+- **Preferred — Run or resume a peer agent in that repo (`agy -p` / `claude -p`)**: Instead of reading or editing sibling files from here, invoke the CLI agent directly inside the target repo's workspace so it loads that repo's own `AGENTS.md`/`CLAUDE.md`, skills, and hooks, and persists a conversation the user can resume interactively (`agy -c` or `claude -c`):
+  - **Antigravity (`agy`)**: `cd /home/ubuntu/projects/<repo> && agy -c -p "<prompt>" --dangerously-skip-permissions` (or omit `-c` to start a fresh conversation if an interactive `agy` TUI is already open and holding the lock on the latest conversation in that repo). Alternatively, if an interactive `agy` session is open in that repo, `send_message` to its conversation ID queues a message into its inbox (which dequeues on the next user prompt in that terminal).
+  - **Claude Code (`claude`)**: `cd /home/ubuntu/projects/<repo> && claude -c -p "<prompt>" --dangerously-skip-permissions` (or omit `-c` for a fresh session).
+- **Fallback — Read-only subagents**: For quick read-only checks without creating/updating a sibling repo session, explore via read-only subagents (`research` in `agy`, or `curupira-explorer` / `castanha-explorer` / `fleetview-explorer` in Claude Code) rather than reading sibling files inline:
+  - **curupira-bot** (`curupira-explorer`): fork for fire alerts. Users subscribe to municipalities in Brazil (`fire_poller/`, fire-alert tools); the persona is "Curupira". Features often start here and get ported back to the boilerplate (the shared-group tools, `get_chat_history`)
+  - **castanha-bot** (`castanha-explorer`): fork for Brazil-nut supply-chain prices. It integrates the external *cadeia-produtiva* platform (`cadeia` tools), sends a weekly recap and uses Portuguese commands (`/regiao`). It has no Telegram client
+  - **fleetview** (`fleetview-explorer`): Next.js 16 dashboard, not a fork. It is the control plane for the whole bot fleet and keeps an encrypted registry of bots (base URL + `X-API-Key`). It calls each bot's `/admin/*`, `/health` and `/knowledge-base/*` server-side, for health, conversations, KB, prompt, settings and WhatsApp QR pairing. **Its Zod schemas mirror `routes/admin.py`, `schemas.py` and the `runtime_config.py` REGISTRY strictly** (only health is lenient). Renaming or removing a field, route or setting attribute (`hot`/`secret`/`choices`) therefore breaks the dashboard for every bot. So does a new value in a closed enum: setting `type`, KB status, QR `status`, `conversation_type`. Check `fleetview-explorer` / `/fleetview-check` before you change that contract. A new field is safe (unknown keys are stripped, not rejected)
 
 ## Guidelines
 
@@ -200,7 +204,7 @@ Sibling repos under `/home/ubuntu/projects/`, each with its own `CLAUDE.md` (aut
 - Use structured logging (Pino for TS, Python `logging`) — no console.log/print
 - Write tests for new functionality — follow existing patterns in `tests/` directories
 - New TS files may fail `pnpm format:check` even if lint passes — run `pnpm exec prettier --write <path>` on freshly created files
-- Keep this file and the folder `CLAUDE.md` files (see "Subsystem docs") updated with important changes; put subsystem detail in the folder file, not here
+- Keep this file, `AGENTS.md` (kept `< 24,000` bytes), and the folder `CLAUDE.md` files (symlinked as `AGENTS.md`; see "Subsystem docs") updated with important changes; put subsystem detail in the folder file, not here
 
 ## Testing
 
