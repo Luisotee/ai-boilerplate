@@ -141,10 +141,12 @@ cd packages/ai-api && uv run pytest tests/mocked/test_model_chain_fallback.py -k
 ## External Docs & Related Projects
 
 - **Always verify external library/SDK APIs before coding**: Use `search_web` or the `research` subagent to check current documentation for Baileys, Pydantic AI, FastAPI, Fastify, grammY, Meta Cloud API, Gemini, pgvector, SQLAlchemy, Zod, Redis, Docling, Groq, etc. Never rely solely on training data.
-- **Sibling repos under `/home/ubuntu/projects/`** (each has its own authoritative `CLAUDE.md`/`AGENTS.md`; explore read-only via `research` subagent):
-  - **curupira-bot**: fire-alert fork (`fire_poller/`, municipality subscriptions).
-  - **castanha-bot**: Brazil-nut supply-chain fork (`cadeia` tools, weekly recap, no Telegram client).
-  - **fleetview**: Next.js 16 control-plane dashboard for the bot fleet. Calls `/admin/*`, `/health`, and `/knowledge-base/*` server-side. **Its Zod schemas in `lib/bot-api/schemas.ts` strictly mirror `routes/admin.py`, `schemas.py`, and `runtime_config.py` `REGISTRY`**. Renaming/removing fields or adding values to closed enums (`type`, `source`, `conversation_type`, `role`, QR `status`, KB `status`) breaks the dashboard. Run `/fleetview-check` before changing admin/health/KB contracts.
+- **Sibling repos under `/home/ubuntu/projects/`** (each has its own authoritative `CLAUDE.md`/`AGENTS.md`):
+  - **Preferred — Talk to a live peer agent in that repo**: Before spawning a subagent or reading files across repos, check if an agent session (`agy` or `claude`) is already running in the target repo (inspect running processes via `/proc/<pid>/cwd` and open session files/descriptors, e.g. `/proc/<pid>/fd` or `~/.gemini/antigravity-cli/conversations/` for `agy`). When a live peer session exists, **message that peer agent directly** (`send_message` by conversation ID in `agy`, or peer messaging in Claude Code) so work runs inside the target repo's own context and rules, and the user can continue in that conversation directly. (If the process hasn't allocated a conversation ID yet because no first prompt was sent, ask the user to send an initial message there.)
+  - **Fallback — Read-only subagents**: When no live peer agent is running in the target repo, explore read-only via the `research` subagent (or `*-explorer` in Claude Code) rather than reading sibling files inline:
+    - **curupira-bot**: fire-alert fork (`fire_poller/`, municipality subscriptions).
+    - **castanha-bot**: Brazil-nut supply-chain fork (`cadeia` tools, weekly recap, no Telegram client).
+    - **fleetview**: Next.js 16 control-plane dashboard for the bot fleet. Calls `/admin/*`, `/health`, and `/knowledge-base/*` server-side. **Its Zod schemas in `lib/bot-api/schemas.ts` strictly mirror `routes/admin.py`, `schemas.py`, and `runtime_config.py` `REGISTRY`**. Renaming/removing fields or adding values to closed enums (`type`, `source`, `conversation_type`, `role`, QR `status`, KB `status`) breaks the dashboard. Run `/fleetview-check` before changing admin/health/KB contracts.
 
 ## Guidelines
 
