@@ -123,7 +123,7 @@ cd packages/ai-api && uv run pytest tests/mocked/test_model_chain_fallback.py -k
 ## Database
 
 - **PostgreSQL + pgvector** (3072-dim vectors via `gemini-embedding-001`).
-- **11 tables**: `users`, `conversation_messages`, `conversation_preferences`, `core_memories`, ` bot_prompt`, `runtime_settings`, `broadcasts`, `broadcast_recipients`, `bug_reports` (`database.py`) + `knowledge_base_documents`, `knowledge_base_chunks` (`kb_models.py`).
+- **11 tables**: `users`, `conversation_messages`, `conversation_preferences`, `core_memories`, `bot_prompt`, `runtime_settings`, `broadcasts`, `broadcast_recipients`, `bug_reports` (`database.py`) + `knowledge_base_documents`, `knowledge_base_chunks` (`kb_models.py`).
 - **No Alembic migrations**: `create_all()` only creates missing tables, never new columns/indexes. Ship column/index changes as idempotent (`IF NOT EXISTS`) SQL in `packages/ai-api/docs/migrations/<YYYY-MM-DD>-<name>.sql` (use `/db-migration` skill) and apply before rollout:
   ```bash
   docker compose exec -T postgres psql -U aiagent -d aiagent < packages/ai-api/docs/migrations/<file>.sql

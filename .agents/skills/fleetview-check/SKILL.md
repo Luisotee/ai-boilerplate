@@ -2,9 +2,10 @@
 name: fleetview-check
 description: >-
   Checks whether changes to /admin/*, schemas.py, routes/health.py,
-  routes/knowledge_base.py, or runtime_config.py break the FleetView Next.js
-  dashboard at /home/ubuntu/projects/fleetview. Use when touching admin, health,
-  KB, broadcast, or runtime_config contracts, or when the user mentions FleetView.
+  routes/knowledge_base.py, routes/broadcasts.py, routes/bug_reports.py, or
+  runtime_config.py break the FleetView Next.js dashboard at
+  /home/ubuntu/projects/fleetview. Use when touching admin, health, KB,
+  broadcast, bug-report, or runtime_config contracts, or when the user mentions FleetView.
 ---
 
 # FleetView Contract Check (`fleetview-check`)
@@ -26,6 +27,7 @@ FleetView (`/home/ubuntu/projects/fleetview`) is the Next.js 16 control-plane da
 2. **ai-boilerplate (Producer)**:
    - `packages/ai-api/src/ai_api/routes/admin.py`
    - `packages/ai-api/src/ai_api/routes/broadcasts.py`
+   - `packages/ai-api/src/ai_api/routes/bug_reports.py`
    - `packages/ai-api/src/ai_api/routes/health.py`
    - `packages/ai-api/src/ai_api/routes/knowledge_base.py`
    - `packages/ai-api/src/ai_api/schemas.py`

@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository. Keep both `CLAUDE.md` and `AGENTS.md` (plus folder `CLAUDE.md` files, symlinked as `AGENTS.md`) updated with important changes; keep root `AGENTS.md` under 24 KB (`24,000` bytes) so Antigravity (`agy`) never truncates it.
 
 AI chat-agent system: Node.js/TypeScript clients (Baileys + Meta Cloud API + Telegram/grammY) + Python/FastAPI API (Pydantic AI + Gemini).
 
@@ -204,7 +204,7 @@ Sibling repos under `/home/ubuntu/projects/`, each with its own `CLAUDE.md` / `A
 - Use structured logging (Pino for TS, Python `logging`) — no console.log/print
 - Write tests for new functionality — follow existing patterns in `tests/` directories
 - New TS files may fail `pnpm format:check` even if lint passes — run `pnpm exec prettier --write <path>` on freshly created files
-- Keep this file and the folder `CLAUDE.md` files (see "Subsystem docs") updated with important changes; put subsystem detail in the folder file, not here
+- Keep this file, `AGENTS.md` (kept `< 24,000` bytes), and the folder `CLAUDE.md` files (symlinked as `AGENTS.md`; see "Subsystem docs") updated with important changes; put subsystem detail in the folder file, not here
 
 ## Testing
 
