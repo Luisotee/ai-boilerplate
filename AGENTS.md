@@ -138,6 +138,15 @@ cd packages/ai-api && uv run pytest tests/mocked/test_model_chain_fallback.py -k
 - **`.env.local` is for per-developer overrides** (`override: true`; empty `KEY=` blanks out root value; TS config loaders warn on override).
 - **Adding a variable** (use `/config-var` skill): place in `.env.example` with a `#` comment directly above it (used by `./setup.sh --update`), leave secret/opt-in values empty, and wire into `config.ts`, `config.py`, and `docker-compose.yml`.
 
+## Task Tracking: Devflow
+
+Work is tracked in **Devflow** (kanban), project **`CHATBOTS`** (org Terra Krya), shared by every bot repo (this one, curupira-bot, castanha-bot, fleetview). Use the `flow-staging` MCP server (`https://staging.devflow.fractopia.org`). The board is in Portuguese: write titles, descriptions, comments and test instructions in Portuguese.
+
+- **Board**: default `Desenvolvimento` (id `6aa2e19c6bf0a8f157d443e7`; ignore the second board with the same name). Columns: `Aguardando na fila` → `Aguardando desenvolver` → `Em desenvolvimento` → `Aguardando teste` → `Testando` → `Aguardando publicacao` → `Em producao` (the last two count as done). `Ciclos` groups tasks by sprint.
+- **Before non-trivial work** (feature, bug fix, migration): search the project for a matching task and follow its description (often a markdown checklist). If none exists, create one: short title, markdown description, assignee `me`, `Prioridade` (`Baixa`/`Media`/`Alta`/`Urgente`).
+- **Starting**: move it to `Em desenvolvimento`. **Finishing** (PR open or merged): move it to `Aguardando teste`, passing the required `test_instructions` (concrete steps to check the change). Never move a task to `Aguardando publicacao`/`Em producao` or complete it unless the user says so.
+- Do not log time, change sprints or archive tasks unless asked.
+
 ## External Docs & Related Projects
 
 - **Always verify external library/SDK APIs before coding**: Look up current documentation with the Context7 MCP server (resolve the library id, then query the docs) for Baileys, Pydantic AI, FastAPI, Fastify, grammY, Meta Cloud API, Gemini, pgvector, SQLAlchemy, Zod, Redis, Docling, Groq, etc. Fall back to `search_web` when Context7 has no entry. Never rely solely on training data.

@@ -184,6 +184,16 @@ cd packages/ai-api && uv run pytest tests/mocked/test_model_chain_fallback.py -k
 
 **Before writing or modifying code that touches any external library, SDK, API, or framework, look up its current documentation with the Context7 MCP server** (resolve the library id, then query the docs). Do not rely on training data for API signatures, method names, or behavior. This applies to Baileys, Pydantic AI, FastAPI, Fastify, grammY, Meta Cloud API, Gemini, pgvector, SQLAlchemy, Zod, Redis, Docling, Groq, and any other dependency. Fall back to web search when Context7 has no entry for the library.
 
+## Task tracking: Devflow
+
+Work is tracked in **Devflow** (kanban), project **`CHATBOTS`** (org Terra Krya), shared by every bot repo (this one, curupira-bot, castanha-bot, fleetview). Reach it through the Devflow MCP server (the claude.ai Devflow connector in Claude Code, `flow-staging` in `agy`; both point at `https://staging.devflow.fractopia.org`). The board is in Portuguese, so write task titles, descriptions, comments and test instructions in Portuguese.
+
+- **Board**: the default `Desenvolvimento` board (id `6aa2e19c6bf0a8f157d443e7`; a second board with the same name exists, ignore it). Columns: `Aguardando na fila` (backlog) → `Aguardando desenvolver` → `Em desenvolvimento` → `Aguardando teste` → `Testando` → `Aguardando publicacao` → `Em producao`. The last two count as done. The `Ciclos` board groups the same tasks by sprint
+- **Before non-trivial work** (a feature, a bug fix, a migration): search the project for a matching task and read its description, which is often a markdown checklist to follow and tick off. If none exists, create one: short title, markdown description, assignee `me`, and the `Prioridade` field (`Baixa`, `Media`, `Alta`, `Urgente`)
+- **Starting**: move the task to `Em desenvolvimento`
+- **Finishing** (code done, PR open or merged): move it to `Aguardando teste`. Leaving `Em desenvolvimento` requires `test_instructions`: concrete steps to check the change, pass them in the move. Do not move a task to `Aguardando publicacao` or `Em producao`, or complete it, unless the user says so — testing and deploy are theirs
+- Do not log time, change sprints or archive tasks unless asked
+
 ## Related Projects
 
 Sibling repos under `/home/ubuntu/projects/`, each with its own `CLAUDE.md` / `AGENTS.md` (authoritative for that repo; this file's rules don't carry over):
