@@ -140,7 +140,7 @@ cd packages/ai-api && uv run pytest tests/mocked/test_model_chain_fallback.py -k
 
 ## Task Tracking: Devflow
 
-Work is tracked in **Devflow** (kanban), project **`CHATBOTS`** (org Terra Krya), shared by every bot repo (this one, curupira-bot, castanha-bot, fleetview). Use the `flow-staging` MCP server (`https://staging.devflow.fractopia.org`). The board is in Portuguese: write titles, descriptions, comments and test instructions in Portuguese.
+Work is tracked in **Devflow** (kanban), project **`CHATBOTS`** (org Terra Krya), shared by every bot repo (this one, curupira-bot, castanha-bot, fleetview). Use the `flow-staging` MCP server (`https://staging.devflow.fractopia.org`). The board is in Brazilian Portuguese: write titles, descriptions, comments and test instructions in pt-BR.
 
 - **Board**: default `Desenvolvimento` (id `6aa2e19c6bf0a8f157d443e7`; ignore the second board with the same name). Columns: `Aguardando na fila` → `Aguardando desenvolver` → `Em desenvolvimento` → `Aguardando teste` → `Testando` → `Aguardando publicacao` → `Em producao` (the last two count as done). `Ciclos` groups tasks by sprint.
 - **Before non-trivial work** (feature, bug fix, migration): search the project for a matching task and follow its description (often a markdown checklist). If none exists, create one: short title, markdown description, assignee `me`, `Prioridade` (`Baixa`/`Media`/`Alta`/`Urgente`).

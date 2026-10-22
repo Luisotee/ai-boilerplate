@@ -186,7 +186,7 @@ cd packages/ai-api && uv run pytest tests/mocked/test_model_chain_fallback.py -k
 
 ## Task tracking: Devflow
 
-Work is tracked in **Devflow** (kanban), project **`CHATBOTS`** (org Terra Krya), shared by every bot repo (this one, curupira-bot, castanha-bot, fleetview). Reach it through the Devflow MCP server (the claude.ai Devflow connector in Claude Code, `flow-staging` in `agy`; both point at `https://staging.devflow.fractopia.org`). The board is in Portuguese, so write task titles, descriptions, comments and test instructions in Portuguese.
+Work is tracked in **Devflow** (kanban), project **`CHATBOTS`** (org Terra Krya), shared by every bot repo (this one, curupira-bot, castanha-bot, fleetview). Reach it through the Devflow MCP server (the claude.ai Devflow connector in Claude Code, `flow-staging` in `agy`; both point at `https://staging.devflow.fractopia.org`). The board is in Brazilian Portuguese, so write task titles, descriptions, comments and test instructions in pt-BR.
 
 - **Board**: the default `Desenvolvimento` board (id `6aa2e19c6bf0a8f157d443e7`; a second board with the same name exists, ignore it). Columns: `Aguardando na fila` (backlog) → `Aguardando desenvolver` → `Em desenvolvimento` → `Aguardando teste` → `Testando` → `Aguardando publicacao` → `Em producao`. The last two count as done. The `Ciclos` board groups the same tasks by sprint
 - **Before non-trivial work** (a feature, a bug fix, a migration): search the project for a matching task and read its description, which is often a markdown checklist to follow and tick off. If none exists, create one: short title, markdown description, assignee `me`, and the `Prioridade` field (`Baixa`, `Media`, `Alta`, `Urgente`)
