@@ -48,7 +48,7 @@ gh pr view <NUMBER> --json comments
   - Model output passes through `formatting.markdown_to_whatsapp`; `DEFAULT_SYSTEM_PROMPT` contains no `**`.
   - `CORSMiddleware` remains added AFTER `APIKeyMiddleware` in `main.py`.
   - Schema changes to existing tables include idempotent SQL in `packages/ai-api/docs/migrations/<YYYY-MM-DD>-<name>.sql`.
-  - Changes to `/admin/*`, `schemas.py`, `/health*`, `/knowledge-base/*`, or `runtime_config.py` do not break FleetView's closed `z.enum`s or required fields (use the `fleetview-check` skill if touched).
+  - Changes to `/admin/*`, `schemas.py`, `/health*`, `/knowledge-base/*`, or `runtime_config.py` do not break FleetView's closed `z.enum`s or required fields (if touched, run the fleetview contract check from AGENTS.md "External Docs & Related Projects").
 
 ### 2. Security
 - `X-API-Key` required on all routes except `/health*`, `/docs*`, and platform-verified `/webhook` routes.
