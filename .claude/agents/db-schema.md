@@ -30,14 +30,14 @@ Schema changes to existing tables require MANUAL SQL via ALTER TABLE.
 ## Database Architecture
 
 - **PostgreSQL 16** with **pgvector** extension (3072-dimensional vectors via gemini-embedding-001)
-- 5 tables across 2 model files:
-  - `packages/ai-api/src/ai_api/database.py`: users, conversation_messages, conversation_preferences
+- 11 tables across 2 model files:
+  - `packages/ai-api/src/ai_api/database.py`: users, conversation_messages, conversation_preferences, core_memories, bot_prompt, runtime_settings, broadcasts, broadcast_recipients, bug_reports
   - `packages/ai-api/src/ai_api/kb_models.py`: knowledge_base_documents, knowledge_base_chunks
 
 ### Current Schema
 
 Before making any changes, **always read the model files** to get the current schema:
-- `packages/ai-api/src/ai_api/database.py` — users, conversation_messages, conversation_preferences
+- `packages/ai-api/src/ai_api/database.py` — users, conversation_messages, conversation_preferences, core_memories, bot_prompt, runtime_settings, broadcasts, broadcast_recipients, bug_reports
 - `packages/ai-api/src/ai_api/kb_models.py` — knowledge_base_documents, knowledge_base_chunks
 
 Key facts that won't change:
@@ -53,14 +53,15 @@ Key facts that won't change:
 2. Import `Base` from `database.py` and extend it
 3. The table will be auto-created on next startup via `init_db()` -> `Base.metadata.create_all()`
 4. Add any relationships to existing models
+5. Update the table count and list in `AGENTS.md` and `CLAUDE.md`
 
 ### Modifying an EXISTING table (most common)
 
 1. **Update the SQLAlchemy model** to reflect the desired state
-2. **Generate the ALTER TABLE SQL**:
+2. **Write an idempotent SQL migration file** at `packages/ai-api/docs/migrations/<YYYY-MM-DD>-<name>.sql`:
    ```sql
-   -- Adding a column
-   ALTER TABLE table_name ADD COLUMN column_name TYPE DEFAULT value;
+   -- Adding a column (always IF NOT EXISTS)
+   ALTER TABLE table_name ADD COLUMN IF NOT EXISTS column_name TYPE DEFAULT value;
 
    -- Modifying a column type
    ALTER TABLE table_name ALTER COLUMN column_name TYPE new_type USING column_name::new_type;
@@ -69,11 +70,11 @@ Key facts that won't change:
    ALTER TABLE table_name ALTER COLUMN column_name SET NOT NULL;
 
    -- Dropping a column
-   ALTER TABLE table_name DROP COLUMN column_name;
+   ALTER TABLE table_name DROP COLUMN IF EXISTS column_name;
    ```
-3. **Provide the execution command**:
+3. **Document rollout command**:
    ```bash
-   docker compose exec postgres psql -U aiagent -d aiagent -c "SQL HERE"   # run in the checkout: targets this bot's postgres
+   docker compose exec -T postgres psql -U aiagent -d aiagent < packages/ai-api/docs/migrations/<YYYY-MM-DD>-<name>.sql
    ```
 
 ### Creating indexes
