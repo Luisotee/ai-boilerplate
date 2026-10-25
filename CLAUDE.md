@@ -98,6 +98,7 @@ pnpm lint                               # Check TypeScript (ESLint) + Python (Ru
 pnpm lint:fix                           # Auto-fix lint issues
 pnpm format                             # Format TypeScript (Prettier) + Python (Ruff)
 pnpm format:check                       # Verify formatting without changes (CI)
+pnpm check:rules                        # Verify AGENTS.md rule size budget (<= 24 KB)
 
 # Testing (from root)
 pnpm test                               # Run all tests (TS + Python)
@@ -243,7 +244,7 @@ Each package has `tests/` with: `unit/` (pure functions, no I/O), `integration/`
 - No CI/CD pipeline runs tests — testing is local only
 
 ## Common Workflows
-### Adding a new agent tool (ai-api)
+### Adding a new agent tool (ai-api) (use `/agent-tool` skill)
 1. Add tool function in `agent/tools/` using the `@agent.tool` decorator (see existing tools for patterns)
 2. Signature: `async def tool_name(ctx: RunContext[AgentDeps], ...params) -> str`
 3. Import the module in `agent/tools/__init__.py` — the import triggers decorator registration
@@ -253,7 +254,7 @@ Each package has `tests/` with: `unit/` (pure functions, no I/O), `integration/`
 7. Exception handlers that touch the DB must call `safe_rollback(ctx.deps.db)` (`agent/tools/_db.py`)
 8. Error return values must be generic — never raw `str(e)` (details belong in `logger.error(..., exc_info=True)`)
 
-### Adding a new API endpoint (ai-api)
+### Adding a new API endpoint (ai-api) (use `/api-route` skill)
 1. Add route in the appropriate `routes/*.py` file (or create a new router module)
 2. Use `APIRouter` with appropriate tags; import `limiter` from `deps.py` for rate-limited endpoints
 3. Add Pydantic schemas in `schemas.py`

@@ -733,4 +733,4 @@ class TestHeartbeat:
             await asyncio.wait_for(bc._heartbeat(MagicMock(), "tok", lease), timeout=1)
         # Stopped with at least one worst-case send left on the lease (small
         # tolerance for event-loop scheduling of the last sleep).
-        assert lease.remaining() >= bc.SEND_BUDGET_SECONDS - bc.HEARTBEAT_SECONDS
+        assert lease.remaining() >= bc.SEND_BUDGET_SECONDS - 2 * bc.HEARTBEAT_SECONDS

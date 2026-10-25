@@ -86,6 +86,7 @@ pnpm install:all                        # Install Node + Python dependencies
 # Linting, Formatting & Testing
 pnpm lint && pnpm format:check          # Lint + verify formatting
 pnpm lint:fix && pnpm format            # Auto-fix lint + format
+pnpm check:rules                        # Verify AGENTS.md rule size budget (<= 24 KB)
 pnpm test                               # Run all tests (TS + Python)
 pnpm test:ts                            # Run TS tests only
 pnpm test:python                        # Run Python tests only (uv run pytest)
@@ -168,14 +169,15 @@ Work is tracked in **Devflow** (kanban), project **`CHATBOTS`** (org Terra Krya)
 
 ## Testing & Common Workflows
 
-- **TS tests (Vitest 4)**: `buildTestApp()` in `tests/helpers/fastify.ts` (no auth/rate-limit/Swagger; **register new routes there too**), fixtures in `tests/helpers/fixtures.ts`. Reset singletons (`getBaileysSocket`, `isCloudApiConnected`) with `vi.resetModules()` in `beforeEach`.
-- **Python tests (pytest 9, `asyncio_mode = auto`)**: `tests/conftest.py` sets env vars and patches `create_engine` / `GoogleProvider` **before** production imports (do not reorder). Integration tests use `httpx.AsyncClient` with `ASGITransport(app=app)` + `app.dependency_overrides[get_db]`.
-- **Adding an agent tool (`ai-api`)**:
+- **Testing (use `/test-writer` skill)**:
+  - **TS tests (Vitest 4)**: `buildTestApp()` in `tests/helpers/fastify.ts` (no auth/rate-limit/Swagger; **register new routes there too**), fixtures in `tests/helpers/fixtures.ts`. Reset singletons (`getBaileysSocket`, `isCloudApiConnected`) with `vi.resetModules()` in `beforeEach`.
+  - **Python tests (pytest 9, `asyncio_mode = auto`)**: `tests/conftest.py` sets env vars and patches `create_engine` / `GoogleProvider` **before** production imports (do not reorder). Integration tests use `httpx.AsyncClient` with `ASGITransport(app=app)` + `app.dependency_overrides[get_db]`.
+- **Adding an agent tool (`ai-api`)** (use `/agent-tool` skill):
   1. Define `async def tool_name(ctx: RunContext[AgentDeps], ...) -> str` with `@agent.tool` in `agent/tools/`.
   2. Import module in `agent/tools/__init__.py` (triggers registration) and describe in `agent/core.py`.
   3. Call `safe_rollback(ctx.deps.db)` (`agent/tools/_db.py`) in DB exception blocks; return generic English errors (never raw `str(e)`, pinned by `test_tool_error_hygiene.py`); log details with `logger.error(..., exc_info=True)`.
   4. Add mocked tests in `tests/mocked/`.
-- **Adding an API endpoint (`ai-api`)**: Add route in `routes/*.py` with `APIRouter` + `limiter` from `deps.py`, schemas in `schemas.py`, register in `main.py` via `app.include_router()`, and add integration tests in `tests/integration/`.
+- **Adding an API endpoint (`ai-api`)** (use `/api-route` skill): Add route in `routes/*.py` with `APIRouter` + `limiter` from `deps.py`, schemas in `schemas.py`, register in `main.py` via `app.include_router()`, and add integration tests in `tests/integration/`.
 
 ## Gotchas
 

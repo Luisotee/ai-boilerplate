@@ -28,6 +28,7 @@ from pydantic_ai import RunContext
 
 from ...logger import logger
 from ..core import AgentDeps, agent
+from ._db import safe_rollback
 
 
 @agent.tool
@@ -59,19 +60,21 @@ async def tool_name(ctx: RunContext[AgentDeps], param: str) -> str:
         return result
 
     except Exception as e:
-        logger.error(f"Tool_name failed: {str(e)}", exc_info=True)
+        safe_rollback(ctx.deps.db)
+        logger.error(f"Tool_name failed: {e}", exc_info=True)
         logger.info("=" * 80)
         logger.info("TOOL ERROR: tool_name")
-        logger.info(f"   Error: {str(e)}")
+        logger.info(f"   Error: {e}")
         logger.info("=" * 80)
-        return f"Could not do X: {str(e)}"
+        return "Failed to complete the operation. Please try again."
 ```
 
 Key rules:
 - Use `@agent.tool` decorator (no parentheses unless specifying retries)
 - Signature: `async def tool_name(ctx: RunContext[AgentDeps], ...params) -> str`
 - Return type is always `str` — tools never return other types
-- Tools NEVER raise exceptions to the caller — always catch and return error strings
+- Tools NEVER raise exceptions to the caller — always catch and return generic error strings (never raw `str(e)`)
+- Always call `safe_rollback(ctx.deps.db)` in DB exception blocks
 - Use structured `="*80` logging blocks at entry, success, and error
 - Check deps availability before using optional deps (e.g., `if not ctx.deps.http_client:`)
 
