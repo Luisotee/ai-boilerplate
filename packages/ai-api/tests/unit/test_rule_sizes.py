@@ -5,7 +5,10 @@ boundaries. This test prevents regressions from pushing documentation over
 the budget.
 """
 
+import subprocess
 from pathlib import Path
+
+AGY_RULE_LIMIT = 24_000  # bytes; agy truncates a rule file past this
 
 
 def _repo_root() -> Path:
@@ -38,3 +41,23 @@ def test_all_agents_rule_files_within_budget():
         assert resolved.is_file(), f"Rule file {rule_file} must resolve to an existing file"
         size = resolved.stat().st_size
         assert size <= 24_000, f"Rule file {rule_file} ({size} bytes) exceeds the 24,000-byte limit"
+
+
+def test_tracked_rules_files_fit_agy():
+    """CLAUDE.md and GEMINI.md count too: the root CLAUDE.md is a real file, not a symlink."""
+    root = _repo_root()
+    names = subprocess.run(
+        ["git", "ls-files", "-z", "*CLAUDE.md", "*AGENTS.md", "*GEMINI.md"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split("\0")
+    for name in filter(None, names):
+        path = root / name
+        if not path.is_file():  # deleted but not yet committed
+            continue
+        size = len(path.read_bytes())
+        assert size <= AGY_RULE_LIMIT, (
+            f"{name} is {size} bytes, over agy's {AGY_RULE_LIMIT}-byte limit"
+        )
