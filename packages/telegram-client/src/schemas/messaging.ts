@@ -45,6 +45,11 @@ export const ReadyResponseSchema = z.object({
   checks: z.record(z.string(), z.string()),
 });
 
+export const StatusResponseSchema = z.object({
+  status: z.enum(['connected', 'disconnected']),
+  username: z.string().nullable(),
+});
+
 export const GroupMemberSchema = z.object({
   phoneNumber: z.string().describe('Group chat identifier ("tg:-100..." or a bare chat id)'),
   userJid: z.string().describe('Member to check ("tg:<user_id>" or a bare user id)'),

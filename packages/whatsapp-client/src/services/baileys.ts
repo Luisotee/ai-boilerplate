@@ -51,14 +51,25 @@ export interface WhatsAppConnectionInfo {
   status: WhatsAppConnectionStatus;
   qr: string | null;
   qrGeneratedAt: string | null;
+  phoneNumber: string | null;
 }
 
 let connectionStatus: WhatsAppConnectionStatus = 'connecting';
 let latestQr: string | null = null;
 let qrGeneratedAt: string | null = null;
+let pairedPhoneNumber: string | null = null;
 
 export function setConnectionStatus(status: WhatsAppConnectionStatus): void {
   connectionStatus = status;
+}
+
+/** Store the paired bot phone number digits (survives socket reconnects). */
+export function setPairedPhoneNumber(phone: string | null): void {
+  pairedPhoneNumber = phone;
+}
+
+export function getPairedPhoneNumber(): string | null {
+  return pairedPhoneNumber;
 }
 
 /** Store the latest pairing QR (or clear it once paired). */
@@ -68,5 +79,5 @@ export function setLatestQr(qr: string | null): void {
 }
 
 export function getConnectionInfo(): WhatsAppConnectionInfo {
-  return { status: connectionStatus, qr: latestQr, qrGeneratedAt };
+  return { status: connectionStatus, qr: latestQr, qrGeneratedAt, phoneNumber: pairedPhoneNumber };
 }

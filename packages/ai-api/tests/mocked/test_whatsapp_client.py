@@ -551,3 +551,15 @@ class TestIsGroupMember:
         mock_http_client.post.return_value = _json_response(500, {"error": "boom"})
         with pytest.raises(WhatsAppClientError):
             await whatsapp_client.is_group_member("tg:-1001", "tg:5")
+
+
+class TestGetClientStatus:
+    async def test_calls_whatsapp_status_endpoint(self, whatsapp_client, mock_http_client):
+        mock_http_client.get.return_value = _json_response(
+            200, {"status": "connected", "phoneNumber": "5561999999999"}
+        )
+        data = await whatsapp_client.get_client_status()
+        assert data == {"status": "connected", "phoneNumber": "5561999999999"}
+        args, kwargs = mock_http_client.get.call_args
+        assert args[0] == "http://localhost:3001/whatsapp/status"
+        assert kwargs["headers"] == {"X-API-Key": "test-api-key-123"}

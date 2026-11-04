@@ -20,6 +20,8 @@ vi.mock('../../src/services/baileys.js', () => ({
   setSocketOpen: vi.fn(),
   setConnectionStatus: vi.fn(),
   setLatestQr: vi.fn(),
+  setPairedPhoneNumber: vi.fn(),
+  getPairedPhoneNumber: vi.fn(),
   getConnectionInfo: vi.fn(),
 }));
 

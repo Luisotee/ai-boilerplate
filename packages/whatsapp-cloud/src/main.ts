@@ -17,7 +17,9 @@ import {
 import { logger } from './logger.js';
 import { fetchWithTimeout } from './utils/fetch.js';
 import { setCloudApiReady } from './services/cloud-state.js';
+import { parseDisplayPhoneNumber, setDisplayPhoneNumber } from './services/graph-api.js';
 import { registerHealthRoutes } from './routes/health.js';
+import { registerConnectionRoutes } from './routes/connection.js';
 import { registerWebhookRoutes } from './routes/webhook.js';
 import { registerMessagingRoutes } from './routes/messaging.js';
 import { registerMediaRoutes } from './routes/media.js';
@@ -62,7 +64,7 @@ async function validateCloudApiCredentials(): Promise<boolean> {
   }
 
   try {
-    const url = `${graphApiBaseUrl}/${graphApiVersion}/${phoneNumberId}`;
+    const url = `${graphApiBaseUrl}/${graphApiVersion}/${phoneNumberId}?fields=id,display_phone_number`;
     const response = await fetchWithTimeout(
       url,
       {
@@ -79,8 +81,15 @@ async function validateCloudApiCredentials(): Promise<boolean> {
         { status: response.status },
         'Cloud API credential validation failed — check META_PHONE_NUMBER_ID and META_ACCESS_TOKEN'
       );
+      return false;
     }
-    return response.ok;
+    try {
+      const data = (await response.json()) as { display_phone_number?: string };
+      setDisplayPhoneNumber(parseDisplayPhoneNumber(data.display_phone_number));
+    } catch {
+      // Non-fatal if JSON parsing fails
+    }
+    return true;
   } catch (error) {
     logger.warn(
       { error },
@@ -256,6 +265,7 @@ async function start() {
 
   // Register API routes
   await registerHealthRoutes(app);
+  await registerConnectionRoutes(app);
   await registerWebhookRoutes(app);
   await registerMessagingRoutes(app);
   await registerMediaRoutes(app);

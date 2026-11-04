@@ -106,7 +106,7 @@ cd packages/ai-api && uv run pytest tests/mocked/test_model_chain_fallback.py -k
 
 ## Security
 
-- **API Key Auth**: All servers require `X-API-Key` header on all routes except `/health*` and `/docs*` (`AI_API_KEY`, `WHATSAPP_API_KEY`, `WHATSAPP_CLOUD_API_KEY` falling back to `WHATSAPP_API_KEY`, `TELEGRAM_API_KEY` falling back to `WHATSAPP_API_KEY`).
+- **API Key Auth**: All servers require `X-API-Key` header on all routes except `/health*`, `/contact` (AI API only), and `/docs*` (`AI_API_KEY`, `WHATSAPP_API_KEY`, `WHATSAPP_CLOUD_API_KEY` falling back to `WHATSAPP_API_KEY`, `TELEGRAM_API_KEY` falling back to `WHATSAPP_API_KEY`).
 - **Webhook verification**: `/webhook` on Cloud (`x-hub-signature-256` HMAC-SHA256 via `META_APP_SECRET`) and Telegram (`X-Telegram-Bot-Api-Secret-Token` via `TELEGRAM_WEBHOOK_SECRET`) skip API-key auth and use platform-native verification.
 - **CORS**: `CORS_ORIGINS` (comma-separated; empty = block all cross-origin).
 - **Rate Limiting**: `RATE_LIMIT_GLOBAL` (default 30/min), `RATE_LIMIT_EXPENSIVE` (default 5/min). On TS clients, requests with a valid `X-API-Key` are exempt (`utils/api-key.ts` `hasValidApiKey`, which compares **byte** lengths before `timingSafeEqual` so multibyte headers get 401 instead of 500). Auth hook runs BEFORE the rate limiter.

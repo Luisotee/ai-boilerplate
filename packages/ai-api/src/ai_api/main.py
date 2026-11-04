@@ -26,6 +26,7 @@ from .routes import (
     broadcasts_router,
     bug_reports_router,
     chat_router,
+    contact_router,
     health_router,
     knowledge_base_router,
     preferences_router,
@@ -144,6 +145,7 @@ def custom_openapi():
         routes=app.routes,
         tags=[
             {"name": "Health", "description": "Health check endpoints"},
+            {"name": "Contact", "description": "Public bot contact handles"},
             {
                 "name": "Knowledge Base",
                 "description": "PDF upload, processing, and semantic search",
@@ -182,7 +184,11 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
     """Validate X-API-Key header on all requests except health/docs."""
 
     async def dispatch(self, request: Request, call_next):
-        if any(request.url.path.startswith(p) for p in _AUTH_EXEMPT_PREFIXES):
+        path = request.url.path
+        if any(path.startswith(p) for p in _AUTH_EXEMPT_PREFIXES) or path in (
+            "/contact",
+            "/contact/",
+        ):
             return await call_next(request)
 
         api_key = request.headers.get("x-api-key")
@@ -221,6 +227,7 @@ app.add_middleware(SlowAPIMiddleware)
 # --- Register Routers ---
 
 app.include_router(health_router)
+app.include_router(contact_router)
 app.include_router(knowledge_base_router)
 app.include_router(chat_router)
 app.include_router(speech_router)

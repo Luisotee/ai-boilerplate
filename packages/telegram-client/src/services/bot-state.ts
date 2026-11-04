@@ -1,7 +1,11 @@
 let ready = false;
+let botUsername: string | null = null;
 
-export function markBotReady(): void {
+export function markBotReady(username?: string | null): void {
   ready = true;
+  if (username !== undefined) {
+    botUsername = username;
+  }
 }
 
 /**
@@ -18,7 +22,15 @@ export function isBotReady(): boolean {
   return ready;
 }
 
-/** Test-only helper: resets readiness. Safe to call from production too. */
+/**
+ * Get the bot's Telegram handle (without '@').
+ */
+export function getBotUsername(): string | null {
+  return botUsername;
+}
+
+/** Test-only helper: resets readiness and stored username. Safe to call from production too. */
 export function _resetBotReadyForTests(): void {
   ready = false;
+  botUsername = null;
 }

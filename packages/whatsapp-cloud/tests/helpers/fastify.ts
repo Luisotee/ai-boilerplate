@@ -25,6 +25,7 @@ import {
   type ZodTypeProvider,
 } from 'fastify-type-provider-zod';
 import { registerHealthRoutes } from '../../src/routes/health.js';
+import { registerConnectionRoutes } from '../../src/routes/connection.js';
 import { registerWebhookRoutes } from '../../src/routes/webhook.js';
 import { registerMessagingRoutes } from '../../src/routes/messaging.js';
 import { registerMediaRoutes } from '../../src/routes/media.js';
@@ -63,6 +64,7 @@ export async function buildTestApp() {
 
   // Register all route plugins (same order as production main.ts)
   await registerHealthRoutes(app);
+  await registerConnectionRoutes(app);
   await registerWebhookRoutes(app);
   await registerMessagingRoutes(app);
   await registerMediaRoutes(app);

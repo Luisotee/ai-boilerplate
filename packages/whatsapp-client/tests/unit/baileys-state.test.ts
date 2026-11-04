@@ -11,10 +11,13 @@ let setSocketOpen: (open: boolean) => void;
 let getLiveSocket: () => WASocket | null;
 let setConnectionStatus: (s: 'connecting' | 'qr' | 'connected' | 'disconnected') => void;
 let setLatestQr: (qr: string | null) => void;
+let setPairedPhoneNumber: (phone: string | null) => void;
+let getPairedPhoneNumber: () => string | null;
 let getConnectionInfo: () => {
   status: 'connecting' | 'qr' | 'connected' | 'disconnected';
   qr: string | null;
   qrGeneratedAt: string | null;
+  phoneNumber: string | null;
 };
 
 describe('baileys state singleton', () => {
@@ -31,6 +34,8 @@ describe('baileys state singleton', () => {
     getLiveSocket = mod.getLiveSocket;
     setConnectionStatus = mod.setConnectionStatus;
     setLatestQr = mod.setLatestQr;
+    setPairedPhoneNumber = mod.setPairedPhoneNumber;
+    getPairedPhoneNumber = mod.getPairedPhoneNumber;
     getConnectionInfo = mod.getConnectionInfo;
   });
 
@@ -124,6 +129,7 @@ describe('baileys state singleton', () => {
         status: 'connecting',
         qr: null,
         qrGeneratedAt: null,
+        phoneNumber: null,
       });
     });
 
@@ -155,6 +161,19 @@ describe('baileys state singleton', () => {
     it('should report disconnected after a close', () => {
       setConnectionStatus('disconnected');
       expect(getConnectionInfo().status).toBe('disconnected');
+    });
+
+    it('should store and return paired phone number', () => {
+      expect(getPairedPhoneNumber()).toBeNull();
+      expect(getConnectionInfo().phoneNumber).toBeNull();
+
+      setPairedPhoneNumber('5561999999999');
+      expect(getPairedPhoneNumber()).toBe('5561999999999');
+      expect(getConnectionInfo().phoneNumber).toBe('5561999999999');
+
+      setPairedPhoneNumber(null);
+      expect(getPairedPhoneNumber()).toBeNull();
+      expect(getConnectionInfo().phoneNumber).toBeNull();
     });
   });
 

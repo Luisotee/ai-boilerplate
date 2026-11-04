@@ -14,6 +14,7 @@ import {
   setBaileysSocket,
   setConnectionStatus,
   setLatestQr,
+  setPairedPhoneNumber,
   getLiveSocket,
   setSocketOpen,
   isBaileysReady,
@@ -39,6 +40,7 @@ import {
   isLid,
   resolveParticipantJid,
   resolveSenderPhone,
+  extractPairedNumberFromCreds,
 } from './utils/jid.js';
 import { isWhitelisted } from './utils/whitelist.js';
 import { gateMessage, type Gate } from './utils/gating.js';
@@ -119,6 +121,7 @@ async function resolveGate(
 /** Delete the stored Baileys creds so the next init drops back into QR (unregistered) mode.
  *  Clears the directory contents — not the dir itself, which is the session volume mountpoint. */
 async function clearAuthState(): Promise<void> {
+  setPairedPhoneNumber(null);
   try {
     const entries = await readdir(AUTH_DIR);
     await Promise.all(entries.map((e) => rm(`${AUTH_DIR}/${e}`, { recursive: true, force: true })));
@@ -293,6 +296,12 @@ function scheduleReconnect(): void {
 export async function initializeWhatsApp(): Promise<void> {
   const myEpoch = ++socketEpoch; // this socket's generation; guards below ignore stale ones
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+  // Populate paired phone number from existing saved creds so it is known even before
+  // the socket opens or while reconnecting.
+  const savedPhone = extractPairedNumberFromCreds(state.creds);
+  if (savedPhone) {
+    setPairedPhoneNumber(savedPhone);
+  }
   // Spread, never `version: versionConfig.version` — an explicit undefined key would
   // clobber Baileys' bundled default and crash the handshake. See services/wa-version.ts.
   const versionConfig = await getWaVersionConfig();
@@ -362,6 +371,10 @@ export async function initializeWhatsApp(): Promise<void> {
       setSocketOpen(true); // socket already tracked at creation; just mark the link open
       setConnectionStatus('connected');
       setLatestQr(null); // clear the pairing QR once linked
+      const phone = extractPairedNumberFromCreds(state.creds);
+      if (phone) {
+        setPairedPhoneNumber(phone);
+      }
 
       // Reset reconnection state on successful connection
       resetReconnectionState();
@@ -371,6 +384,10 @@ export async function initializeWhatsApp(): Promise<void> {
   sock.ev.on('creds.update', async () => {
     if (myEpoch !== socketEpoch) return; // stale socket must not re-persist wiped creds
     await saveCreds();
+    const phone = extractPairedNumberFromCreds(state.creds);
+    if (phone) {
+      setPairedPhoneNumber(phone);
+    }
   });
 
   // A renamed group must not keep serving its old subject as the conversation
