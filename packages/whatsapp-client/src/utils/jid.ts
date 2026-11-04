@@ -45,9 +45,10 @@ export function isLid(jid: string): boolean {
 
 /**
  * Extract paired phone number digits (E.164 without '+') from Baileys auth creds.
- * Checks creds.me.phoneNumber first, then extracts from creds.me.id if not a LID.
+ * Checks creds.me.phoneNumber first, then extracts from creds.me.id.
  * Both fields carry JIDs (e.g. "5561999999999:12@s.whatsapp.net"), so both run
- * through stripDeviceSuffix and extractPhoneFromJid before stripping non-digits.
+ * through stripDeviceSuffix and phoneFromJid, accepting only @s.whatsapp.net
+ * JIDs and rejecting LIDs, hosted JIDs (@hosted, @hosted.lid), or group JIDs.
  */
 export function extractPairedNumberFromCreds(
   creds?: Pick<AuthenticationCreds, 'me'> | null
@@ -55,13 +56,14 @@ export function extractPairedNumberFromCreds(
   if (!creds?.me) {
     return null;
   }
-  if (creds.me.phoneNumber && !isLid(creds.me.phoneNumber)) {
-    const digits = extractPhoneFromJid(stripDeviceSuffix(creds.me.phoneNumber)).replace(/\D/g, '');
-    if (digits) return digits;
-  }
-  if (creds.me.id && !isLid(creds.me.id)) {
-    const digits = extractPhoneFromJid(stripDeviceSuffix(creds.me.id)).replace(/\D/g, '');
-    if (digits) return digits;
+  for (const raw of [creds.me.phoneNumber, creds.me.id]) {
+    if (raw) {
+      const phone = phoneFromJid(stripDeviceSuffix(raw));
+      if (phone) {
+        const digits = phone.replace(/\D/g, '');
+        if (digits) return digits;
+      }
+    }
   }
   return null;
 }

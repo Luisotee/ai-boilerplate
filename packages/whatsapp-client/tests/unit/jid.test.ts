@@ -461,6 +461,38 @@ describe('extractPairedNumberFromCreds', () => {
     ).toBe('5561888888888');
   });
 
+  it('ignores creds.me.phoneNumber if it is a hosted or hosted.lid JID', () => {
+    expect(
+      extractPairedNumberFromCreds({
+        me: {
+          id: '5561888888888@s.whatsapp.net',
+          phoneNumber: '123456789:1@hosted',
+        },
+      })
+    ).toBe('5561888888888');
+    expect(
+      extractPairedNumberFromCreds({
+        me: {
+          id: '5561888888888@s.whatsapp.net',
+          phoneNumber: '123456789:1@hosted.lid',
+        },
+      })
+    ).toBe('5561888888888');
+  });
+
+  it('returns null if creds.me.id is a hosted JID and phoneNumber is not set', () => {
+    expect(
+      extractPairedNumberFromCreds({
+        me: { id: '123456789:1@hosted' },
+      })
+    ).toBeNull();
+    expect(
+      extractPairedNumberFromCreds({
+        me: { id: '123456789:1@hosted.lid' },
+      })
+    ).toBeNull();
+  });
+
   it('returns null if creds.me.id is a LID and phoneNumber is not set', () => {
     expect(
       extractPairedNumberFromCreds({

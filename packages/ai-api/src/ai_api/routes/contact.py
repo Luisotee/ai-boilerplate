@@ -61,8 +61,8 @@ async def _fetch_client_status(client_id: str | None) -> tuple[dict | None, bool
         tuple[dict | None, bool]: (data, failed)
         - If client is unconfigured: (None, False)
         - If client answered 2xx: (data_dict, False)
-        - If client is absent (connection refused / DNS error / connect timeout): (None, False)
-        - If client failed (read timeout, 5xx, or other error): (None, True)
+        - If client is absent (connection refused): (None, False)
+        - If client failed (timeout, 5xx, or other error): (None, True)
     """
     if not _is_client_configured(client_id):
         return None, False
@@ -79,7 +79,7 @@ async def _fetch_client_status(client_id: str | None) -> tuple[dict | None, bool
             )
             data = await client.get_client_status()
             return data, False
-    except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+    except httpx.ConnectError as e:
         # Client service is not running or absent (e.g. Docker profile not enabled).
         # Do not degrade the cache TTL for unstarted services.
         logger.debug("Contact client %s absent (%s): %s", channel_name, base_url, e)
@@ -97,17 +97,18 @@ async def _fetch_whatsapp_contact() -> tuple[WhatsAppContact | None, bool]:
 
     Queries configured WhatsApp clients (Baileys and Cloud API) concurrently.
     Prefers a client whose status is 'connected' first (Baileys before Cloud).
-    Falls back to a non-connected client with a number only when no connected
-    client has one.
+    Falls back to a non-connected Baileys client with a number only when no connected
+    client has one. Disconnected Cloud returns phoneNumber: null, so non-connected
+    fallback applies to Baileys only.
 
     Returns:
         tuple[WhatsAppContact | None, bool]: (contact, failed)
-        - failed=True triggers short TTL (10s):
-          * when no WhatsApp number was found (every bot has WhatsApp)
-          * when Baileys provides the number and is disconnected or failed
-          * when Cloud provides the number and Baileys failed (to restore Baileys quickly)
-          * when Cloud provides the number and is disconnected or failed
-        - failed=False keeps long TTL (60s)
+        - connected Baileys with a number -> failed=False (broken Cloud must not shorten TTL)
+        - connected Cloud with a number -> failed=baileys_failed or baileys_data is not None
+          (short TTL if Baileys failed or answered but not connected/paired, so Baileys returns quickly;
+          long TTL if Baileys is absent or unconfigured)
+        - non-connected Baileys with a number -> failed=True (short TTL)
+        - no number -> (None, False) (get_contact handles short TTL when whatsapp is None)
     """
     baileys_configured = _is_client_configured(None)
     cloud_configured = _is_client_configured("cloud")
@@ -130,45 +131,40 @@ async def _fetch_whatsapp_contact() -> tuple[WhatsAppContact | None, bool]:
     baileys_connected = bool(baileys_data and baileys_data.get("status") == "connected")
     cloud_connected = bool(cloud_data and cloud_data.get("status") == "connected")
 
-    chosen_number: str | None = None
-    chosen_source: str | None = None
-
-    # 1. Prefer connected client with a number (Baileys before Cloud)
+    # 1. Connected Baileys with a number -> long TTL (60s); broken Cloud must not pin 10s TTL
     if baileys_connected and baileys_number:
-        chosen_number = baileys_number
-        chosen_source = "baileys"
-    elif cloud_connected and cloud_number:
-        chosen_number = cloud_number
-        chosen_source = "cloud"
-    # 2. Fall back to non-connected client with a number
-    elif baileys_number:
-        chosen_number = baileys_number
-        chosen_source = "baileys"
-    elif cloud_number:
-        chosen_number = cloud_number
-        chosen_source = "cloud"
+        return (
+            WhatsAppContact(
+                number=baileys_number,
+                url=f"https://wa.me/{baileys_number}",
+            ),
+            False,
+        )
 
-    if chosen_number is None:
-        # Every bot has WhatsApp: if no number was found for any reason, use short TTL (10s)
-        return None, True
+    # 2. Connected Cloud with a number -> short TTL if Baileys failed or answered but
+    # not connected/paired (so preferred Baileys returns quickly); long TTL if Baileys is absent/unconfigured
+    if cloud_connected and cloud_number:
+        failed = bool(baileys_failed or baileys_data is not None)
+        return (
+            WhatsAppContact(
+                number=cloud_number,
+                url=f"https://wa.me/{cloud_number}",
+            ),
+            failed,
+        )
 
-    # A number was found. Short TTL (failed=True) only if:
-    # - Baileys is the chosen source and is disconnected or failed
-    # - Cloud is the chosen source and:
-    #   * Baileys failed (timeout, 5xx), so we want short TTL to pick up Baileys on recovery
-    #   * Or Cloud itself failed or is not connected
-    if chosen_source == "baileys":
-        failed = bool(baileys_failed or not baileys_connected)
-    else:
-        failed = bool(baileys_failed or cloud_failed or not cloud_connected)
+    # 3. Non-connected Baileys with a number -> short TTL (10s)
+    if baileys_number:
+        return (
+            WhatsAppContact(
+                number=baileys_number,
+                url=f"https://wa.me/{baileys_number}",
+            ),
+            True,
+        )
 
-    return (
-        WhatsAppContact(
-            number=chosen_number,
-            url=f"https://wa.me/{chosen_number}",
-        ),
-        failed,
-    )
+    # 4. No number found on any client
+    return None, False
 
 
 async def _fetch_telegram_contact() -> tuple[TelegramContact | None, bool]:
@@ -206,9 +202,9 @@ async def _fetch_telegram_contact() -> tuple[TelegramContact | None, bool]:
 async def get_contact(request: Request) -> ContactResponse:
     """Return public contact handles for the bot on WhatsApp and Telegram.
 
-    Unauthenticated endpoint, rate-limited and cached for ~60s (or ~10s if any
-    configured client failed). Never fails with 500 when downstream clients are
-    unavailable; returns null per channel when unknown.
+    Unauthenticated endpoint, rate-limited and cached for ~60s (or ~10s if
+    whatsapp is missing or any configured client failed). Never fails with 500
+    when downstream clients are unavailable; returns null per channel when unknown.
     """
     global _cached_contact, _cached_at, _cached_ttl
 
@@ -241,7 +237,11 @@ async def get_contact(request: Request) -> ContactResponse:
         wa_failed = wa_result[1] if isinstance(wa_result, tuple) else True
         tg_failed = tg_result[1] if isinstance(tg_result, tuple) else True
 
-        ttl = _SHORT_CACHE_TTL_SECONDS if (wa_failed or tg_failed) else _CACHE_TTL_SECONDS
+        ttl = (
+            _SHORT_CACHE_TTL_SECONDS
+            if (whatsapp_contact is None or wa_failed or tg_failed)
+            else _CACHE_TTL_SECONDS
+        )
 
         response = ContactResponse(
             whatsapp=whatsapp_contact,
