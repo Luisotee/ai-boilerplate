@@ -102,7 +102,7 @@ describe('Connection routes', () => {
   });
 
   describe('GET /whatsapp/status', () => {
-    it('returns connection info and paired phone number', async () => {
+    it('returns connection info and paired phone number without qr', async () => {
       mockGetConnectionInfo.mockReturnValue({
         status: 'connected',
         qr: null,
@@ -115,8 +115,6 @@ describe('Connection routes', () => {
       expect(res.statusCode).toBe(200);
       expect(res.json()).toEqual({
         status: 'connected',
-        qr: null,
-        qrGeneratedAt: null,
         phoneNumber: '5561999999999',
       });
     });

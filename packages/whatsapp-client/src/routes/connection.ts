@@ -3,6 +3,7 @@ import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { getConnectionInfo } from '../services/baileys.js';
 import {
   ConnectionInfoSchema,
+  StatusResponseSchema,
   SuccessResponseSchema,
   ErrorResponseSchema,
 } from '../schemas/messaging.js';
@@ -37,12 +38,16 @@ export async function registerConnectionRoutes(app: FastifyInstance) {
           'Current WhatsApp link status and paired phone number digits (survives reconnects). ' +
           'Requires the API key.',
         response: {
-          200: ConnectionInfoSchema,
+          200: StatusResponseSchema,
         },
       },
     },
     async () => {
-      return getConnectionInfo();
+      const info = getConnectionInfo();
+      return {
+        status: info.status,
+        phoneNumber: info.phoneNumber,
+      };
     }
   );
 

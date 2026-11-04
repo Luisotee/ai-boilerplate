@@ -121,10 +121,10 @@ async function resolveGate(
 /** Delete the stored Baileys creds so the next init drops back into QR (unregistered) mode.
  *  Clears the directory contents — not the dir itself, which is the session volume mountpoint. */
 async function clearAuthState(): Promise<void> {
+  setPairedPhoneNumber(null);
   try {
     const entries = await readdir(AUTH_DIR);
     await Promise.all(entries.map((e) => rm(`${AUTH_DIR}/${e}`, { recursive: true, force: true })));
-    setPairedPhoneNumber(null);
     logger.info({ cleared: entries.length }, 'Cleared WhatsApp auth state');
   } catch (err) {
     logger.error({ err }, 'Failed to clear WhatsApp auth state');

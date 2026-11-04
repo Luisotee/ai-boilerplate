@@ -11,7 +11,6 @@ import { buildTestApp } from '../helpers/fastify.js';
 import {
   markBotReady,
   markBotDisconnected,
-  setBotUsernameForTests,
   _resetBotReadyForTests,
 } from '../../src/services/bot-state.js';
 
@@ -33,8 +32,7 @@ describe('Status routes (telegram-client)', () => {
 
   describe('GET /whatsapp/status', () => {
     it('returns connected status and bot username when bot is ready', async () => {
-      markBotReady();
-      setBotUsernameForTests('curupira_bot');
+      markBotReady('curupira_bot');
 
       const res = await app.inject({ method: 'GET', url: '/whatsapp/status' });
 
@@ -47,7 +45,6 @@ describe('Status routes (telegram-client)', () => {
 
     it('returns disconnected and null username when bot is not ready', async () => {
       markBotDisconnected();
-      setBotUsernameForTests(null);
 
       const res = await app.inject({ method: 'GET', url: '/whatsapp/status' });
 
@@ -59,8 +56,7 @@ describe('Status routes (telegram-client)', () => {
     });
 
     it('returns connected status but null username if botInfo has no username', async () => {
-      markBotReady();
-      setBotUsernameForTests(null);
+      markBotReady(null);
 
       const res = await app.inject({ method: 'GET', url: '/whatsapp/status' });
 

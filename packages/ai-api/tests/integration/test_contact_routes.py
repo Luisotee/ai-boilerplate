@@ -265,7 +265,9 @@ async def test_contact_unconfigured_client_gets_full_ttl(mock_cleanup, mock_redi
             contact_module._cached_at -= 15.0
             res2 = await client.get("/contact")
             assert res2.status_code == 200
-            assert mock_client.get_client_status.call_count == 1  # Still cached
+            assert (
+                mock_client.get_client_status.call_count == 2
+            )  # Still cached (Baileys + Cloud called concurrently in res1)
 
 
 async def test_fetch_whatsapp_contact_baileys_priority():
@@ -341,7 +343,7 @@ async def test_fetchers_resilient_to_downstream_errors():
     from ai_api.routes.contact import _fetch_telegram_contact, _fetch_whatsapp_contact
 
     mock_client = AsyncMock()
-    mock_client.get_client_status.side_effect = ConnectionError("Connection refused")
+    mock_client.get_client_status.side_effect = TimeoutError("Request timed out")
 
     with patch("ai_api.routes.contact.create_whatsapp_client", return_value=mock_client):
         wa_contact, wa_failed = await _fetch_whatsapp_contact()
@@ -351,6 +353,25 @@ async def test_fetchers_resilient_to_downstream_errors():
     assert wa_failed is True
     assert tg_contact is None
     assert tg_failed is True
+
+
+async def test_absent_client_connect_error_gets_long_ttl():
+    """A client that is absent / not running (ConnectError) does not trigger short TTL."""
+    import httpx
+
+    from ai_api.routes.contact import _fetch_telegram_contact, _fetch_whatsapp_contact
+
+    mock_client = AsyncMock()
+    mock_client.get_client_status.side_effect = httpx.ConnectError("Connection refused")
+
+    with patch("ai_api.routes.contact.create_whatsapp_client", return_value=mock_client):
+        wa_contact, wa_failed = await _fetch_whatsapp_contact()
+        tg_contact, tg_failed = await _fetch_telegram_contact()
+
+    assert wa_contact is None
+    assert wa_failed is False
+    assert tg_contact is None
+    assert tg_failed is False
 
 
 def test_openapi_contact_tag():

@@ -1,10 +1,11 @@
-import { bot } from '../bot.js';
-
 let ready = false;
-let customUsername: string | null = null;
+let botUsername: string | null = null;
 
-export function markBotReady(): void {
+export function markBotReady(username?: string | null): void {
   ready = true;
+  if (username !== undefined) {
+    botUsername = username;
+  }
 }
 
 /**
@@ -23,29 +24,13 @@ export function isBotReady(): boolean {
 
 /**
  * Get the bot's Telegram handle (without '@').
- * Reads from bot.botInfo when initialized.
  */
 export function getBotUsername(): string | null {
-  if (customUsername !== null) {
-    return customUsername;
-  }
-  try {
-    if (bot.isInited() && bot.botInfo?.username) {
-      return bot.botInfo.username;
-    }
-  } catch {
-    // bot.botInfo throws when uninitialized in grammY
-  }
-  return null;
+  return botUsername;
 }
 
-/** Test-only helper: override username for testing. */
-export function setBotUsernameForTests(username: string | null): void {
-  customUsername = username;
-}
-
-/** Test-only helper: resets readiness. Safe to call from production too. */
+/** Test-only helper: resets readiness and stored username. Safe to call from production too. */
 export function _resetBotReadyForTests(): void {
   ready = false;
-  customUsername = null;
+  botUsername = null;
 }

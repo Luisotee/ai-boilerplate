@@ -147,7 +147,7 @@ async function start() {
   // Docker restart than to serve webhooks in a broken state.
   app.log.info('Initializing Telegram bot (fetching getMe)...');
   await bot.init();
-  markBotReady();
+  markBotReady(bot.botInfo.username);
   app.log.info({ botUsername: bot.botInfo.username, botId: bot.botInfo.id }, 'Bot initialized');
 
   await registerHealthRoutes(app);
