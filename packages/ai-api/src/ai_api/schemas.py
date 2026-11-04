@@ -475,3 +475,21 @@ class BugReportsResponse(BaseModel):
 class BugReportUpdateRequest(BaseModel):
     status: BugReportStatus
     resolution_note: str | None = Field(None, max_length=4000)
+
+
+# --- Public Bot Contact ---
+
+
+class WhatsAppContact(BaseModel):
+    number: str = Field(..., description="E.164 digits without '+' (e.g. 5561999999999)")
+    url: str = Field(..., description="Direct chat URL (e.g. https://wa.me/5561999999999)")
+
+
+class TelegramContact(BaseModel):
+    username: str = Field(..., description="Telegram username without '@' (e.g. curupira_bot)")
+    url: str = Field(..., description="Direct chat URL (e.g. https://t.me/curupira_bot)")
+
+
+class ContactResponse(BaseModel):
+    whatsapp: WhatsAppContact | None = None
+    telegram: TelegramContact | None = None

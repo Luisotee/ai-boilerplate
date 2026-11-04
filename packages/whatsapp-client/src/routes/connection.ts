@@ -28,6 +28,24 @@ export async function registerConnectionRoutes(app: FastifyInstance) {
     }
   );
 
+  app.withTypeProvider<ZodTypeProvider>().get(
+    '/whatsapp/status',
+    {
+      schema: {
+        tags: ['Connection'],
+        description:
+          'Current WhatsApp link status and paired phone number digits (survives reconnects). ' +
+          'Requires the API key.',
+        response: {
+          200: ConnectionInfoSchema,
+        },
+      },
+    },
+    async () => {
+      return getConnectionInfo();
+    }
+  );
+
   app.withTypeProvider<ZodTypeProvider>().post(
     '/whatsapp/logout',
     {

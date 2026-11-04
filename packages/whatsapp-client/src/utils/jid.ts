@@ -1,4 +1,4 @@
-import type { WASocket } from '@whiskeysockets/baileys';
+import type { AuthenticationCreds, WASocket } from '@whiskeysockets/baileys';
 import { logger } from '../logger.js';
 import { getBaileysSocket } from '../services/baileys.js';
 
@@ -41,6 +41,27 @@ export function phoneFromJid(jid: string): string | null {
  */
 export function isLid(jid: string): boolean {
   return jid.endsWith('@lid');
+}
+
+/**
+ * Extract paired phone number digits (E.164 without '+') from Baileys auth creds.
+ * Checks creds.me.phoneNumber first, then extracts from creds.me.id if not a LID.
+ */
+export function extractPairedNumberFromCreds(
+  creds?: Pick<AuthenticationCreds, 'me'> | null
+): string | null {
+  if (!creds?.me) {
+    return null;
+  }
+  if (creds.me.phoneNumber) {
+    const digits = creds.me.phoneNumber.replace(/\D/g, '');
+    if (digits) return digits;
+  }
+  if (creds.me.id && !isLid(creds.me.id)) {
+    const digits = extractPhoneFromJid(stripDeviceSuffix(creds.me.id)).replace(/\D/g, '');
+    if (digits) return digits;
+  }
+  return null;
 }
 
 /**

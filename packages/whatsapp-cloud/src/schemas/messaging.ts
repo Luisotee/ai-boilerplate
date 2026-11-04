@@ -59,6 +59,11 @@ export const ReadyResponseSchema = z.object({
   checks: z.record(z.string(), z.string()),
 });
 
+export const ConnectionInfoSchema = z.object({
+  status: z.enum(['connected', 'disconnected']),
+  phoneNumber: z.string().nullable(),
+});
+
 // Types
 export type SendTextRequest = z.infer<typeof SendTextSchema>;
 export type SendReactionRequest = z.infer<typeof SendReactionSchema>;

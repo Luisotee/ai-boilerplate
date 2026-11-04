@@ -53,6 +53,7 @@ describe('Connection routes', () => {
         status: 'qr',
         qr: '2@abc123def',
         qrGeneratedAt: '2026-05-26T14:00:00.000Z',
+        phoneNumber: null,
       });
 
       const res = await app.inject({ method: 'GET', url: '/whatsapp/qr' });
@@ -62,29 +63,62 @@ describe('Connection routes', () => {
         status: 'qr',
         qr: '2@abc123def',
         qrGeneratedAt: '2026-05-26T14:00:00.000Z',
+        phoneNumber: null,
       });
     });
 
-    it('reports connected with no QR once paired', async () => {
+    it('reports connected with no QR once paired, including paired phone number', async () => {
       mockGetConnectionInfo.mockReturnValue({
         status: 'connected',
         qr: null,
         qrGeneratedAt: null,
+        phoneNumber: '5561999999999',
       });
 
       const res = await app.inject({ method: 'GET', url: '/whatsapp/qr' });
 
       expect(res.statusCode).toBe(200);
-      expect(res.json()).toEqual({ status: 'connected', qr: null, qrGeneratedAt: null });
+      expect(res.json()).toEqual({
+        status: 'connected',
+        qr: null,
+        qrGeneratedAt: null,
+        phoneNumber: '5561999999999',
+      });
     });
 
     it.each(['disconnected', 'connecting'] as const)('reports %s with no QR', async (status) => {
-      mockGetConnectionInfo.mockReturnValue({ status, qr: null, qrGeneratedAt: null });
+      mockGetConnectionInfo.mockReturnValue({
+        status,
+        qr: null,
+        qrGeneratedAt: null,
+        phoneNumber: null,
+      });
 
       const res = await app.inject({ method: 'GET', url: '/whatsapp/qr' });
 
       expect(res.statusCode).toBe(200);
-      expect(res.json()).toEqual({ status, qr: null, qrGeneratedAt: null });
+      expect(res.json()).toEqual({ status, qr: null, qrGeneratedAt: null, phoneNumber: null });
+    });
+  });
+
+  describe('GET /whatsapp/status', () => {
+    it('returns connection info and paired phone number', async () => {
+      mockGetConnectionInfo.mockReturnValue({
+        status: 'connected',
+        qr: null,
+        qrGeneratedAt: null,
+        phoneNumber: '5561999999999',
+      });
+
+      const res = await app.inject({ method: 'GET', url: '/whatsapp/status' });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({
+        status: 'connected',
+        qr: null,
+        qrGeneratedAt: null,
+        phoneNumber: '5561999999999',
+      });
     });
   });
 

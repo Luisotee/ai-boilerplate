@@ -21,6 +21,7 @@ import { startLongPolling, stopLongPolling } from './polling.js';
 import type { RunnerHandle } from '@grammyjs/runner';
 import { registerUpdateHandlers } from './updates.js';
 import { registerHealthRoutes } from './routes/health.js';
+import { registerStatusRoutes } from './routes/status.js';
 import { registerWebhookRoutes } from './routes/webhook.js';
 import { registerMessagingRoutes } from './routes/messaging.js';
 import { registerMediaRoutes } from './routes/media.js';
@@ -150,6 +151,7 @@ async function start() {
   app.log.info({ botUsername: bot.botInfo.username, botId: bot.botInfo.id }, 'Bot initialized');
 
   await registerHealthRoutes(app);
+  await registerStatusRoutes(app);
   // Polling mode registers no /webhook route: it is exempt from API-key auth
   // and, without a public URL, would have no secret token to verify either.
   if (!polling) await registerWebhookRoutes(app);

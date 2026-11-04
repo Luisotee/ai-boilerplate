@@ -64,6 +64,8 @@ export const ConnectionInfoSchema = z.object({
   // consumer renders it as a scannable QR code.
   qr: z.string().nullable(),
   qrGeneratedAt: z.string().nullable(),
+  // Paired phone number digits (E.164 without '+'); null while unpaired.
+  phoneNumber: z.string().nullable(),
 });
 
 // Types

@@ -223,6 +223,12 @@ The free tier covers 10M records/month and is hard-capped at $0 — it can never
 
 ## API Endpoints
 
+### Public
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/health` | Health check endpoint (PostgreSQL + Redis connectivity) |
+| GET | `/contact` | Public bot contact handles on WhatsApp and Telegram (rate-limited, cached ~60s) |
+
 ### Chat
 | Method | Endpoint | Description |
 |--------|----------|-------------|

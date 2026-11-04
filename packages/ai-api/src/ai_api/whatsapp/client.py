@@ -216,6 +216,14 @@ class WhatsAppClient:
         )
         return await self._handle_response(response)
 
+    async def get_client_status(self) -> dict:
+        """Fetch connection status and handle details from GET /whatsapp/status."""
+        response = await self._client.get(
+            f"{self._base_url}/whatsapp/status",
+            headers=self._get_headers(),
+        )
+        return await self._handle_response(response)
+
     async def logout_whatsapp(self) -> SuccessResponse:
         """Force-logout the Baileys session and trigger a fresh pairing QR.
 

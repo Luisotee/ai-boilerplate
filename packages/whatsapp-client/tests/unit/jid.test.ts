@@ -14,6 +14,7 @@ import {
   resolveLidToPhone,
   resolveSenderPhone,
   resolveParticipantJid,
+  extractPairedNumberFromCreds,
 } from '../../src/utils/jid.js';
 
 vi.mock('../../src/services/baileys.js', () => ({
@@ -401,5 +402,48 @@ describe('resolveParticipantJid', () => {
 
   it('keeps the raw LID when no phone is knowable yet', async () => {
     await expect(resolveParticipantJid(sockWithMapping(null), LID, undefined)).resolves.toBe(LID);
+  });
+});
+
+describe('extractPairedNumberFromCreds', () => {
+  it('returns null when creds or creds.me is missing', () => {
+    expect(extractPairedNumberFromCreds(null)).toBeNull();
+    expect(extractPairedNumberFromCreds(undefined)).toBeNull();
+    expect(extractPairedNumberFromCreds({})).toBeNull();
+  });
+
+  it('extracts bare digits from creds.me.id with device suffix', () => {
+    expect(
+      extractPairedNumberFromCreds({
+        me: { id: '5561999999999:50@s.whatsapp.net' },
+      })
+    ).toBe('5561999999999');
+  });
+
+  it('extracts bare digits from creds.me.id without device suffix', () => {
+    expect(
+      extractPairedNumberFromCreds({
+        me: { id: '5561999999999@s.whatsapp.net' },
+      })
+    ).toBe('5561999999999');
+  });
+
+  it('prefers creds.me.phoneNumber if set', () => {
+    expect(
+      extractPairedNumberFromCreds({
+        me: {
+          id: '123456789@lid',
+          phoneNumber: '+55 (61) 99999-9999',
+        },
+      })
+    ).toBe('5561999999999');
+  });
+
+  it('returns null if creds.me.id is a LID and phoneNumber is not set', () => {
+    expect(
+      extractPairedNumberFromCreds({
+        me: { id: '123456789@lid' },
+      })
+    ).toBeNull();
   });
 });

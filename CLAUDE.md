@@ -82,7 +82,7 @@ cd packages/ai-api && uv run pytest tests/mocked/test_model_chain_fallback.py -k
 
 ## Security
 
-- **API key auth**: every server requires `X-API-Key` on all routes except `/health` and `/docs*`: `AI_API_KEY` (AI API; it fails to start without it), `WHATSAPP_API_KEY` (Baileys, required), `WHATSAPP_CLOUD_API_KEY` and `TELEGRAM_API_KEY` (both fall back to `WHATSAPP_API_KEY`). Inter-service calls include the key automatically
+- **API key auth**: every server requires `X-API-Key` on all routes except `/health`, `/contact` (AI API only), and `/docs*`: `AI_API_KEY` (AI API; it fails to start without it), `WHATSAPP_API_KEY` (Baileys, required), `WHATSAPP_CLOUD_API_KEY` and `TELEGRAM_API_KEY` (both fall back to `WHATSAPP_API_KEY`). Inter-service calls include the key automatically
 - **Webhook verification**: `/webhook` on the Cloud and Telegram clients skips API-key auth for platform-native checks: `x-hub-signature-256` HMAC-SHA256 with `META_APP_SECRET` (Cloud), `X-Telegram-Bot-Api-Secret-Token` against `TELEGRAM_WEBHOOK_SECRET` (Telegram; grammY's `webhookCallback` validates it when `secretToken` is set)
 - **CORS**: `CORS_ORIGINS` (comma-separated). Empty blocks all cross-origin requests
 - **Rate limiting**: `RATE_LIMIT_GLOBAL` (default 30/min), `RATE_LIMIT_EXPENSIVE` (default 5/min). A valid `X-API-Key` exempts a request on the TS clients, because all inter-service traffic comes from one IP. The auth hook runs before the limiter, so the limiter does **not** throttle API-key guessing. `/health*` is exempt from both. Details: `docs/access-control.md`

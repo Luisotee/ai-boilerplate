@@ -453,3 +453,66 @@ export async function downloadMedia(
 
   return { buffer, mimetype };
 }
+
+// ---------------------------------------------------------------------------
+// Public API — Display Phone Number (bot contact)
+// ---------------------------------------------------------------------------
+
+let cachedDisplayPhoneNumber: string | null = null;
+
+export function setDisplayPhoneNumber(phone: string | null): void {
+  cachedDisplayPhoneNumber = phone;
+}
+
+/**
+ * Fetch and cache the business display phone number from Graph API.
+ * Calls GET https://graph.facebook.com/{version}/{phoneNumberId}?fields=display_phone_number
+ */
+export async function getDisplayPhoneNumber(): Promise<string | null> {
+  if (cachedDisplayPhoneNumber !== null) {
+    return cachedDisplayPhoneNumber;
+  }
+
+  const { graphApiBaseUrl, graphApiVersion, phoneNumberId, accessToken } = config.meta;
+  if (!phoneNumberId || !accessToken) {
+    return null;
+  }
+
+  const url = `${graphApiBaseUrl}/${graphApiVersion}/${phoneNumberId}?fields=display_phone_number`;
+  try {
+    const response = await fetchWithTimeout(
+      url,
+      {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      },
+      config.timeouts.default
+    );
+
+    if (!response.ok) {
+      const errorBody = await response.text();
+      logger.warn(
+        { status: response.status, body: errorBody },
+        'Failed to fetch display phone number from Graph API'
+      );
+      return null;
+    }
+
+    const data = (await response.json()) as { display_phone_number?: string };
+    if (data.display_phone_number) {
+      const digits = data.display_phone_number.replace(/\D/g, '');
+      cachedDisplayPhoneNumber = digits || null;
+      return cachedDisplayPhoneNumber;
+    }
+    return null;
+  } catch (error) {
+    logger.warn({ error }, 'Error fetching display phone number from Graph API');
+    return null;
+  }
+}
+
+export function _resetDisplayPhoneNumberCacheForTests(): void {
+  cachedDisplayPhoneNumber = null;
+}
