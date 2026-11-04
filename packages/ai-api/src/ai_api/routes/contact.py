@@ -85,10 +85,10 @@ async def _fetch_client_status(client_id: str | None) -> tuple[dict | None, bool
         logger.debug("Contact client %s absent (%s): %s", channel_name, base_url, e)
         return None, False
     except (httpx.HTTPError, WhatsAppClientError) as e:
-        logger.warning("%s contact fetch failed or unavailable: %s", channel_name, e)
+        logger.debug("%s contact fetch failed or unavailable: %s", channel_name, e)
         return None, True
     except Exception as e:
-        logger.warning("%s unexpected error during contact fetch: %s", channel_name, e)
+        logger.debug("%s unexpected error during contact fetch: %s", channel_name, e)
         return None, True
 
 
