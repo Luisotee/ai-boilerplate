@@ -17,7 +17,7 @@ import {
 import { logger } from './logger.js';
 import { fetchWithTimeout } from './utils/fetch.js';
 import { setCloudApiReady } from './services/cloud-state.js';
-import { setDisplayPhoneNumber } from './services/graph-api.js';
+import { parseDisplayPhoneNumber, setDisplayPhoneNumber } from './services/graph-api.js';
 import { registerHealthRoutes } from './routes/health.js';
 import { registerConnectionRoutes } from './routes/connection.js';
 import { registerWebhookRoutes } from './routes/webhook.js';
@@ -85,9 +85,7 @@ async function validateCloudApiCredentials(): Promise<boolean> {
     }
     try {
       const data = (await response.json()) as { display_phone_number?: string };
-      if (data.display_phone_number) {
-        setDisplayPhoneNumber(data.display_phone_number.replace(/\D/g, '') || null);
-      }
+      setDisplayPhoneNumber(parseDisplayPhoneNumber(data.display_phone_number));
     } catch {
       // Non-fatal if JSON parsing fails
     }

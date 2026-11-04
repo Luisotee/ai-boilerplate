@@ -20,7 +20,7 @@ export async function registerConnectionRoutes(app: FastifyInstance) {
     },
     async () => {
       const connected = isCloudApiConnected();
-      const phoneNumber = await getDisplayPhoneNumber();
+      const phoneNumber = connected ? await getDisplayPhoneNumber() : null;
       return {
         status: connected ? ('connected' as const) : ('disconnected' as const),
         phoneNumber,

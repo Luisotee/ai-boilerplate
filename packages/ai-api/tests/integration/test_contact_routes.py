@@ -355,23 +355,153 @@ async def test_fetchers_resilient_to_downstream_errors():
     assert tg_failed is True
 
 
-async def test_absent_client_connect_error_gets_long_ttl():
-    """A client that is absent / not running (ConnectError) does not trigger short TTL."""
+async def test_fetch_whatsapp_contact_prefers_connected_client():
+    """Prefers a connected client's number over a disconnected client's stale number."""
+    from ai_api.routes.contact import _fetch_whatsapp_contact
+
+    baileys_client = AsyncMock()
+    baileys_client.get_client_status.return_value = {
+        "status": "disconnected",
+        "phoneNumber": "55 61 11111-1111",
+    }
+
+    cloud_client = AsyncMock()
+    cloud_client.get_client_status.return_value = {
+        "status": "connected",
+        "phoneNumber": "55 11 22222-2222",
+    }
+
+    def client_factory(http_client, base_url, api_key):
+        if "3002" in base_url or "cloud" in base_url:
+            return cloud_client
+        return baileys_client
+
+    with patch("ai_api.routes.contact.create_whatsapp_client", side_effect=client_factory):
+        contact, failed = await _fetch_whatsapp_contact()
+
+    # Cloud wins because it is connected, even though Baileys comes first in order
+    assert contact is not None
+    assert contact.number == "5511222222222"
+    assert not failed
+
+    # If both are connected, Baileys is preferred
+    baileys_client.get_client_status.return_value["status"] = "connected"
+    with patch("ai_api.routes.contact.create_whatsapp_client", side_effect=client_factory):
+        contact, failed = await _fetch_whatsapp_contact()
+    assert contact is not None
+    assert contact.number == "5561111111111"
+    assert not failed
+
+    # If neither is connected, non-connected Baileys is used as fallback, but triggers short TTL
+    baileys_client.get_client_status.return_value["status"] = "disconnected"
+    cloud_client.get_client_status.return_value["status"] = "disconnected"
+    with patch("ai_api.routes.contact.create_whatsapp_client", side_effect=client_factory):
+        contact, failed = await _fetch_whatsapp_contact()
+    assert contact is not None
+    assert contact.number == "5561111111111"
+    assert failed is True
+
+
+async def test_fetch_whatsapp_contact_cloud_fallback_when_baileys_failed_triggers_short_ttl():
+    """When Baileys failed (timeout, 5xx) and number came from Cloud, triggers short TTL."""
     import httpx
 
-    from ai_api.routes.contact import _fetch_telegram_contact, _fetch_whatsapp_contact
+    from ai_api.routes.contact import _fetch_whatsapp_contact
+
+    baileys_client = AsyncMock()
+    baileys_client.get_client_status.side_effect = httpx.ReadTimeout("Read timed out")
+
+    cloud_client = AsyncMock()
+    cloud_client.get_client_status.return_value = {
+        "status": "connected",
+        "phoneNumber": "+55 11 98888-8888",
+    }
+
+    def client_factory(http_client, base_url, api_key):
+        if "3002" in base_url or "cloud" in base_url:
+            return cloud_client
+        return baileys_client
+
+    with patch("ai_api.routes.contact.create_whatsapp_client", side_effect=client_factory):
+        contact, failed = await _fetch_whatsapp_contact()
+
+    assert contact is not None
+    assert contact.number == "5511988888888"
+    assert failed is True  # Short TTL (10s) so preferred Baileys recovery is picked up fast
+
+
+async def test_absent_client_connect_error_and_timeout():
+    """ConnectError and ConnectTimeout count as absent, while ReadTimeout counts as failed."""
+    import httpx
+
+    from ai_api.routes.contact import (
+        _fetch_client_status,
+        _fetch_telegram_contact,
+        _fetch_whatsapp_contact,
+    )
 
     mock_client = AsyncMock()
+
+    # 1. ConnectError -> absent (data=None, failed=False)
     mock_client.get_client_status.side_effect = httpx.ConnectError("Connection refused")
-
     with patch("ai_api.routes.contact.create_whatsapp_client", return_value=mock_client):
-        wa_contact, wa_failed = await _fetch_whatsapp_contact()
-        tg_contact, tg_failed = await _fetch_telegram_contact()
+        data, failed = await _fetch_client_status(None)
+        assert data is None
+        assert failed is False
 
-    assert wa_contact is None
-    assert wa_failed is False
-    assert tg_contact is None
-    assert tg_failed is False
+        # Telegram absent doesn't shorten TTL
+        tg_contact, tg_failed = await _fetch_telegram_contact()
+        assert tg_contact is None
+        assert tg_failed is False
+
+    # 2. ConnectTimeout -> absent (data=None, failed=False)
+    mock_client.get_client_status.side_effect = httpx.ConnectTimeout("Connect timed out")
+    with patch("ai_api.routes.contact.create_whatsapp_client", return_value=mock_client):
+        data, failed = await _fetch_client_status(None)
+        assert data is None
+        assert failed is False
+
+        tg_contact, tg_failed = await _fetch_telegram_contact()
+        assert tg_contact is None
+        assert tg_failed is False
+
+    # 3. ReadTimeout -> failed (data=None, failed=True)
+    mock_client.get_client_status.side_effect = httpx.ReadTimeout("Read timed out")
+    with patch("ai_api.routes.contact.create_whatsapp_client", return_value=mock_client):
+        data, failed = await _fetch_client_status(None)
+        assert data is None
+        assert failed is True
+
+        tg_contact, tg_failed = await _fetch_telegram_contact()
+        assert tg_contact is None
+        assert tg_failed is True
+
+    # 4. Absent client with Cloud number found gets long TTL (60s)
+    baileys_client = AsyncMock()
+    baileys_client.get_client_status.side_effect = httpx.ConnectTimeout("Connect timed out")
+    cloud_client = AsyncMock()
+    cloud_client.get_client_status.return_value = {
+        "status": "connected",
+        "phoneNumber": "+55 11 98888-8888",
+    }
+
+    def client_factory(http_client, base_url, api_key):
+        if "3002" in base_url or "cloud" in base_url:
+            return cloud_client
+        return baileys_client
+
+    with patch("ai_api.routes.contact.create_whatsapp_client", side_effect=client_factory):
+        contact, failed = await _fetch_whatsapp_contact()
+        assert contact is not None
+        assert contact.number == "5511988888888"
+        assert failed is False  # Absent Baileys does not degrade TTL when Cloud is healthy
+
+    # 5. When no WhatsApp number is found at all, triggers short TTL (failed=True)
+    cloud_client.get_client_status.side_effect = httpx.ConnectError("Connection refused")
+    with patch("ai_api.routes.contact.create_whatsapp_client", side_effect=client_factory):
+        contact, failed = await _fetch_whatsapp_contact()
+        assert contact is None
+        assert failed is True  # Missing WhatsApp number triggers short TTL for quick retry
 
 
 def test_openapi_contact_tag():

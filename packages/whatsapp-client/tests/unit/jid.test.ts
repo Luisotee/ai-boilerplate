@@ -428,15 +428,37 @@ describe('extractPairedNumberFromCreds', () => {
     ).toBe('5561999999999');
   });
 
-  it('prefers creds.me.phoneNumber if set', () => {
+  it('prefers creds.me.phoneNumber JID with device suffix if set', () => {
     expect(
       extractPairedNumberFromCreds({
         me: {
           id: '123456789@lid',
-          phoneNumber: '+55 (61) 99999-9999',
+          phoneNumber: '5561999999999:12@s.whatsapp.net',
         },
       })
     ).toBe('5561999999999');
+  });
+
+  it('prefers creds.me.phoneNumber JID without device suffix if set', () => {
+    expect(
+      extractPairedNumberFromCreds({
+        me: {
+          id: '123456789@lid',
+          phoneNumber: '5561999999999@s.whatsapp.net',
+        },
+      })
+    ).toBe('5561999999999');
+  });
+
+  it('ignores creds.me.phoneNumber if it is a LID', () => {
+    expect(
+      extractPairedNumberFromCreds({
+        me: {
+          id: '5561888888888@s.whatsapp.net',
+          phoneNumber: '123456789@lid',
+        },
+      })
+    ).toBe('5561888888888');
   });
 
   it('returns null if creds.me.id is a LID and phoneNumber is not set', () => {

@@ -65,7 +65,7 @@ describe('Connection routes (whatsapp-cloud)', () => {
       });
     });
 
-    it('returns disconnected status when cloud API is not ready', async () => {
+    it('returns disconnected status without calling graph API when cloud API is not ready', async () => {
       mockIsCloudApiConnected.mockReturnValue(false);
       mockGetDisplayPhoneNumber.mockResolvedValue(null);
 
@@ -76,6 +76,7 @@ describe('Connection routes (whatsapp-cloud)', () => {
         status: 'disconnected',
         phoneNumber: null,
       });
+      expect(mockGetDisplayPhoneNumber).not.toHaveBeenCalled();
     });
 
     it('returns null phone number if graph API fetch produced no number', async () => {

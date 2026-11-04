@@ -21,8 +21,24 @@ vi.mock('../../src/config.js', () => ({
 import {
   getDisplayPhoneNumber,
   setDisplayPhoneNumber,
+  parseDisplayPhoneNumber,
   _resetDisplayPhoneNumberCacheForTests,
 } from '../../src/services/graph-api.js';
+
+describe('parseDisplayPhoneNumber', () => {
+  it('strips non-digits from valid phone numbers', () => {
+    expect(parseDisplayPhoneNumber('+55 61 99999-9999')).toBe('5561999999999');
+    expect(parseDisplayPhoneNumber('5511888888888')).toBe('5511888888888');
+  });
+
+  it('returns null for empty or missing inputs', () => {
+    expect(parseDisplayPhoneNumber(null)).toBeNull();
+    expect(parseDisplayPhoneNumber(undefined)).toBeNull();
+    expect(parseDisplayPhoneNumber('')).toBeNull();
+    expect(parseDisplayPhoneNumber('   ')).toBeNull();
+    expect(parseDisplayPhoneNumber('no-digits')).toBeNull();
+  });
+});
 
 describe('getDisplayPhoneNumber', () => {
   beforeEach(() => {
@@ -48,11 +64,37 @@ describe('getDisplayPhoneNumber', () => {
     expect(mockFetch).toHaveBeenCalledOnce();
   });
 
+  it('caches null when Graph API responds 200 with no display_phone_number (no refetch)', async () => {
+    mockFetch.mockResolvedValueOnce(
+      new Response(JSON.stringify({ id: '12345' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    );
+
+    const first = await getDisplayPhoneNumber();
+    expect(first).toBeNull();
+    expect(mockFetch).toHaveBeenCalledOnce();
+
+    // Second call should use cached null and not call fetch again
+    const second = await getDisplayPhoneNumber();
+    expect(second).toBeNull();
+    expect(mockFetch).toHaveBeenCalledOnce();
+  });
+
   it('returns already set phone number without network call', async () => {
     setDisplayPhoneNumber('5511888888888');
 
     const result = await getDisplayPhoneNumber();
     expect(result).toBe('5511888888888');
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('returns already set null without network call', async () => {
+    setDisplayPhoneNumber(null);
+
+    const result = await getDisplayPhoneNumber();
+    expect(result).toBeNull();
     expect(mockFetch).not.toHaveBeenCalled();
   });
 

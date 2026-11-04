@@ -458,7 +458,19 @@ export async function downloadMedia(
 // Public API — Display Phone Number (bot contact)
 // ---------------------------------------------------------------------------
 
-let cachedDisplayPhoneNumber: string | null = null;
+let cachedDisplayPhoneNumber: string | null | undefined = undefined;
+
+/**
+ * Extract bare digits from a display phone number string (e.g. "+55 61 99999-9999" -> "5561999999999").
+ * Returns null if displayPhoneNumber is missing or contains no digits.
+ */
+export function parseDisplayPhoneNumber(displayPhoneNumber?: string | null): string | null {
+  if (!displayPhoneNumber) {
+    return null;
+  }
+  const digits = displayPhoneNumber.replace(/\D/g, '');
+  return digits || null;
+}
 
 export function setDisplayPhoneNumber(phone: string | null): void {
   cachedDisplayPhoneNumber = phone;
@@ -469,7 +481,7 @@ export function setDisplayPhoneNumber(phone: string | null): void {
  * Calls GET https://graph.facebook.com/{version}/{phoneNumberId}?fields=display_phone_number
  */
 export async function getDisplayPhoneNumber(): Promise<string | null> {
-  if (cachedDisplayPhoneNumber !== null) {
+  if (cachedDisplayPhoneNumber !== undefined) {
     return cachedDisplayPhoneNumber;
   }
 
@@ -501,12 +513,10 @@ export async function getDisplayPhoneNumber(): Promise<string | null> {
     }
 
     const data = (await response.json()) as { display_phone_number?: string };
-    if (data.display_phone_number) {
-      const digits = data.display_phone_number.replace(/\D/g, '');
-      cachedDisplayPhoneNumber = digits || null;
-      return cachedDisplayPhoneNumber;
-    }
-    return null;
+    const digits = parseDisplayPhoneNumber(data.display_phone_number);
+    // Cache the result even if null (200 OK with no display_phone_number means fetched, no number)
+    cachedDisplayPhoneNumber = digits;
+    return digits;
   } catch (error) {
     logger.warn({ error }, 'Error fetching display phone number from Graph API');
     return null;
@@ -514,5 +524,5 @@ export async function getDisplayPhoneNumber(): Promise<string | null> {
 }
 
 export function _resetDisplayPhoneNumberCacheForTests(): void {
-  cachedDisplayPhoneNumber = null;
+  cachedDisplayPhoneNumber = undefined;
 }
