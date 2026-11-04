@@ -64,7 +64,7 @@ async function validateCloudApiCredentials(): Promise<boolean> {
   }
 
   try {
-    const url = `${graphApiBaseUrl}/${graphApiVersion}/${phoneNumberId}`;
+    const url = `${graphApiBaseUrl}/${graphApiVersion}/${phoneNumberId}?fields=id,display_phone_number`;
     const response = await fetchWithTimeout(
       url,
       {
