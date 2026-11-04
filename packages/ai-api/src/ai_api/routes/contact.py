@@ -104,9 +104,9 @@ async def _fetch_whatsapp_contact() -> tuple[WhatsAppContact | None, bool]:
         tuple[WhatsAppContact | None, bool]: (contact, failed)
         - failed=True triggers short TTL (10s):
           * when no WhatsApp number was found (every bot has WhatsApp)
-          * when Baileys failed (timeout, 5xx) and we fell back to Cloud
-          * when the number came from a non-connected client
-          * when a configured client failed
+          * when Baileys provides the number and is disconnected or failed
+          * when Cloud provides the number and Baileys failed (to restore Baileys quickly)
+          * when Cloud provides the number and is disconnected or failed
         - failed=False keeps long TTL (60s)
     """
     baileys_configured = _is_client_configured(None)
@@ -153,14 +153,14 @@ async def _fetch_whatsapp_contact() -> tuple[WhatsAppContact | None, bool]:
         return None, True
 
     # A number was found. Short TTL (failed=True) only if:
-    # - Baileys failed (timeout, 5xx) and we fell back to Cloud
-    # - Or the chosen source client is not connected
-    # - Or a configured client failed (timeout, 5xx)
-    failed = bool(
-        baileys_failed
-        or cloud_failed
-        or (not baileys_connected if chosen_source == "baileys" else not cloud_connected)
-    )
+    # - Baileys is the chosen source and is disconnected or failed
+    # - Cloud is the chosen source and:
+    #   * Baileys failed (timeout, 5xx), so we want short TTL to pick up Baileys on recovery
+    #   * Or Cloud itself failed or is not connected
+    if chosen_source == "baileys":
+        failed = bool(baileys_failed or not baileys_connected)
+    else:
+        failed = bool(baileys_failed or cloud_failed or not cloud_connected)
 
     return (
         WhatsAppContact(

@@ -430,6 +430,34 @@ async def test_fetch_whatsapp_contact_cloud_fallback_when_baileys_failed_trigger
     assert failed is True  # Short TTL (10s) so preferred Baileys recovery is picked up fast
 
 
+async def test_fetch_whatsapp_contact_baileys_success_ignores_cloud_failure():
+    """When Baileys provides the number, Cloud failure does not shorten the TTL."""
+    import httpx
+
+    from ai_api.routes.contact import _fetch_whatsapp_contact
+
+    baileys_client = AsyncMock()
+    baileys_client.get_client_status.return_value = {
+        "status": "connected",
+        "phoneNumber": "+55 61 99999-9999",
+    }
+
+    cloud_client = AsyncMock()
+    cloud_client.get_client_status.side_effect = httpx.ReadTimeout("Read timed out")
+
+    def client_factory(http_client, base_url, api_key):
+        if "3002" in base_url or "cloud" in base_url:
+            return cloud_client
+        return baileys_client
+
+    with patch("ai_api.routes.contact.create_whatsapp_client", side_effect=client_factory):
+        contact, failed = await _fetch_whatsapp_contact()
+
+    assert contact is not None
+    assert contact.number == "5561999999999"
+    assert failed is False  # Cloud failure must not shorten Baileys TTL
+
+
 async def test_absent_client_connect_error_and_timeout():
     """ConnectError and ConnectTimeout count as absent, while ReadTimeout counts as failed."""
     import httpx
