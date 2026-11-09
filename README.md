@@ -316,10 +316,11 @@ pnpm format          # Format all code
 | `DATABASE_URL` | PostgreSQL connection string |
 | `REDIS_URL` | Redis connection string |
 | `AI_API_URL` | AI API endpoint for WhatsApp client |
-| `WHITELIST_PHONES` | Comma-separated phones / chat ids allowed to use the bot (empty = everyone) |
+| `WHITELIST_PHONES` | Comma-separated phones / chat ids allowed to use the bot (empty = everyone). Read by the AI API; the chat clients fetch its effective value live (`GET /chat/whitelist`) and drop messages if they can't |
 | `SHARED_GROUP_TOOLS_ENABLED` | `false` (default). When `true`, users can, in a private chat, read/search groups they share with the bot and ask it to post into one (Baileys + Telegram). Group transcripts then reach the LLM provider inside private conversations — see CLAUDE.md "Shared-group tools". Hot via `PATCH /admin/settings` |
 | `TELEGRAM_MODE` | `webhook` (default — Telegram POSTs to `/webhook`, needs a public HTTPS URL + `TELEGRAM_WEBHOOK_SECRET`) or `polling` (long polling via `@grammyjs/runner`: no public URL or tunnel; one process per bot token). Group chats need privacy mode OFF in @BotFather (`/setprivacy` → Disable; then remove and re-add the bot) |
 | `GROUP_GATING` | How a group gets in scope when the whitelist is set: `jid` (default — the group's own id must be listed) or `membership` (Baileys: any group with a whitelisted member; Telegram: any group; the bot saves all messages there but replies only to whitelisted senders). Read by the AI API and the Baileys/Telegram clients |
+| `GROUP_MENTION_WINDOW_SECONDS` | After a group message mentions the bot, that sender's next message within this many seconds also counts as addressed ("@bot", then a voice note). Default 60; 0 disables. Baileys and Telegram |
 | `BUG_REPORTS_ENABLED` | `true` (default). The `report_bug` agent tool plus automatic reports of model errors, crashed jobs and failed PDFs. Hot via `PATCH /admin/settings` |
 | `BUG_REPORTS_PER_USER_PER_HOUR` | Cap on reports the agent files per chat per hour (default `5`) |
 | `BROADCAST_*` | Broadcast footer and Baileys anti-ban pacing (delays, batch pause, daily cap, send window, time zone). Hot via `PATCH /admin/settings` |

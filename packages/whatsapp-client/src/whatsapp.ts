@@ -28,6 +28,7 @@ import {
   primeGroup,
 } from './services/group-cache.js';
 import { groupHasWhitelistedMember } from './services/groups.js';
+import { getLiveWhitelist } from './services/live-whitelist.js';
 import { resolveSenderGroupAdmin } from './services/group-admin.js';
 import { handleTextMessage } from './handlers/text.js';
 import { transcribeAudioMessage } from './handlers/audio.js';
@@ -77,7 +78,10 @@ async function resolveGate(
   isGroup: boolean,
   phone: string | undefined
 ): Promise<Gate> {
-  const wl = config.whitelistPhones;
+  // The AI API's effective whitelist (services/live-whitelist.ts). Unavailable
+  // → drop the message: the gate fails closed.
+  const wl = await getLiveWhitelist();
+  if (!wl) return { skip: true, suppressResponse: true };
   const whitelistEnabled = wl.size > 0;
   if (!whitelistEnabled) {
     return gateMessage({
@@ -428,7 +432,7 @@ export async function initializeWhatsApp(): Promise<void> {
   // (handlers/message-events.ts). Silent, never throws.
   sock.ev.on('messages.update', async (updates) => {
     for (const entry of updates) {
-      await handleMessageUpdate(sock, entry, async () => config.whitelistPhones);
+      await handleMessageUpdate(sock, entry, getLiveWhitelist);
     }
   });
 

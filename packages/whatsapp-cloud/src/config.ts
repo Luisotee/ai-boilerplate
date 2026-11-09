@@ -2,7 +2,6 @@ import { config as dotenvConfig, parse as dotenvParse } from 'dotenv';
 import { existsSync, readFileSync } from 'fs';
 import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
-import { parseWhitelist } from './utils/whitelist.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const packageRoot = resolve(__dirname, '..');
@@ -30,8 +29,6 @@ if (existsSync(localEnvPath)) {
   dotenvConfig({ path: localEnvPath, override: true });
 }
 
-const whitelistPhones = parseWhitelist(process.env.WHITELIST_PHONES || '');
-
 function parseNonNegativeInt(name: string, defaultValue: number): number {
   const raw = process.env[name];
   if (raw === undefined || raw === '') return defaultValue;
@@ -44,7 +41,6 @@ function parseNonNegativeInt(name: string, defaultValue: number): number {
 }
 
 export const config = {
-  whitelistPhones,
   aiApiUrl: process.env.AI_API_URL || 'http://localhost:8000',
   logLevel: process.env.LOG_LEVEL || 'info',
   server: {

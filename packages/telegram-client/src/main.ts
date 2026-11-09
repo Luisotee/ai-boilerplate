@@ -210,11 +210,9 @@ async function start() {
   } else {
     app.log.info(`Webhook URL: http://localhost:${config.server.port}/webhook`);
   }
-  if (config.whitelistPhones.size > 0) {
-    app.log.info({ count: config.whitelistPhones.size }, 'User whitelist ENABLED');
-  } else {
-    app.log.info('User whitelist DISABLED (all users allowed)');
-  }
+  // The whitelist is read live from the AI API (services/live-whitelist.ts),
+  // not from this client's env; it is logged when first fetched.
+  app.log.info('User whitelist: read live from the AI API (GET /chat/whitelist)');
   app.log.info('='.repeat(60));
 
   // Graceful shutdown. Webhook mode just closes the server. Polling mode first

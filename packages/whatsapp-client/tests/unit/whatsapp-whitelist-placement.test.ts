@@ -17,6 +17,11 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
+// The whitelist comes from the AI API now; serve WHITELIST_PHONES from the env.
+vi.mock('../../src/services/live-whitelist.js', async () =>
+  (await import('../helpers/live-whitelist-env.js')).envWhitelistMock()
+);
+
 // makeWASocket is referenced inside the baileys mock factory, so hoist it.
 const { makeWASocket } = vi.hoisted(() => ({ makeWASocket: vi.fn() }));
 
@@ -82,8 +87,8 @@ describe('whitelist gate placement in messages.upsert', () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
-    // config.ts computes whitelistPhones at module load, and loads the root
-    // .env WITHOUT override — so a stubbed process.env value wins.
+    // The live whitelist is served from WHITELIST_PHONES by the test double
+    // (tests/helpers/live-whitelist-env.ts).
     vi.stubEnv('WHITELIST_PHONES', PHONE);
 
     handlers = new Map();
@@ -104,8 +109,8 @@ describe('whitelist gate placement in messages.upsert', () => {
     await initializeWhatsApp();
 
     // Guard against a silent pass on the wrong whitelist.
-    const { config } = await import('../../src/config.js');
-    expect(config.whitelistPhones.phones.has(PHONE)).toBe(true);
+    const { getLiveWhitelist } = await import('../../src/services/live-whitelist.js');
+    expect((await getLiveWhitelist())?.phones.has(PHONE)).toBe(true);
 
     ({ handleTextMessage } = (await import('../../src/handlers/text.js')) as never);
     ({ sendFailureReaction } = (await import('../../src/utils/reactions.js')) as never);
@@ -151,6 +156,15 @@ describe('whitelist gate placement in messages.upsert', () => {
     expect(handleTextMessage).not.toHaveBeenCalled();
     expect(userSpy).not.toHaveBeenCalled(); // gate precedes the sock.user deref
     expect(sendFailureReaction).not.toHaveBeenCalled(); // nothing reacted into a blocked chat
+  });
+
+  it('FAILS CLOSED: drops a whitelisted contact when the whitelist is unavailable', async () => {
+    vi.stubEnv('WHITELIST_UNAVAILABLE', '1');
+    await driveUpsert(makeLidTextMsg(OK_LID, PHONE));
+
+    expect(handleTextMessage).not.toHaveBeenCalled();
+    expect(userSpy).not.toHaveBeenCalled();
+    expect(sendFailureReaction).not.toHaveBeenCalled();
   });
 });
 

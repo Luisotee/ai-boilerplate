@@ -62,3 +62,19 @@ describe.each(['typed-mention.ts', 'mention-window.ts'])('%s copies', (file) => 
     ).toBe(reference);
   });
 });
+
+// services/live-whitelist.ts (the AI API's effective whitelist, fail closed) is
+// shared by all three clients.
+describe('live-whitelist.ts copies', () => {
+  const reference = readFileSync(
+    resolve(REPO_ROOT, 'packages/whatsapp-client/src/services/live-whitelist.ts'),
+    'utf8'
+  );
+
+  it.each([
+    'packages/whatsapp-cloud/src/services/live-whitelist.ts',
+    'packages/telegram-client/src/services/live-whitelist.ts',
+  ])('%s is byte-identical to the reference', (copy) => {
+    expect(readFileSync(resolve(REPO_ROOT, copy), 'utf8')).toBe(reference);
+  });
+});

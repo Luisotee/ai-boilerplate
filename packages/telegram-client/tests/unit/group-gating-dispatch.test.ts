@@ -9,6 +9,11 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+// The whitelist comes from the AI API now; serve WHITELIST_PHONES from the env.
+vi.mock('../../src/services/live-whitelist.js', async () =>
+  (await import('../helpers/live-whitelist-env.js')).envWhitelistMock()
+);
 import type { Update, UserFromGetMe } from 'grammy/types';
 
 vi.mock('../../src/api-client.js', () => ({
@@ -206,5 +211,16 @@ describe('edited_message', () => {
     await bot.handleUpdate(groupEdit(MEMBER, '@MyBot now with a question'));
     await bot.handleUpdate(groupText(MEMBER, 'the question', false));
     expect(sendMessageToAI.mock.calls[1][2].saveOnly ?? false).toBe(false);
+  });
+});
+
+describe('live whitelist unavailable', () => {
+  it('FAILS CLOSED: drops private and group updates, and edits, without a reply', async () => {
+    vi.stubEnv('WHITELIST_UNAVAILABLE', '1');
+    const { bot, sendMessageToAI, editMessage } = await boot('membership', '');
+    await bot.handleUpdate(privateText(MEMBER));
+    await bot.handleUpdate(groupText(MEMBER, '@MyBot hi', true));
+    expect(sendMessageToAI).not.toHaveBeenCalled();
+    expect(editMessage).not.toHaveBeenCalled();
   });
 });

@@ -18,7 +18,8 @@ import { chatIdToJid, chatTypeToConversationType } from './utils/telegram-id.js'
 import { addressingOf, stripBotMention, type BotIdentity } from './utils/mention.js';
 import { createMentionWindow } from './utils/mention-window.js';
 import { documentMarker, imageMarker } from './utils/group-media-marker.js';
-import { isWhitelisted } from './utils/whitelist.js';
+import { isWhitelisted, type Whitelist } from './utils/whitelist.js';
+import { getLiveWhitelist } from './services/live-whitelist.js';
 import { decideGroupGating } from './utils/gating.js';
 import { isSenderGroupAdmin } from './services/group-admin.js';
 
@@ -35,19 +36,19 @@ export function registerUpdateHandlers(): void {
   bot.command('linkphone', async (ctx) => {
     // saveOnly: an un-addressed or (GROUP_GATING=membership) non-whitelisted
     // group sender gets no reply at all, not even the "private only" hint.
-    const { skip, saveOnly } = resolveGate(ctx);
+    const { skip, saveOnly } = await resolveGate(ctx);
     if (skip || saveOnly) return;
     await offerPhoneLink(ctx);
   });
 
   bot.on('message:contact', async (ctx) => {
-    if (resolveGate(ctx).skip) return;
+    if ((await resolveGate(ctx)).skip) return;
     await handleSharedContact(ctx);
   });
 
   // ---------------- Text ----------------
   bot.on('message:text', async (ctx) => {
-    const { skip, isGroup, saveOnly } = resolveGate(ctx);
+    const { skip, isGroup, saveOnly } = await resolveGate(ctx);
     if (skip) return;
 
     const text = ctx.msg.text;
@@ -76,7 +77,7 @@ export function registerUpdateHandlers(): void {
   // no reaction, and the mention window is neither opened nor consumed.
   // Caption edits are skipped (the row holds an `[Image: …]` marker).
   bot.on('edited_message:text', async (ctx) => {
-    const { skip, isGroup } = resolveGate(ctx, { mentionWindow: false });
+    const { skip, isGroup } = await resolveGate(ctx, { mentionWindow: false });
     if (skip || !ctx.chat) return;
     const changed = await editMessage(
       {
@@ -94,7 +95,7 @@ export function registerUpdateHandlers(): void {
 
   // ---------------- Voice / Audio ----------------
   bot.on(['message:voice', 'message:audio'], async (ctx) => {
-    const { skip, saveOnly } = resolveGate(ctx);
+    const { skip, saveOnly } = await resolveGate(ctx);
     if (skip) return;
 
     if (saveOnly) {
@@ -151,7 +152,7 @@ export function registerUpdateHandlers(): void {
 
   // ---------------- Photo ----------------
   bot.on('message:photo', async (ctx) => {
-    const { skip, saveOnly } = resolveGate(ctx);
+    const { skip, saveOnly } = await resolveGate(ctx);
     if (skip) return;
 
     const caption = ctx.msg.caption ?? '';
@@ -191,7 +192,7 @@ export function registerUpdateHandlers(): void {
 
   // ---------------- Document ----------------
   bot.on('message:document', async (ctx) => {
-    const { skip, saveOnly } = resolveGate(ctx);
+    const { skip, saveOnly } = await resolveGate(ctx);
     if (skip) return;
 
     const caption = ctx.msg.caption ?? '';
@@ -243,10 +244,16 @@ export function registerUpdateHandlers(): void {
  * whitelist live in a separate set the matcher never consults here, so a bare
  * number can never accidentally admit a Telegram chat with the same digits.
  */
-function passesWhitelist(chatId: number | undefined): boolean {
-  if (config.whitelistPhones.size === 0) return true;
+async function passesWhitelist(chatId: number | undefined): Promise<boolean> {
+  const wl = await getLiveWhitelist();
+  if (!wl) return false; // unavailable → fail closed
+  return chatListedIn(wl, chatId);
+}
+
+function chatListedIn(wl: Whitelist, chatId: number | undefined): boolean {
+  if (wl.size === 0) return true;
   if (chatId === undefined) return false;
-  return isWhitelisted(config.whitelistPhones, chatIdToJid(chatId));
+  return isWhitelisted(wl, chatIdToJid(chatId));
 }
 
 interface GateResult {
@@ -280,14 +287,21 @@ interface GateOptions {
   mentionWindow?: boolean;
 }
 
-function resolveGate(ctx: TelegramContext, options: GateOptions = {}): GateResult {
+async function resolveGate(ctx: TelegramContext, options: GateOptions = {}): Promise<GateResult> {
   const conversationType = chatTypeToConversationType(ctx.chat?.type ?? 'private');
   const isGroup = conversationType === 'group';
-  const whitelistEnabled = config.whitelistPhones.size > 0;
-  const chatListed = passesWhitelist(ctx.chat?.id);
+  // The AI API's effective whitelist (services/live-whitelist.ts). Unavailable
+  // → drop the update: the gate fails closed.
+  const wl = await getLiveWhitelist();
+  if (!wl) {
+    logger.debug({ chatId: ctx.chat?.id }, 'Skipping update: whitelist unavailable');
+    return { skip: true, isGroup, saveOnly: true };
+  }
+  const whitelistEnabled = wl.size > 0;
+  const chatListed = chatListedIn(wl, ctx.chat?.id);
   const membership = isGroup && config.groupGating === 'membership';
   const senderWhitelisted = membership
-    ? ctx.from !== undefined && isWhitelisted(config.whitelistPhones, chatIdToJid(ctx.from.id))
+    ? ctx.from !== undefined && isWhitelisted(wl, chatIdToJid(ctx.from.id))
     : chatListed;
 
   const decision = decideGroupGating({

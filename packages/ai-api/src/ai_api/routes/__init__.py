@@ -3,6 +3,7 @@
 Each module provides an APIRouter instance with related endpoints.
 """
 
+from .access import router as access_router
 from .admin import router as admin_router
 from .broadcasts import router as broadcasts_router
 from .bug_reports import router as bug_reports_router
@@ -15,6 +16,7 @@ from .preferences import router as preferences_router
 from .speech import router as speech_router
 
 __all__ = [
+    "access_router",
     "admin_router",
     "broadcasts_router",
     "bug_reports_router",

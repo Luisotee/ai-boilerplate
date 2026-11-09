@@ -90,6 +90,14 @@ class MessageEventResponse(BaseModel):
     changed: int
 
 
+class WhitelistResponse(BaseModel):
+    """The effective whitelist, unparsed (GET /chat/whitelist)."""
+
+    whitelist_phones: str = Field(
+        ..., description="Comma-separated entries, as WHITELIST_PHONES; empty = disabled"
+    )
+
+
 class UploadPDFResponse(BaseModel):
     """Response after uploading a PDF to the knowledge base"""
 

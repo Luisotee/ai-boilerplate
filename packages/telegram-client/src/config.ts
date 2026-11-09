@@ -2,7 +2,6 @@ import { config as dotenvConfig, parse as dotenvParse } from 'dotenv';
 import { existsSync, readFileSync } from 'fs';
 import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
-import { parseWhitelist } from './utils/whitelist.js';
 import { parseGroupGating } from './utils/gating.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -31,8 +30,6 @@ if (existsSync(localEnvPath)) {
   dotenvConfig({ path: localEnvPath, override: true });
 }
 
-const whitelistPhones = parseWhitelist(process.env.WHITELIST_PHONES || '');
-
 /**
  * TELEGRAM_MODE: how updates arrive. `webhook` (default) — Telegram POSTs to
  * /webhook, which needs a public HTTPS URL. `polling` — long polling via
@@ -60,7 +57,6 @@ function parseNonNegativeInt(name: string, defaultValue: number): number {
 }
 
 export const config = {
-  whitelistPhones,
   // The bot's name, shared with the AI API. Here it is one of the names a typed
   // `@Name` group mention is matched against (utils/typed-mention.ts), next to
   // the bot's Telegram first_name.
