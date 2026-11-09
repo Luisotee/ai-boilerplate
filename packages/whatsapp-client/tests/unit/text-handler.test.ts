@@ -454,7 +454,6 @@ describe('handleTextMessage — dead link and presence failures', () => {
   });
 });
 
-
 describe('handleTextMessage — reply images', () => {
   const media = [
     { index: 0, caption: 'Fire map', mimetype: 'image/png', url: 'https://m.example.com/a.png' },
@@ -500,5 +499,23 @@ describe('handleTextMessage — reply images', () => {
     const payloads = sock.sendMessage.mock.calls.map(([, p]) => p as Record<string, unknown>);
     expect(payloads.filter((p) => 'text' in p)).toHaveLength(0);
     expect(payloads.filter((p) => 'image' in p)).toHaveLength(1);
+  });
+
+  it('still sends the images, with no ❌ or error text, when TTS fails', async () => {
+    const api = await import('../../src/api-client.js');
+    (api.getUserPreferences as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      tts_enabled: true,
+    });
+    (api.textToSpeech as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('tts down'));
+    const sock = makeMockSocket();
+    await setup('Here is the map.');
+
+    await handleTextMessage(sock as never, makeTextMsg('map?') as never, 'map?');
+
+    const payloads = sock.sendMessage.mock.calls.map(([, p]) => p as Record<string, unknown>);
+    expect(payloads).toHaveLength(2);
+    expect(payloads[0]).toEqual({ text: 'Here is the map.' });
+    expect(payloads[1]).toMatchObject({ image: Buffer.from('png-bytes') });
+    expect(payloads.filter((p) => 'react' in p)).toHaveLength(0);
   });
 });

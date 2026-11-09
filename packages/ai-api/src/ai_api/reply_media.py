@@ -38,6 +38,18 @@ MAX_CAPTION_CHARS = 1024
 # not hold whitespace, parentheses or angle brackets.
 _IMAGE_DIRECTIVE_RE = re.compile(r"!\[([^\]\n]*)\]\(\s*(https://[^\s()<>]+)\s*\)", re.IGNORECASE)
 
+# A directive wrapped in a link, `[![badge](img)](https://site)`: the outer
+# link's target is group 1.
+_LINK_WRAPPER_RE = re.compile(r"\[\s*$")
+_LINK_TAIL_RE = re.compile(r"\s*\]\(\s*(https?://[^\s()<>]+)\s*\)", re.IGNORECASE)
+
+# A line prefix that is only a list marker: `-`, `*`, `+`, `1.` or `1)`.
+_LIST_MARKER_RE = re.compile(r"\s*(?:[-*+]|\d+[.)])?\s*")
+
+#: How many images are tried for MAX_JOB_MEDIA slots, so a few dead links
+#: don't use up the cap while a later image would have worked.
+MAX_CANDIDATES = 2 * MAX_JOB_MEDIA
+
 
 @dataclass(frozen=True)
 class ReplyImage:
@@ -50,6 +62,9 @@ class ImageDirective:
     image: ReplyImage
     start: int
     end: int
+    #: Text left in place of the directive once its image is delivered: the
+    #: outer link's URL for a linked image, otherwise nothing.
+    replacement: str = ""
 
 
 @dataclass(frozen=True)
@@ -60,7 +75,8 @@ class ReplyMedia:
     text: str
     #: Job-metadata entries: {"index", "caption", "mimetype", "url"}.
     media: list[dict]
-    #: Lines to append to the saved/embedded history copy of the reply.
+    #: Lines to append to the saved/embedded history copy of the reply: one
+    #: `![caption](url)` per image sent.
     history_lines: list[str]
 
 
@@ -85,40 +101,66 @@ def extract_image_directives(text: str) -> list[ImageDirective]:
     if not text or "![" not in text:
         return []
     masked = _mask_code(text)
-    return [
-        ImageDirective(
-            image=ReplyImage(url=m.group(2), caption=_clean_caption(m.group(1))),
-            start=m.start(),
-            end=m.end(),
+    directives = []
+    for m in _IMAGE_DIRECTIVE_RE.finditer(masked):
+        start, end, replacement = m.start(), m.end(), ""
+        head = _LINK_WRAPPER_RE.search(masked, 0, start)
+        tail = _LINK_TAIL_RE.match(masked, end)
+        if head and tail and head.end() == start:
+            # Linked image: drop the wrapper, keep its target as a bare link.
+            start, end, replacement = head.start(), tail.end(), tail.group(1)
+        directives.append(
+            ImageDirective(
+                image=ReplyImage(url=m.group(2), caption=_clean_caption(m.group(1))),
+                start=start,
+                end=end,
+                replacement=replacement,
+            )
         )
-        for m in _IMAGE_DIRECTIVE_RE.finditer(masked)
-    ]
+    return directives
 
 
 def _whole_line(text: str, start: int, end: int) -> tuple[int, int]:
-    """Widen a directive alone on its line to the whole line, newline included."""
+    """Widen a directive alone on its line (a list marker aside) to the whole
+    line, newline included."""
     line_start = text.rfind("\n", 0, start) + 1
     line_end = text.find("\n", end)
     line_end = len(text) if line_end == -1 else line_end
-    if text[line_start:start].strip() or text[end:line_end].strip():
+    if not _LIST_MARKER_RE.fullmatch(text[line_start:start]) or text[end:line_end].strip():
         return start, end
     return line_start, min(line_end + 1, len(text))
 
 
-def _remove_spans(text: str, spans: list[tuple[int, int]]) -> str:
+def _tidy(text: str) -> str:
+    """Drop the trailing spaces and extra blank lines removals leave behind,
+    outside code fences only."""
     out: list[str] = []
     pos = 0
-    for start, end in sorted(_whole_line(text, s, e) for s, e in spans):
+    for fence in _CODE_FENCE_RE.finditer(text):
+        out.append(_tidy_prose(text[pos : fence.start()]))
+        out.append(fence.group(0))
+        pos = fence.end()
+    out.append(_tidy_prose(text[pos:]))
+    return "".join(out).strip()
+
+
+def _tidy_prose(text: str) -> str:
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    return re.sub(r"\n{3,}", "\n\n", text)
+
+
+def _remove_spans(text: str, spans: list[tuple[int, int, str]]) -> str:
+    out: list[str] = []
+    pos = 0
+    widened = sorted((*_whole_line(text, s, e), r) if not r else (s, e, r) for s, e, r in spans)
+    for start, end, replacement in widened:
         if start < pos:  # two directives on one line, already removed
             start = pos
         out.append(text[pos:start])
+        out.append(replacement)
         pos = max(pos, end)
     out.append(text[pos:])
-    joined = "".join(out)
-    # Drop the lines the directives leave empty, keeping paragraph breaks.
-    joined = re.sub(r"[ \t]+\n", "\n", joined)
-    joined = re.sub(r"\n{3,}", "\n\n", joined)
-    return joined.strip()
+    return _tidy("".join(out))
 
 
 async def collect_reply_media(
@@ -134,12 +176,13 @@ async def collect_reply_media(
     """
     directives = extract_image_directives(text)
 
-    # Unique URLs in order: tool-added images first, then directives. Anything
-    # past the cap is left alone (a directive then stays as a link).
+    # Unique URLs in order: tool-added images first, then directives. Up to
+    # MAX_CANDIDATES are tried and the first MAX_JOB_MEDIA that arrive are
+    # sent; the rest are left alone (a directive then stays as a link).
     wanted: list[ReplyImage] = []
     seen: set[str] = set()
     for image in [*(extra or []), *(d.image for d in directives)]:
-        if image.url in seen or len(wanted) >= MAX_JOB_MEDIA:
+        if image.url in seen or len(wanted) >= MAX_CANDIDATES:
             continue
         seen.add(image.url)
         wanted.append(ReplyImage(url=image.url, caption=_clean_caption(image.caption)))
@@ -155,6 +198,8 @@ async def collect_reply_media(
     history_lines: list[str] = []
     delivered: set[str] = set()
     for image, result in zip(wanted, results, strict=True):
+        if len(media) >= MAX_JOB_MEDIA:
+            break
         if isinstance(result, ImageFetchError):
             logger.warning(f"[Job {job_id}] Reply image skipped ({result}): {image.url[:80]}")
             continue
@@ -179,10 +224,10 @@ async def collect_reply_media(
             }
         )
         delivered.add(image.url)
-        label = image.caption or "image"
-        history_lines.append(f"[Image sent: {label}] {image.url}")
+        # The directive itself, so the model's history shows the form that works.
+        history_lines.append(f"![{image.caption.replace(']', '')}]({image.url})")
 
-    spans = [(d.start, d.end) for d in directives if d.image.url in delivered]
+    spans = [(d.start, d.end, d.replacement) for d in directives if d.image.url in delivered]
     new_text = _remove_spans(text, spans) if spans else text
     logger.info(f"[Job {job_id}] Reply images: {len(media)} of {len(wanted)} ready")
     return ReplyMedia(text=new_text, media=media, history_lines=history_lines)

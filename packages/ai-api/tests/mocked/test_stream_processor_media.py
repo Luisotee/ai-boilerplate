@@ -48,7 +48,7 @@ async def test_directive_becomes_media_and_leaves_the_text():
     save_media.assert_awaited_once()
 
     saved = save_message.call_args.args[3]
-    assert saved == f"*Here* is the map:\nStay safe.\n[Image sent: Fire map] {URL}"
+    assert saved == f"*Here* is the map:\nStay safe.\n![Fire map]({URL})"
 
 
 async def test_images_only_reply_saves_an_empty_chunk():
@@ -57,7 +57,7 @@ async def test_images_only_reply_saves_an_empty_chunk():
     )
     assert save_chunk.call_args.args[3] == ""
     assert len(set_meta.call_args.args[2]["media"]) == 1
-    assert save_message.call_args.args[3] == f"[Image sent: image] {URL}"
+    assert save_message.call_args.args[3] == f"![]({URL})"
 
 
 async def test_failed_image_is_flattened_to_a_link():

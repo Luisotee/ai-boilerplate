@@ -74,7 +74,8 @@ def _is_public(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
         elif ip in _NAT64 or ip in _SIIT or ip in _IPV4_COMPATIBLE:
             # :: and ::1 fall in ::/96 too; as 0.0.0.0 / 0.0.0.1 they stay rejected.
             ip = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
-    return ip.is_global and not ip.is_multicast
+    # fec0::/10 (deprecated site-local) is still reported as global.
+    return ip.is_global and not ip.is_multicast and not getattr(ip, "is_site_local", False)
 
 
 def _validate_url(url: str) -> tuple[str, int]:
@@ -146,7 +147,8 @@ def _pinned_request(
     ip_host = f"[{ip}]" if ":" in ip else ip
     netloc = ip_host if port == 443 else f"{ip_host}:{port}"
     target = parts._replace(netloc=netloc, fragment="").geturl()
-    host_header = host if port == 443 else f"{host}:{port}"
+    name = f"[{host}]" if ":" in host else host  # an IPv6 literal goes in brackets
+    host_header = name if port == 443 else f"{name}:{port}"
     return client.build_request(
         "GET",
         target,

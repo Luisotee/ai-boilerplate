@@ -203,6 +203,9 @@ async def delete_job_image(redis: Redis, job_id: str) -> None:
 
 #: Most images one reply may carry (see reply_media.py).
 MAX_JOB_MEDIA = 4
+#: Reply image bytes are fetched by the client right after the job completes,
+#: so they need far less time than chunks (up to 4 x 5 MB per job).
+JOB_MEDIA_TTL_SECONDS = 600
 
 
 def _media_key(job_id: str, index: int) -> str:
@@ -211,7 +214,7 @@ def _media_key(job_id: str, index: int) -> str:
 
 async def save_job_media(redis: Redis, job_id: str, index: int, data: bytes) -> None:
     """Store one reply image's raw bytes, for the client to fetch and send."""
-    await redis.set(_media_key(job_id, index), data, ex=settings.queue_chunk_ttl)
+    await redis.set(_media_key(job_id, index), data, ex=JOB_MEDIA_TTL_SECONDS)
 
 
 async def get_job_media(redis: Redis, job_id: str, index: int) -> bytes | None:

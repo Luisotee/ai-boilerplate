@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import get_active_prompt, get_or_create_core_memory
 from ..embeddings import EmbeddingService
+from ..reply_media import ReplyImage
 from ..runtime_config import runtime_config
 from ..whatsapp import WhatsAppClient
 from .model_chain import build_model
@@ -41,11 +42,11 @@ class AgentDeps:
     is_group_admin: bool | None = None
     #: Stream job id of the message being answered (recorded on bug reports).
     job_id: str | None = None
-    #: Images to send after this run's text, in the current chat only
-    #: (`reply_media.ReplyImage`). The processor merges them with the
-    #: `![caption](https://…)` directives in the reply; a tool that produces an
-    #: image URL can append here instead of relying on the model to repeat it.
-    reply_media: list = field(default_factory=list)
+    #: Images to send after this run's text, in the current chat only. The
+    #: processor merges them with the `![caption](https://…)` directives in the
+    #: reply; a tool that produces an image URL can append here instead of
+    #: relying on the model to repeat it.
+    reply_media: list[ReplyImage] = field(default_factory=list)
 
 
 # Startup default: DeepSeek -> Gemini when DEEPSEEK_API_KEY is set, else Gemini

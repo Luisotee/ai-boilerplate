@@ -181,24 +181,28 @@ export async function handleTextMessage(
       partial ? 'Partially sent AI response' : 'Sent AI response'
     );
 
-    // Check if TTS is enabled and send voice message
-    if (response) {
-      const prefs = await getUserPreferences(whatsappJid);
-      if (prefs?.tts_enabled) {
-        logger.info({ whatsappJid }, 'TTS enabled, generating voice message');
-        await setPresence('recording');
-        const audioBuffer = await textToSpeech(stripSplitDelimiters(response), whatsappJid);
-        if (audioBuffer) {
-          await sendSerialized(whatsappJid, {
-            audio: audioBuffer,
-            mimetype: 'audio/ogg; codecs=opus',
-            ptt: true, // Voice note
-          });
-          logger.info({ whatsappJid }, 'Voice message sent');
-        } else {
-          logger.warn({ whatsappJid }, 'TTS failed, text-only sent');
+    // --- Text delivered; a TTS failure must not skip the images or send ❌ ---
+    try {
+      if (response) {
+        const prefs = await getUserPreferences(whatsappJid);
+        if (prefs?.tts_enabled) {
+          logger.info({ whatsappJid }, 'TTS enabled, generating voice message');
+          await setPresence('recording');
+          const audioBuffer = await textToSpeech(stripSplitDelimiters(response), whatsappJid);
+          if (audioBuffer) {
+            await sendSerialized(whatsappJid, {
+              audio: audioBuffer,
+              mimetype: 'audio/ogg; codecs=opus',
+              ptt: true, // Voice note
+            });
+            logger.info({ whatsappJid }, 'Voice message sent');
+          } else {
+            logger.warn({ whatsappJid }, 'TTS failed, text-only sent');
+          }
         }
       }
+    } catch (ttsError) {
+      logger.warn({ error: ttsError, whatsappJid }, 'TTS delivery failed, text-only sent');
     }
 
     // Images last, through the per-chat send queue. Never throws.

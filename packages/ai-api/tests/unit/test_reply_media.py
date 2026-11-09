@@ -121,7 +121,7 @@ async def test_delivered_directive_removed_and_stored():
     ]
     save.assert_awaited_once()
     assert save.call_args.args[1:] == ("job-1", 0, PNG.data)
-    assert result.history_lines == ["[Image sent: Fire map] https://m.example.com/a.png"]
+    assert result.history_lines == ["![Fire map](https://m.example.com/a.png)"]
 
 
 async def test_images_only_reply_leaves_empty_text():
@@ -224,3 +224,66 @@ async def test_storage_failure_skips_the_image():
 async def test_burst_delimiters_survive(burst):
     result, _ = await collect(burst, {"https://m.example.com/a.png": PNG})
     assert result.text == "Part one\n---\nPart two"
+
+
+@pytest.mark.parametrize("marker", ["-", "*", "+", "1.", "2)"])
+async def test_list_item_image_removes_the_whole_line(marker):
+    text = f"Here:\n{marker} ![cat](https://a.example.com/c.jpg)\n{marker} ![dog](https://a.example.com/d.jpg)\nBye"
+    result, _ = await collect(
+        text, {"https://a.example.com/c.jpg": JPEG, "https://a.example.com/d.jpg": JPEG}
+    )
+    assert result.text == "Here:\nBye"
+
+
+async def test_list_item_with_more_text_keeps_the_text():
+    result, _ = await collect(
+        "- see ![cat](https://a.example.com/c.jpg) here", {"https://a.example.com/c.jpg": JPEG}
+    )
+    assert result.text == "- see  here"
+
+
+async def test_linked_image_keeps_the_outer_link_as_a_bare_url():
+    text = "[![badge](https://a.example.com/b.png)](https://site.example.com) more"
+    result, _ = await collect(text, {"https://a.example.com/b.png": PNG})
+    assert result.text == "https://site.example.com more"
+    assert len(result.media) == 1
+
+
+async def test_failed_linked_image_is_left_untouched():
+    text = "[![badge](https://a.example.com/b.png)](https://site.example.com)"
+    result, _ = await collect(text, {"https://a.example.com/b.png": ImageFetchError("404")})
+    assert result.text == text
+
+
+async def test_cleanup_leaves_code_fences_alone():
+    fence = "```yaml\na: 1  \n\n\n\nb: 2\n```"
+    text = f"x\n{fence}\n![c](https://a.example.com/c.jpg)"
+    result, _ = await collect(text, {"https://a.example.com/c.jpg": JPEG})
+    assert result.text == f"x\n{fence}"
+
+
+async def test_failed_downloads_do_not_use_up_the_cap():
+    lines = [f"![{i}](https://m.example.com/{i}.png)" for i in range(6)]
+    results = {f"https://m.example.com/{i}.png": ImageFetchError("404") for i in range(4)}
+    results.update({f"https://m.example.com/{i}.png": PNG for i in (4, 5)})
+    result, _ = await collect("\n".join(lines), results)
+    assert [m["caption"] for m in result.media] == ["4", "5"]
+    assert result.text == "\n".join(lines[:4])
+
+
+async def test_no_more_than_the_candidate_limit_is_fetched():
+    n = reply_media.MAX_CANDIDATES + 2
+    lines = [f"![{i}](https://m.example.com/{i}.png)" for i in range(n)]
+    results = {f"https://m.example.com/{i}.png": ImageFetchError("404") for i in range(n)}
+    result, _ = await collect("\n".join(lines), results)
+    assert result.media == []
+    assert result.text == "\n".join(lines)
+
+
+async def test_media_bytes_get_their_own_short_ttl():
+    from ai_api.queue.utils import JOB_MEDIA_TTL_SECONDS, save_job_media
+
+    redis = AsyncMock()
+    await save_job_media(redis, "job-1", 0, b"bytes")
+    redis.set.assert_awaited_once_with("job:media:job-1:0", b"bytes", ex=JOB_MEDIA_TTL_SECONDS)
+    assert JOB_MEDIA_TTL_SECONDS == 600

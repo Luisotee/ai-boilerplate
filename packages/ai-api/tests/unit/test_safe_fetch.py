@@ -154,6 +154,7 @@ async def test_url_rejected_before_any_request(url, reason):
         "::ffff:0:127.0.0.1",  # SIIT of 127.0.0.1 (Python calls it global)
         "::ffff:0:169.254.169.254",  # SIIT of the metadata address
         "::",
+        "fec0::1",  # deprecated site-local (Python calls it global)
     ],
 )
 async def test_non_public_address_blocked(address):
@@ -177,6 +178,12 @@ async def test_ip_literal_host_blocked(literal):
     transport, _ = recording_transport(never_called)
     with pytest.raises(ImageFetchError, match="not allowed"):
         await fetch(f"https://{literal}/a.png", transport)
+
+
+async def test_ipv6_literal_host_header_is_bracketed():
+    transport, seen = recording_transport(lambda r: image_response())
+    await fetch("https://[2606:4700::1111]/a.png", transport)
+    assert seen[0].headers["host"] == "[2606:4700::1111]"
 
 
 async def test_public_ip_literal_allowed():
