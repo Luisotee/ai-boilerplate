@@ -136,6 +136,8 @@ Work is tracked in **Devflow**, project **`CHATBOTS`** (org Terra Krya), through
 
 Sibling repos under `/home/ubuntu/projects/` have their own authoritative `CLAUDE.md` / `AGENTS.md`; this file's rules don't carry over.
 
+**Peer projects** (agent-mesh group `chatbots`): six open-source bots that solved our problems before. Ask them before designing; who knows what: `docs/peers.md`.
+
 - **Run or resume a peer agent in that repo** (Antigravity `agy` or Claude Code `claude`) instead of editing its files from here, so its own rules, skills and hooks apply and the user can resume it (`agy -c` or `claude -c`): `cd /home/ubuntu/projects/<repo> && agy -c -p "<prompt>" --dangerously-skip-permissions` or `cd /home/ubuntu/projects/<repo> && claude -c -p "<prompt>" --dangerously-skip-permissions`. **Always pass `--dangerously-skip-permissions`**, resumed (`-c -p`) or new (`-p`), because headless print mode needs it to auto-approve tools. Drop `-c` for a fresh session (`agy` needs one when an open TUI holds the latest conversation's lock); in `agy`, `send_message` to an open session's conversation ID queues into its inbox
 - **curupira-bot**: fire-alert fork (municipality subscriptions, `fire_poller/`, persona "Curupira"). Features often start here and get ported back (the shared-group tools, `get_chat_history`)
 - **castanha-bot**: Brazil-nut price fork (external *cadeia-produtiva* platform via `cadeia` tools, weekly recap, Portuguese commands like `/regiao`, no Telegram client)
