@@ -19,6 +19,13 @@ def idle_broadcast_consumer():
         yield
 
 
+@pytest.fixture(autouse=True)
+def idle_group_topics_loop():
+    """Keep the real group-topics loop (runtime_config + Redis lease) out of these tests."""
+    with patch.object(run_stream_worker, "run_group_topics_loop", _idle_consumer):
+        yield
+
+
 @pytest.mark.asyncio
 async def test_starts_both_consumers_and_exits_nonzero_when_one_stops():
     chat_cancelled = asyncio.Event()
@@ -92,3 +99,26 @@ async def test_broadcast_consumer_crash_stops_the_worker():
         code = await asyncio.wait_for(run_stream_worker.main(), timeout=5)
 
     assert code == 1
+
+
+@pytest.mark.asyncio
+async def test_group_topics_loop_runs_and_its_crash_stops_the_worker():
+    seen = {}
+
+    async def group_topics_loop(redis):
+        seen["group_topics"] = redis
+        raise RuntimeError("boom")
+
+    fake_redis = MagicMock()
+    fake_redis.aclose = AsyncMock()
+    with (
+        patch.object(run_stream_worker, "setup_instrumentation"),
+        patch.object(run_stream_worker, "Redis", return_value=fake_redis),
+        patch.object(run_stream_worker, "run_stream_consumer", _idle_consumer),
+        patch.object(run_stream_worker, "run_pdf_consumer", _idle_consumer),
+        patch.object(run_stream_worker, "run_group_topics_loop", group_topics_loop),
+    ):
+        code = await asyncio.wait_for(run_stream_worker.main(), timeout=5)
+
+    assert code == 1
+    assert seen == {"group_topics": fake_redis}

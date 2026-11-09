@@ -1,6 +1,6 @@
 # streams/ — Redis Stream consumers (chat, PDF, broadcast)
 
-Loaded on demand when working in this folder. The root `CLAUDE.md` holds the architecture, commands, security model and cross-cutting gotchas. The broadcast consumer (`broadcast_consumer.py`) is documented in `../services/CLAUDE.md`; the model-error fallback in `processor.py` in `../agent/CLAUDE.md`.
+Loaded on demand when working in this folder. The root `CLAUDE.md` holds the architecture, commands, security model and cross-cutting gotchas. The broadcast consumer (`broadcast_consumer.py`) is documented in `../services/CLAUDE.md`; the model-error fallback in `processor.py` in `../agent/CLAUDE.md`; the group-topics loop (`group_topics.py`) in `../../../docs/group-topics.md`.
 
 ## PDF processing queue
 

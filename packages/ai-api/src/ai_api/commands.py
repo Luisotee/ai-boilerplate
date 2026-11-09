@@ -15,6 +15,8 @@ from .config import settings
 from .database import (
     ConversationMessage,
     ConversationPreferences,
+    GroupTopic,
+    GroupTopicCursor,
     User,
     get_or_create_core_memory,
     get_or_create_preferences,
@@ -253,6 +255,11 @@ def handle_clean_command(
         db.query(ConversationMessage)
         .filter(ConversationMessage.user_id == user_id)
         .delete(synchronize_session=False)
+    )
+    # A group's topic summaries are made from its messages: they go with them.
+    db.query(GroupTopic).filter(GroupTopic.user_id == user_id).delete(synchronize_session=False)
+    db.query(GroupTopicCursor).filter(GroupTopicCursor.user_id == user_id).delete(
+        synchronize_session=False
     )
     # Bug reports copy the chat (messages, traceback, the agent's write-up);
     # /clean removes those too and keeps only the reports' metadata.

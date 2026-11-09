@@ -11,6 +11,8 @@ Runs three consumers side by side in one process:
 - the broadcast consumer (``streams/broadcast_consumer.py``) — operator
   broadcasts from ``POST /admin/broadcasts``, paced per platform; only one
   worker process sends at a time (Redis lease)
+- the group-topics loop (``streams/group_topics.py``) — summarises finished
+  group conversations into searchable topics when ``group_topics_enabled``
 
 If any consumer stops, the worker exits non-zero so the process supervisor
 (Docker ``restart: unless-stopped``) restarts it with both consumers healthy.
@@ -26,6 +28,7 @@ from ..instrument import setup_instrumentation
 from ..logger import logger
 from ..streams.broadcast_consumer import run_broadcast_consumer
 from ..streams.consumer import run_stream_consumer
+from ..streams.group_topics import run_group_topics_loop
 from ..streams.pdf_consumer import run_pdf_consumer
 
 
@@ -47,6 +50,7 @@ async def main() -> int:
         asyncio.create_task(run_stream_consumer(redis), name="chat-consumer"),
         asyncio.create_task(run_pdf_consumer(redis), name="pdf-consumer"),
         asyncio.create_task(run_broadcast_consumer(redis), name="broadcast-consumer"),
+        asyncio.create_task(run_group_topics_loop(redis), name="group-topics"),
     }
     try:
         done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
