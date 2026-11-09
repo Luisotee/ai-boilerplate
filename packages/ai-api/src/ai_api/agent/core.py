@@ -250,6 +250,30 @@ async def formatting_guidance(ctx: RunContext[AgentDeps]) -> str:
     return _FORMATTING_GUIDANCE
 
 
+_LANGUAGE_GUIDANCE = (
+    "\n\n== LANGUAGE ==\n"
+    "Reply in the language of the message you are answering, even when the conversation "
+    "so far was in another language. Never infer the language from earlier messages, "
+    "other people's messages, the phone number or the timezone, and tool results "
+    "written in English don't change it. A standing instruction (these instructions or "
+    "your notes about this chat) sets the reply language only when it names one, "
+    'e.g. "always answer in Spanish".\n'
+    "== END LANGUAGE =="
+)
+
+
+@agent.instructions
+async def language_guidance(ctx: RunContext[AgentDeps]) -> str:
+    """Reply-language rule appended to the system prompt on every run.
+
+    An instructions hook, like ``formatting_guidance``, so an ``/admin`` prompt
+    override (which replaces ``DEFAULT_SYSTEM_PROMPT`` wholesale) can't drop it.
+    The default prompt and every tool reply are in English while most users
+    write Portuguese, so without it the model may drift to English.
+    """
+    return _LANGUAGE_GUIDANCE
+
+
 _SHARED_GROUP_GUIDANCE = (
     "\n\n== SHARED GROUPS ==\n"
     "In a PRIVATE chat you can also reach groups that you and this user are BOTH in:\n"
