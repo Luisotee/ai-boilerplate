@@ -266,9 +266,7 @@ describe('handleTextMessage — reply outlives the polling window', () => {
   });
 
   it('replies with the late-reply notice and no 👎 reaction', async () => {
-    mockSendMessageToAI.mockRejectedValueOnce(
-      new apiClient.PollTimeoutError('job-1', '120000ms')
-    );
+    mockSendMessageToAI.mockRejectedValueOnce(new apiClient.PollTimeoutError('job-1', '120000ms'));
     const ctx = makeCtx();
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

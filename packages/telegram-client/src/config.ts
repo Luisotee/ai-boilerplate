@@ -89,10 +89,11 @@ export const config = {
   },
   // Album grouping: photos sharing a media_group_id are sent to the AI API
   // together once none arrived for quietMs (the AI API's CHAT_BURST_QUIET_MS;
-  // 0 = every photo on its own), waiting at most maxWaitMs in total.
+  // 0 = every photo on its own), waiting at most maxWaitMs in total (its
+  // CHAT_BURST_MAX_WAIT_MS).
   album: {
     quietMs: parseInt(process.env.CHAT_BURST_QUIET_MS || '2000', 10),
-    maxWaitMs: 10_000,
+    maxWaitMs: parseInt(process.env.CHAT_BURST_MAX_WAIT_MS || '8000', 10),
     maxItems: 10,
   },
   // Telegram Bot API

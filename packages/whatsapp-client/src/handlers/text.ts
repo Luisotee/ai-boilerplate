@@ -184,7 +184,11 @@ export async function handleTextMessage(
     if (error instanceof PollTimeoutError) {
       // The AI API pushes the reply when it is ready: no ❌, no error text.
       logger.warn({ whatsappJid }, 'Reply not ready within the polling window');
-      await sock.sendMessage(whatsappJid, { text: LATE_REPLY_NOTICE });
+      try {
+        await sock.sendMessage(whatsappJid, { text: LATE_REPLY_NOTICE });
+      } catch (noticeError) {
+        logger.warn({ error: noticeError, whatsappJid }, 'Failed to send the late-reply notice');
+      }
       return;
     }
     logger.error({ error, whatsappJid }, 'Error processing message');

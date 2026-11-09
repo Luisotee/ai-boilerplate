@@ -40,7 +40,9 @@ describe('sendMessageToAI — replies delivered elsewhere', () => {
   it('returns null for a job finished silently (pushed late or merged)', async () => {
     mockFetch
       .mockResolvedValueOnce(json({ job_id: 'j1', status: 'queued' }))
-      .mockResolvedValueOnce(json({ job_id: 'j1', status: 'complete', complete: true, silent: true }));
+      .mockResolvedValueOnce(
+        json({ job_id: 'j1', status: 'complete', complete: true, silent: true })
+      );
 
     await expect(sendMessageToAI('jid', 'hi', opts)).resolves.toBeNull();
   });
