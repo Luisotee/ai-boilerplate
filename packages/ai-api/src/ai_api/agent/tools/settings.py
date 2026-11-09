@@ -38,7 +38,8 @@ async def settings(
     Show or change this chat's settings.
 
     - "show": the current settings ("what are my settings?").
-    - "tts": voice replies; enabled turns them on/off, language sets their language.
+    - "tts": your replies as audio/voice messages; enabled turns them on/off,
+      language sets their language ("stop sending me audio" = enabled=false).
     - "stt": the language voice messages are transcribed in; language="auto" auto-detects.
     - "announcements": the operators' update messages; enabled=false stops them
       ("stop sending me news"), enabled=true resumes them.
