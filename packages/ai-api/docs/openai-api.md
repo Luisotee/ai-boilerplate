@@ -59,7 +59,7 @@ Browser-only clients calling the API directly need their origin in `CORS_ORIGINS
 ## Terminal chat
 
 ```bash
-docker compose exec api python -m ai_api.scripts.chat --name luis
+docker compose exec api python -m ai_api.scripts.chat --name luis   # name: [A-Za-z0-9_.-]
 cd packages/ai-api && uv run python -m ai_api.scripts.chat      # local dev: dev:server + dev:queue running
 ```
 

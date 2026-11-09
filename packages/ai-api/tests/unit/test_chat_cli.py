@@ -3,8 +3,9 @@
 import json
 
 import httpx
+import pytest
 
-from ai_api.scripts.chat import send
+from ai_api.scripts.chat import main, send
 
 
 def _client(handler):
@@ -64,3 +65,22 @@ def test_timeout():
 
     reply = send(_client(handler), "cli:luis", "hi", poll_interval=0, timeout=0.01)
     assert reply.startswith("[no reply after")
+
+
+def test_poll_error_is_reported_at_once():
+    def handler(request):
+        if request.url.path == "/chat/enqueue":
+            return httpx.Response(200, json={"job_id": "j1", "status": "queued"})
+        return httpx.Response(401, json={"detail": "Invalid API key"})
+
+    # A long timeout: without the check this would poll until it ran out.
+    reply = send(_client(handler), "cli:luis", "hi", poll_interval=0, timeout=60)
+    assert reply == "[poll failed: HTTP 401 for job j1]"
+
+
+@pytest.mark.parametrize("name", ["a/b", "a b", "", "ana?x"])
+def test_name_is_restricted_to_path_safe_characters(name, capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["--name", name])
+    assert exc.value.code == 2
+    assert "letters, digits" in capsys.readouterr().err

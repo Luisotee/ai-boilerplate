@@ -129,7 +129,9 @@ def list_keys(db: Session) -> list[tuple[ApiKey, User | None]]:
 
 def revoke_key(db: Session, key_ref: str) -> ApiKey:
     """Revoke by key id or by its display prefix. Raises ``ValueError`` if none or
-    several match; revoking an already revoked key is a no-op."""
+    several match; revoking an already revoked key is a no-op. A trailing ``…`` or
+    ``...`` copied from ``list`` is ignored (keys never contain either)."""
+    key_ref = key_ref.strip().rstrip("….")
     query = db.query(ApiKey)
     try:
         matches = query.filter(ApiKey.id == uuid.UUID(key_ref)).all()

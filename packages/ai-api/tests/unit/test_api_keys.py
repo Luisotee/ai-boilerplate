@@ -124,6 +124,15 @@ class TestRevoke:
         assert record.revoked_at is not None
         db.commit.assert_called_once()
 
+    @pytest.mark.parametrize("pasted", ["sk-abcdefg…", "sk-abcdefg...", " sk-abcdefg… "])
+    def test_prefix_copied_from_list_with_ellipsis(self, pasted):
+        record = MagicMock(revoked_at=None, key_prefix="sk-abcdefg")
+        db = MagicMock()
+        db.query.return_value.filter.return_value.all.return_value = [record]
+        assert revoke_key(db, pasted) is record
+        (expr,) = db.query.return_value.filter.call_args.args
+        assert expr.right.value == "sk-abcdefg"
+
     def test_by_id(self):
         record = MagicMock(revoked_at=None)
         db = MagicMock()

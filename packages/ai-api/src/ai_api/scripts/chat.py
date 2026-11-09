@@ -18,6 +18,7 @@ chat clients would show them. ``/quit`` or Ctrl-D exits.
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 import time
 
@@ -25,6 +26,15 @@ import httpx
 
 POLL_INTERVAL_SECONDS = 0.5
 TIMEOUT_SECONDS = 120.0
+# Kept to characters that are safe in a URL path segment: /admin/users/{jid}/messages
+# (FleetView) would 404 on a jid with a "/".
+_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+")
+
+
+def _name(value: str) -> str:
+    if not _NAME_RE.fullmatch(value):
+        raise argparse.ArgumentTypeError("use only letters, digits, '_', '.' and '-'")
+    return value
 
 
 def send(
@@ -53,7 +63,10 @@ def send(
     job_id = data["job_id"]
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        job = client.get(f"/chat/job/{job_id}").json()
+        resp = client.get(f"/chat/job/{job_id}")
+        if resp.is_error:
+            return f"[poll failed: HTTP {resp.status_code} for job {job_id}]"
+        job = resp.json()
         if job.get("status") == "complete":
             return job.get("full_response") or ""
         if job.get("status") == "failed":
@@ -64,7 +77,9 @@ def send(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m ai_api.scripts.chat")
-    parser.add_argument("--name", default="local", help="chat id suffix: cli:<name>")
+    parser.add_argument(
+        "--name", type=_name, default="local", help="chat id suffix: cli:<name> ([A-Za-z0-9_.-])"
+    )
     parser.add_argument("--url", default="http://localhost:8000", help="AI API base URL")
     args = parser.parse_args(argv)
 
