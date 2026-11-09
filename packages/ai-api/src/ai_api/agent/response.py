@@ -1,7 +1,8 @@
 import base64
 
-from pydantic_ai import AgentRunResultEvent, BinaryContent
+from pydantic_ai import AgentRunResultEvent, BinaryContent, UsageLimits
 
+from ..config import settings
 from ..logger import logger
 from .core import AgentDeps, agent, build_runtime_model
 
@@ -63,6 +64,9 @@ async def get_ai_response(
         message_history=message_history,
         deps=agent_deps,
         model=build_runtime_model(),  # honor /admin model overrides per-run
+        # A model stuck calling tools stops here (UsageLimitExceeded) instead of
+        # at Pydantic AI's default of 50 requests.
+        usage_limits=UsageLimits(request_limit=settings.agent_request_limit),
     ):
         if isinstance(event, AgentRunResultEvent):
             full_response = event.result.output

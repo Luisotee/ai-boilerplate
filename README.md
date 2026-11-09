@@ -320,6 +320,7 @@ pnpm format          # Format all code
 | `TELEGRAM_MODE` | `webhook` (default — Telegram POSTs to `/webhook`, needs a public HTTPS URL + `TELEGRAM_WEBHOOK_SECRET`) or `polling` (long polling via `@grammyjs/runner`: no public URL or tunnel; one process per bot token). Group chats need privacy mode OFF in @BotFather (`/setprivacy` → Disable; then remove and re-add the bot) |
 | `GROUP_GATING` | How a group gets in scope when the whitelist is set: `jid` (default — the group's own id must be listed) or `membership` (Baileys: any group with a whitelisted member; Telegram: any group; the bot saves all messages there but replies only to whitelisted senders). Read by the AI API and the Baileys/Telegram clients |
 | `POLL_MAX_DURATION_MS` | How long a client waits for a reply (default `120000`). Read by the AI API too: a reply ready later is pushed to the chat, and the client tells the user it is coming |
+| `AGENT_REQUEST_LIMIT` | Most model requests one agent run may make (default `10`); a model looping on tools gets the fallback reply instead |
 | `CHAT_JOB_MAX_AGE_SECONDS` | A chat job older than this when the worker reaches it (an outage backlog) is not run; the user is asked to resend (default `3600`) |
 | `BUG_REPORTS_ENABLED` | `true` (default). The `report_bug` agent tool plus automatic reports of model errors, crashed jobs and failed PDFs. Hot via `PATCH /admin/settings` |
 | `BUG_REPORTS_PER_USER_PER_HOUR` | Cap on reports the agent files per chat per hour (default `5`) |

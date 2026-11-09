@@ -102,6 +102,10 @@ class Settings(BaseSettings):
     # user gets a short "send it again" notice instead (an outage backlog).
     chat_job_max_age_seconds: int = 3600
 
+    # Agent loop cap: model requests in one run (tool round-trips + the answer).
+    # Pydantic AI's own default is 50, each request carrying every tool schema.
+    agent_request_limit: int = 10
+
     # History
     history_limit_private: int = 20
     history_limit_group: int = 30

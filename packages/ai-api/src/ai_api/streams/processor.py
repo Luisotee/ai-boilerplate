@@ -5,6 +5,7 @@ Core chat processing logic, called by the Redis Streams consumer.
 import asyncio
 
 import httpx
+from pydantic_ai import UsageLimitExceeded
 
 from ..agent import AgentDeps, format_message_history, get_ai_response
 from ..agent.model_chain import MODEL_ERRORS
@@ -252,7 +253,9 @@ async def process_chat_job_direct(
                     image_mimetype=image_mimetype,
                 ):
                     full_response += token
-            except MODEL_ERRORS as model_error:
+            except (*MODEL_ERRORS, UsageLimitExceeded) as model_error:
+                # UsageLimitExceeded: the run hit AGENT_REQUEST_LIMIT (a model
+                # looping on tools). Same user-facing fallback as a model error.
                 logger.error(f"[Job {job_id}] AI model error: {model_error}", exc_info=True)
                 # Deliver the fallback text as a normal COMPLETED job (no "status":
                 # "failed"): the clients treat "failed" as an exception and answer
@@ -303,7 +306,11 @@ async def process_chat_job_direct(
                 await asyncio.to_thread(
                     record_auto_report,
                     "model_error",
-                    title="AI model failed to answer",
+                    title=(
+                        "Agent hit the request limit"
+                        if isinstance(model_error, UsageLimitExceeded)
+                        else "AI model failed to answer"
+                    ),
                     exc=model_error,
                     user_id=user_id,
                     whatsapp_jid=whatsapp_jid,

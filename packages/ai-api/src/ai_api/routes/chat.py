@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic_ai import UsageLimitExceeded
 from sqlalchemy.orm import Session
 from starlette.requests import Request
 
@@ -800,7 +801,7 @@ async def chat(request: Request, chat_request: ChatRequest, db: Session = Depend
 
         return ChatResponse(response=ai_response)
 
-    except MODEL_ERRORS as e:
+    except (*MODEL_ERRORS, UsageLimitExceeded) as e:
         # Same classification as streams/processor.py: the model chain failed
         # (transient provider outage, both DeepSeek and Gemini down, exhausted
         # retries). 503 tells the caller it is retryable; nothing is saved as the
