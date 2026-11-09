@@ -23,16 +23,16 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import uuid
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 import httpx
 import openai
 from google.genai import errors as genai_errors
-from pydantic import BaseModel, Field
-from pydantic_ai import Agent
-from pydantic_ai.exceptions import FallbackExceptionGroup, ModelAPIError
+from pydantic import BaseModel, Field, TypeAdapter
+from pydantic_ai import Agent, AgentRunResultEvent
+from pydantic_ai.exceptions import FallbackExceptionGroup, ModelAPIError, ModelHTTPError
 from pydantic_ai.usage import UsageLimits
 from redis.asyncio import Redis
 from sqlalchemy import text, tuple_
@@ -83,6 +83,13 @@ SUMMARY_TIMEOUT_SECONDS = 120
 POISON_LIMIT = 3
 POISON_KEY = "group_topics:fail:{group_id}:{block_key}"
 POISON_TTL_SECONDS = 7 * 24 * 3600
+#: A block's summary, kept so a retry after a failed embedding or store doesn't
+#: pay the model again.
+SUMMARY_CACHE_KEY = "group_topics:summary:{block_key}"
+SUMMARY_CACHE_TTL_SECONDS = 24 * 3600
+#: HTTP statuses that mean "the provider is unavailable right now" (as
+#: agent/model_chain.py's cooldown rule): rate limits and server errors.
+_UNAVAILABLE_STATUSES = frozenset({429})
 
 _TOPIC_ID_NAMESPACE = uuid.UUID("5b0c1f9e-6f43-4c39-9d3e-3f1c2b7a8d10")
 
@@ -121,16 +128,42 @@ topic_agent = Agent(
     retries=2,
 )
 
-#: Failures that mean "a provider is unavailable right now", not "this block is
-#: bad". They end the run without counting against the block.
-UNAVAILABLE_ERRORS: tuple[type[BaseException], ...] = (
-    ModelAPIError,
-    FallbackExceptionGroup,
-    openai.APIError,
-    httpx.TransportError,
-    TimeoutError,
-    genai_errors.ServerError,
-)
+_topics_adapter = TypeAdapter(list[Topic])
+
+
+def _unavailable_status(code: int | None) -> bool:
+    return code is not None and (code >= 500 or code in _UNAVAILABLE_STATUSES)
+
+
+def is_unavailable(exc: BaseException) -> bool:
+    """True when ``exc`` means a provider is down or rate-limited right now.
+
+    Those end the run without counting against the block: every group shares
+    the providers, so the next run retries. Everything else (a 4xx such as a
+    400 for this block's content, output validation, a run that keeps timing
+    out) is the block's own problem and goes through the poison count.
+
+    - ``ModelHTTPError`` (a ``ModelAPIError``): only 429 and 5xx.
+    - Any other ``ModelAPIError``: no HTTP status, so a connection failure, a
+      model skipped while its cooldown runs, or GuardedModel's first-chunk timeout.
+    - ``FallbackExceptionGroup``: only when every model failed for such a reason.
+    - OpenAI SDK errors with a status: 429 and 5xx; without one (connection,
+      an SSE error event): unavailable. ``httpx.TransportError``: unavailable.
+    - Gemini (embedding) ``APIError``: 429 and 5xx.
+    """
+    if isinstance(exc, FallbackExceptionGroup):
+        return bool(exc.exceptions) and all(is_unavailable(e) for e in exc.exceptions)
+    if isinstance(exc, ModelHTTPError):
+        return _unavailable_status(exc.status_code)
+    if isinstance(exc, ModelAPIError):
+        return True
+    if isinstance(exc, openai.APIStatusError):
+        return _unavailable_status(exc.status_code)
+    if isinstance(exc, openai.APIError | httpx.TransportError):
+        return True
+    if isinstance(exc, genai_errors.APIError):
+        return _unavailable_status(exc.code)
+    return False
 
 
 @dataclass(frozen=True)
@@ -167,6 +200,8 @@ class IngestResult:
     blocks_skipped: int = 0
     #: A provider was down: the caller should stop this run.
     unavailable: bool = False
+    #: The run's lease was lost: the caller should stop this run.
+    lease_lost: bool = False
 
 
 def topic_id(block_key: str, index: int) -> uuid.UUID:
@@ -186,11 +221,14 @@ def split_into_blocks(
       :data:`MAX_BLOCK` messages is cut into pieces of that size.
     - A piece under :data:`MIN_BLOCK` is merged with the next one (unless the
       two would exceed :data:`MAX_BLOCK`).
-    - Only finished conversations are returned: the newest messages are held
-      back while the chat is still going (last message under :data:`GAP` old),
-      and a finished piece still under :data:`MIN_BLOCK` waits for the next
-      conversation until it is :data:`STALE_TAIL` old. Everything returned is at
-      least GAP old, so a message committed late can't land behind the cursor.
+    - No block whose last message is under :data:`GAP` old is returned, so the
+      conversation still going is held back, a capped piece included. (A
+      conversation that runs for hours without a pause still gets its older
+      200-message pieces summarised once they are GAP old.) Everything returned
+      is at least GAP old, so a message committed late can't land behind the
+      cursor.
+    - A finished piece still under :data:`MIN_BLOCK` waits for the next
+      conversation until it is :data:`STALE_TAIL` old.
     - Blocks are a prefix of ``messages``, so the cursor moves contiguously.
 
     ``prior`` holds the messages just before ``messages`` (oldest first); each
@@ -219,14 +257,12 @@ def split_into_blocks(
             merged.append(pending)
             pending = []
 
-    newest = messages[-1]
-    if pending:
-        # A finished-but-small tail (or a chat still going): wait for more,
-        # unless it has been quiet for STALE_TAIL.
-        if now - newest.timestamp > STALE_TAIL:
-            merged.append(pending)
-    elif merged and now - newest.timestamp <= GAP and len(merged[-1]) < MAX_BLOCK:
-        merged.pop()  # the chat is still going
+    # A small tail waits for the next conversation, unless quiet for STALE_TAIL.
+    if pending and now - pending[-1].timestamp > STALE_TAIL:
+        merged.append(pending)
+    # Hold back the conversation still going, capped pieces included.
+    while merged and now - merged[-1][-1].timestamp <= GAP:
+        merged.pop()
 
     history = list(prior) + list(messages)
     position = {m.id: i for i, m in enumerate(history)}
@@ -271,23 +307,53 @@ def _clip(content: str) -> str:
 
 
 async def summarise_block(block: Block) -> list[Topic]:
-    """Ask the chat model chain for the block's topics (at most MAX_TOPICS)."""
+    """Ask the chat model chain for the block's topics (at most MAX_TOPICS).
+
+    Runs through ``run_stream_events`` rather than ``run``: model requests are
+    then streamed, so GuardedModel's first-chunk timeout applies and a DeepSeek
+    request stuck in its queue falls back to Gemini. A non-streaming request
+    has no such guard (keep-alive lines keep resetting httpx's read timeout).
+    """
     # Lazy import: agent/__init__ imports the tools, and agent/tools/search.py
     # imports this module, so a top-level import would be circular.
     from ..agent.core import build_runtime_model
 
+    output: list[Topic] | None = None
     async with asyncio.timeout(SUMMARY_TIMEOUT_SECONDS):
-        result = await topic_agent.run(
+        async for event in topic_agent.run_stream_events(
             render_block(block),
             model=build_runtime_model(),
             usage_limits=UsageLimits(request_limit=4),
-        )
+        ):
+            if isinstance(event, AgentRunResultEvent):
+                output = event.result.output
     topics = [
         Topic(subject=t.subject.strip()[:200], summary=t.summary.strip())
-        for t in result.output
+        for t in output or []
         if t.subject.strip() and t.summary.strip()
     ]
     return topics[:MAX_TOPICS]
+
+
+async def summarise_block_cached(redis: Redis, block: Block) -> list[Topic]:
+    """:func:`summarise_block`, reusing a summary cached by an earlier failed try."""
+    key = SUMMARY_CACHE_KEY.format(block_key=block.key)
+    try:
+        cached = await redis.get(key)
+    except Exception:
+        logger.warning("Group topics: could not read the summary cache", exc_info=True)
+        cached = None
+    if cached is not None:
+        try:
+            return _topics_adapter.validate_json(cached)
+        except ValueError:
+            logger.warning("Group topics: dropping an unreadable cached summary")
+    topics = await summarise_block(block)
+    try:
+        await redis.set(key, _topics_adapter.dump_json(topics), ex=SUMMARY_CACHE_TTL_SECONDS)
+    except Exception:
+        logger.warning("Group topics: could not cache a summary", exc_info=True)
+    return topics
 
 
 def topic_embedding_text(topic: Topic) -> str:
@@ -406,7 +472,11 @@ def _advance_cursor(db: Session, group_id: uuid.UUID, last: Msg) -> None:
 
 
 def groups_with_new_messages(now: datetime) -> list[uuid.UUID]:
-    """Group rows with messages after their cursor, least recently ingested first."""
+    """Group rows with messages after their cursor, least recently ingested first.
+
+    "After" is the same ``(timestamp, id)`` row comparison :func:`load_new_messages`
+    uses, so a message tying the cursor's timestamp is still found.
+    """
     with SessionLocal() as db:
         rows = db.execute(
             text("""
@@ -417,7 +487,10 @@ def groups_with_new_messages(now: datetime) -> list[uuid.UUID]:
                   AND EXISTS (
                       SELECT 1 FROM conversation_messages m
                       WHERE m.user_id = u.id
-                        AND m.timestamp > COALESCE(c.last_message_at, :backfill_start)
+                        AND (
+                            (c.user_id IS NULL AND m.timestamp >= :backfill_start)
+                            OR (m.timestamp, m.id) > (c.last_message_at, c.last_message_id)
+                        )
                   )
                 ORDER BY c.last_message_at NULLS FIRST
             """),
@@ -434,15 +507,24 @@ async def ingest_group(
     group_id: uuid.UUID,
     now: datetime,
     embedding_service: EmbeddingService,
+    keep_lease: Callable[[], Awaitable[bool]] | None = None,
 ) -> IngestResult:
-    """Summarise and store the group's finished blocks, oldest first."""
+    """Summarise and store the group's finished blocks, oldest first.
+
+    ``keep_lease`` is awaited before each block; when it returns False (the
+    run's lease is lost) the group stops, so two workers never summarise the
+    same block at once.
+    """
     result = IngestResult()
     messages, prior = await asyncio.to_thread(load_new_messages, group_id, now)
     blocks = split_into_blocks(messages, now, prior)[:MAX_BLOCKS_PER_RUN]
 
     for block in blocks:
+        if keep_lease is not None and not await keep_lease():
+            result.lease_lost = True
+            return result
         try:
-            topics = await summarise_block(block)
+            topics = await summarise_block_cached(redis, block)
             embeddings = (
                 await embedding_service.embed_documents([topic_embedding_text(t) for t in topics])
                 if topics
@@ -450,19 +532,20 @@ async def ingest_group(
             )
         except asyncio.CancelledError:
             raise
-        except UNAVAILABLE_ERRORS as exc:
-            logger.warning(
-                f"Group topics: provider unavailable for group {group_id}, "
-                f"stopping this run: {type(exc).__name__}"
-            )
-            result.unavailable = True
-            return result
         except Exception as exc:
+            if is_unavailable(exc):
+                logger.warning(
+                    f"Group topics: provider unavailable for group {group_id}, "
+                    f"stopping this run: {type(exc).__name__}: {exc}"
+                )
+                result.unavailable = True
+                return result
             # This block's own problem (output validation, a rejected text):
             # count it, and skip the block after POISON_LIMIT runs in a row.
             if await _count_failure(redis, group_id, block, exc):
                 stored = await asyncio.to_thread(store_block, group_id, block, [], [])
                 if stored:
+                    await _forget_summary(redis, block)
                     result.blocks_skipped += 1
                     continue
             return result  # keep order: later blocks wait for this one
@@ -470,10 +553,18 @@ async def ingest_group(
         if not await asyncio.to_thread(store_block, group_id, block, topics, embeddings):
             logger.info(f"Group topics: group {group_id} was cleaned meanwhile, stopping")
             return result
+        await _forget_summary(redis, block)
         result.blocks_done += 1
         result.topics_stored += len(topics)
 
     return result
+
+
+async def _forget_summary(redis: Redis, block: Block) -> None:
+    try:
+        await redis.delete(SUMMARY_CACHE_KEY.format(block_key=block.key))
+    except Exception:
+        logger.debug("Group topics: could not drop a cached summary", exc_info=True)
 
 
 async def _count_failure(redis: Redis, group_id: uuid.UUID, block: Block, exc: Exception) -> bool:
@@ -505,6 +596,12 @@ async def _count_failure(redis: Redis, group_id: uuid.UUID, block: Block, exc: E
 
 
 # --- Search -------------------------------------------------------------------
+
+
+def topics_cover_until(db: Session, user_id: str) -> datetime | None:
+    """Timestamp of the last message the group's topics cover (None: no cursor)."""
+    cursor = db.get(GroupTopicCursor, user_id)
+    return cursor.last_message_at if cursor is not None else None
 
 
 @dataclass(frozen=True)

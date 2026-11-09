@@ -1,14 +1,25 @@
 """Unit tests for ai_api.rag.group_topics: block splitting, ids, ingest and summary."""
 
+import asyncio
+import json
 import uuid
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
+import openai
 import pytest
-from pydantic_ai.exceptions import ModelAPIError, UnexpectedModelBehavior
-from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
-from pydantic_ai.models.function import AgentInfo, FunctionModel
+from google.genai import errors as genai_errors
+from pydantic_ai.exceptions import (
+    FallbackExceptionGroup,
+    ModelAPIError,
+    ModelHTTPError,
+    UnexpectedModelBehavior,
+)
+from pydantic_ai.models.fallback import FallbackModel
+from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 
+from ai_api.agent.model_chain import FALLBACK_ON, Cooldown, GuardedModel
 from ai_api.config import settings
 from ai_api.rag import group_topics as gt
 from ai_api.rag.group_topics import (
@@ -82,11 +93,24 @@ class TestSplitIntoBlocks:
         now = msgs[-1].timestamp + timedelta(minutes=30)  # chat still going
         assert split_into_blocks(msgs, now) == []
 
-    def test_full_block_of_an_open_conversation_is_taken(self):
+    def test_capped_piece_of_an_open_conversation_is_held(self):
         msgs = _msgs(MAX_BLOCK + 10)
         now = msgs[-1].timestamp + timedelta(minutes=5)
+        assert split_into_blocks(msgs, now) == []
+
+    def test_old_pieces_of_a_conversation_without_pause_are_taken(self):
+        # 400 messages a minute apart, still going: the first 200 ended over
+        # GAP ago, the second 200 did not.
+        msgs = _msgs(2 * MAX_BLOCK)
+        now = msgs[-1].timestamp + timedelta(minutes=5)
         blocks = split_into_blocks(msgs, now)
-        assert [len(b.messages) for b in blocks] == [MAX_BLOCK]
+        assert [b.messages for b in blocks] == [tuple(msgs[:MAX_BLOCK])]
+
+    def test_nothing_returned_is_newer_than_gap(self):
+        msgs = _msgs(1000, step=timedelta(seconds=20))
+        now = msgs[-1].timestamp + timedelta(minutes=1)
+        for block in split_into_blocks(msgs, now):
+            assert now - block.last.timestamp > GAP
 
     def test_small_finished_tail_waits_then_goes_when_stale(self):
         msgs = _msgs(MIN_BLOCK - 5)
@@ -151,19 +175,87 @@ class TestRenderAndSummarise:
 
     async def test_summarise_uses_the_runtime_model_and_caps_topics(self):
         seen = {}
+        topics = [{"subject": f" S{i} ", "summary": f"sum {i}"} for i in range(7)]
+        topics.append({"subject": "  ", "summary": "dropped"})
 
-        def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        async def stream_fn(_messages, info: AgentInfo):
             seen["tools"] = [t.name for t in info.function_tools]
-            topics = [{"subject": f" S{i} ", "summary": f"sum {i}"} for i in range(7)]
-            topics.append({"subject": "  ", "summary": "dropped"})
-            return ModelResponse(
-                parts=[ToolCallPart(info.output_tools[0].name, {"response": topics})]
-            )
+            yield {0: _output_call(info, topics)}
 
-        with patch("ai_api.agent.core.build_runtime_model", return_value=FunctionModel(model_fn)):
-            topics = await summarise_block(Block(tuple(_msgs(3))))
+        model = FunctionModel(stream_function=stream_fn)
+        with patch("ai_api.agent.core.build_runtime_model", return_value=model):
+            result = await summarise_block(Block(tuple(_msgs(3))))
         assert seen["tools"] == []  # no tool schemas paid for
-        assert [t.subject for t in topics] == ["S0", "S1", "S2", "S3", "S4"]
+        assert [t.subject for t in result] == ["S0", "S1", "S2", "S3", "S4"]
+
+    async def test_stalled_first_model_falls_back_to_the_second(self):
+        """A DeepSeek request stuck in its queue must not stall the summary:
+        requests are streamed, so GuardedModel's first-chunk timeout applies."""
+        hang = asyncio.Event()
+
+        async def stalled(_messages, _info: AgentInfo):
+            await hang.wait()  # never sends a first chunk
+            yield "never"
+
+        async def healthy(_messages, info: AgentInfo):
+            yield {0: _output_call(info, [{"subject": "Trip", "summary": "From Gemini."}])}
+
+        cooldown = Cooldown(60)
+        first = GuardedModel(
+            FunctionModel(stream_function=stalled, model_name="deepseek-flash"),
+            first_chunk_timeout=0.2,
+            cooldown=cooldown,
+        )
+        chain = FallbackModel(
+            first, FunctionModel(stream_function=healthy), fallback_on=FALLBACK_ON
+        )
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        with patch("ai_api.agent.core.build_runtime_model", return_value=chain):
+            result = await summarise_block(Block(tuple(_msgs(3))))
+        assert [t.summary for t in result] == ["From Gemini."]
+        assert loop.time() - started < 5
+        assert cooldown.active()  # the stalled model is skipped for a while
+
+
+def _output_call(info: AgentInfo, topics: list[dict]) -> DeltaToolCall:
+    return DeltaToolCall(name=info.output_tools[0].name, json_args=json.dumps({"response": topics}))
+
+
+# ---------------------------------------------------------------------------
+# is_unavailable
+# ---------------------------------------------------------------------------
+
+
+def _genai(cls, code: int):
+    return cls(code, {"error": {"code": code, "message": "x", "status": "X"}})
+
+
+@pytest.mark.parametrize(
+    ("exc", "unavailable"),
+    [
+        (ModelHTTPError(429, "m"), True),
+        (ModelHTTPError(503, "m"), True),
+        (ModelHTTPError(400, "m"), False),
+        (ModelHTTPError(404, "m"), False),
+        (ModelAPIError("m", "skipped: cooling down after a recent failure"), True),
+        (httpx.ConnectError("down"), True),
+        (openai.APIConnectionError(request=httpx.Request("POST", "https://x")), True),
+        (_genai(genai_errors.ClientError, 429), True),
+        (_genai(genai_errors.ServerError, 503), True),
+        (_genai(genai_errors.ClientError, 400), False),
+        (UnexpectedModelBehavior("bad output"), False),
+        (TimeoutError(), False),
+        (ValueError("Expected 1 embeddings, got 0"), False),
+        (FallbackExceptionGroup("all", [ModelHTTPError(503, "a"), httpx.ReadTimeout("b")]), True),
+        (
+            FallbackExceptionGroup("all", [ModelHTTPError(503, "a"), ModelHTTPError(400, "b")]),
+            False,
+        ),
+    ],
+)
+def test_is_unavailable(exc, unavailable):
+    assert gt.is_unavailable(exc) is unavailable
 
 
 # ---------------------------------------------------------------------------
@@ -181,11 +273,13 @@ def _blocks_of(n_blocks: int) -> tuple[list[Msg], datetime]:
     return msgs, start
 
 
-def _redis(failures: int = 1) -> MagicMock:
+def _redis(failures: int = 1, cached: bytes | None = None) -> MagicMock:
     redis = MagicMock()
     redis.incr = AsyncMock(return_value=failures)
     redis.expire = AsyncMock()
     redis.delete = AsyncMock()
+    redis.get = AsyncMock(return_value=cached)
+    redis.set = AsyncMock()
     return redis
 
 
@@ -339,3 +433,79 @@ def test_search_is_scoped_to_the_group_row():
     assert "FROM group_topics" in str(sql) and "WHERE user_id = :user_id" in str(sql)
     assert "::halfvec(3072)" in str(sql)
     assert params["user_id"] == "group-row-id"
+
+
+class TestIngestFailureKinds:
+    async def test_a_400_counts_against_the_block_and_is_not_an_outage(self):
+        msgs, now = _blocks_of(1)
+        redis = _redis()
+        with (
+            patch(f"{MODULE}.load_new_messages", return_value=(msgs, [])),
+            patch(f"{MODULE}.summarise_block", AsyncMock(side_effect=ModelHTTPError(400, "m"))),
+            patch(f"{MODULE}.store_block", MagicMock()) as store,
+        ):
+            result = await gt.ingest_group(redis, uuid.uuid4(), now, _embedder())
+        assert result.unavailable is False
+        redis.incr.assert_awaited_once()
+        store.assert_not_called()
+
+    async def test_embedding_rate_limit_is_an_outage_and_the_summary_is_kept(self):
+        msgs, now = _blocks_of(1)
+        redis = _redis()
+        embedder = _embedder()
+        embedder.embed_documents.side_effect = _genai(genai_errors.ClientError, 429)
+        topic = Topic(subject="Trip", summary="Planned the trip.")
+        with (
+            patch(f"{MODULE}.load_new_messages", return_value=(msgs, [])),
+            patch(f"{MODULE}.summarise_block", AsyncMock(return_value=[topic])),
+            patch(f"{MODULE}.store_block", MagicMock()) as store,
+        ):
+            result = await gt.ingest_group(redis, uuid.uuid4(), now, embedder)
+        assert result.unavailable is True
+        redis.incr.assert_not_called()
+        store.assert_not_called()
+        key, value = redis.set.call_args.args
+        assert key == f"group_topics:summary:{Block(tuple(msgs)).key}"
+        assert json.loads(value) == [topic.model_dump()]
+        redis.delete.assert_not_called()  # kept for the retry
+
+    async def test_a_cached_summary_is_reused_and_dropped_once_stored(self):
+        msgs, now = _blocks_of(1)
+        topic = Topic(subject="Trip", summary="Planned the trip.")
+        redis = _redis(cached=json.dumps([topic.model_dump()]).encode())
+        summarise = AsyncMock()
+        with (
+            patch(f"{MODULE}.load_new_messages", return_value=(msgs, [])),
+            patch(f"{MODULE}.summarise_block", summarise),
+            patch(f"{MODULE}.store_block", MagicMock(return_value=True)) as store,
+        ):
+            result = await gt.ingest_group(redis, uuid.uuid4(), now, _embedder())
+        summarise.assert_not_called()
+        assert store.call_args.args[2] == [topic]
+        assert result.blocks_done == 1
+        redis.delete.assert_awaited_once_with(f"group_topics:summary:{Block(tuple(msgs)).key}")
+
+    async def test_lost_lease_stops_before_the_next_block(self):
+        msgs, now = _blocks_of(2)
+        keep = AsyncMock(side_effect=[True, False])
+        with (
+            patch(f"{MODULE}.load_new_messages", return_value=(msgs, [])),
+            patch(f"{MODULE}.summarise_block", AsyncMock(return_value=[])) as summarise,
+            patch(f"{MODULE}.store_block", MagicMock(return_value=True)),
+        ):
+            result = await gt.ingest_group(
+                _redis(), uuid.uuid4(), now, _embedder(), keep_lease=keep
+            )
+        assert result.lease_lost is True and result.blocks_done == 1
+        assert summarise.await_count == 1
+
+
+def test_discovery_uses_the_same_tie_rule_as_the_read():
+    db = MagicMock()
+    db.__enter__.return_value = db
+    db.execute.return_value.fetchall.return_value = []
+    with patch(f"{MODULE}.SessionLocal", return_value=db):
+        gt.groups_with_new_messages(T0)
+    sql = " ".join(str(db.execute.call_args.args[0]).split())
+    assert "(m.timestamp, m.id) > (c.last_message_at, c.last_message_id)" in sql
+    assert "c.user_id IS NULL AND m.timestamp >= :backfill_start" in sql

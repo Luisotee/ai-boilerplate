@@ -120,6 +120,9 @@ class ConversationMessage(Base):
             postgresql_using="hnsw",
             postgresql_ops={"embedding": "halfvec_cosine_ops"},
         ),
+        # One chat's messages in (timestamp, id) order: the group-topics job's
+        # cursor reads (rag/group_topics.py); docs/migrations/2026-11-09-group-topics.sql.
+        Index("idx_conversation_messages_user_ts_id", "user_id", "timestamp", "id"),
     )
 
 
