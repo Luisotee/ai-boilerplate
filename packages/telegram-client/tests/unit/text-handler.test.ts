@@ -291,7 +291,8 @@ describe('handleTextMessage — reply images', () => {
       123,
       Buffer.from('png-bytes'),
       'image.png',
-      'Fire map'
+      'Fire map',
+      undefined
     );
   });
 
@@ -306,6 +307,8 @@ describe('handleTextMessage — reply images', () => {
     expect(ctx.reply).not.toHaveBeenCalled();
     expect(mockTextToSpeech).not.toHaveBeenCalled();
     expect(telegramApi.sendImage).toHaveBeenCalledTimes(1);
+    // The photo quotes the triggering message, as the text reply would have.
+    expect((telegramApi.sendImage as ReturnType<typeof vi.fn>).mock.calls[0][4]).toBe(42);
     expect(mockSendReaction).not.toHaveBeenCalled();
   });
 
@@ -319,7 +322,11 @@ describe('handleTextMessage — reply images', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await handleTextMessage(ctx as any, 'map?');
 
-    expect(telegramApi.sendText).toHaveBeenCalledWith(123, 'Fire map: https://m.example.com/a.png');
+    expect(telegramApi.sendText).toHaveBeenCalledWith(
+      123,
+      'Fire map: https://m.example.com/a.png',
+      undefined
+    );
     expect(mockSendReaction).not.toHaveBeenCalled();
   });
 });

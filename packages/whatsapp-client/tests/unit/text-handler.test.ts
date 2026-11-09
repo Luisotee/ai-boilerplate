@@ -484,7 +484,11 @@ describe('handleTextMessage — reply images', () => {
 
     const payloads = sock.sendMessage.mock.calls.map(([, p]) => p as Record<string, unknown>);
     expect(payloads[0]).toEqual({ text: 'Here is the map.' });
-    expect(payloads[1]).toEqual({ image: Buffer.from('png-bytes'), caption: 'Fire map' });
+    expect(payloads[1]).toEqual({
+      image: Buffer.from('png-bytes'),
+      mimetype: 'image/png',
+      caption: 'Fire map',
+    });
   });
 
   it('sends no empty text message for an images-only reply', async () => {

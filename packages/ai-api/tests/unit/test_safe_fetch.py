@@ -148,6 +148,12 @@ async def test_url_rejected_before_any_request(url, reason):
         "::ffff:10.0.0.1",  # IPv4-mapped private
         "64:ff9b::7f00:1",  # NAT64 of 127.0.0.1 (Python calls it global)
         "64:ff9b::a00:1",  # NAT64 of 10.0.0.1
+        "::127.0.0.1",  # IPv4-compatible loopback (Python calls it global)
+        "::10.0.0.1",  # IPv4-compatible private
+        "::169.254.169.254",  # IPv4-compatible metadata
+        "::ffff:0:127.0.0.1",  # SIIT of 127.0.0.1 (Python calls it global)
+        "::ffff:0:169.254.169.254",  # SIIT of the metadata address
+        "::",
     ],
 )
 async def test_non_public_address_blocked(address):
@@ -156,7 +162,17 @@ async def test_non_public_address_blocked(address):
         await fetch("https://evil.example.com/a.png", transport, {"evil.example.com": [address]})
 
 
-@pytest.mark.parametrize("literal", ["127.0.0.1", "[::1]", "169.254.169.254", "[::ffff:10.0.0.1]"])
+@pytest.mark.parametrize(
+    "literal",
+    [
+        "127.0.0.1",
+        "[::1]",
+        "169.254.169.254",
+        "[::ffff:10.0.0.1]",
+        "[::127.0.0.1]",
+        "[::ffff:0:169.254.169.254]",
+    ],
+)
 async def test_ip_literal_host_blocked(literal):
     transport, _ = recording_transport(never_called)
     with pytest.raises(ImageFetchError, match="not allowed"):
@@ -167,6 +183,61 @@ async def test_public_ip_literal_allowed():
     transport, seen = recording_transport(lambda r: image_response())
     await fetch(f"https://{PUBLIC_IP}/a.png", transport)
     assert seen[0].url.host == PUBLIC_IP
+
+
+@pytest.mark.parametrize("address", ["::93.184.216.34", "::ffff:0:93.184.216.34"])
+async def test_embedded_public_ipv4_allowed(address):
+    transport, seen = recording_transport(lambda r: image_response())
+    await fetch("https://e.example.com/a.png", transport, {"e.example.com": [address]})
+    assert len(seen) == 1
+
+
+async def test_ipv4_tried_first_then_next_address_on_connect_failure():
+    def handler(request):
+        if request.url.host == "93.184.216.34":
+            raise httpx.ConnectError("network is unreachable")
+        return image_response()
+
+    transport, seen = recording_transport(handler)
+    result = await fetch(
+        "https://dual.example.com/a.png",
+        transport,
+        {"dual.example.com": ["2606:4700::1111", "93.184.216.34", "93.184.216.34"]},
+    )
+    assert result.data == PNG
+    assert [r.url.host for r in seen] == ["93.184.216.34", "2606:4700::1111"]
+    assert all(r.headers["host"] == "dual.example.com" for r in seen)
+    assert all(r.extensions["sni_hostname"] == "dual.example.com" for r in seen)
+
+
+async def test_every_address_unreachable_is_a_generic_failure():
+    def handler(request):
+        raise httpx.ConnectError("network is unreachable")
+
+    transport, seen = recording_transport(handler)
+    with pytest.raises(ImageFetchError, match="download failed"):
+        await fetch(
+            "https://dual.example.com/a.png",
+            transport,
+            {"dual.example.com": ["2606:4700::1111", PUBLIC_IP]},
+        )
+    assert len(seen) == 2
+
+
+async def test_idn_host_sent_as_punycode():
+    transport, seen = recording_transport(lambda r: image_response())
+    await fetch("https://münchen.example/a.png", transport, {"xn--mnchen-3ya.example": [PUBLIC_IP]})
+    assert seen[0].headers["host"] == "xn--mnchen-3ya.example"
+    assert seen[0].extensions["sni_hostname"] == "xn--mnchen-3ya.example"
+
+
+async def test_unexpected_error_maps_to_image_fetch_error():
+    def handler(request):
+        raise ValueError("odd")
+
+    transport, _ = recording_transport(handler)
+    with pytest.raises(ImageFetchError, match="download failed"):
+        await fetch("https://a.example.com/a.png", transport, DNS)
 
 
 async def test_any_private_answer_blocks_even_with_a_public_one():
@@ -300,6 +371,13 @@ async def test_wrong_content_type_rejected(content_type):
     transport, _ = recording_transport(lambda r: image_response(PNG, content_type))
     with pytest.raises(ImageFetchError, match="not a JPEG or PNG"):
         await fetch("https://a.example.com/a.png", transport, DNS)
+
+
+@pytest.mark.parametrize("content_type", ["image/jpg", "image/pjpeg", "IMAGE/JPG"])
+async def test_jpeg_type_aliases_accepted(content_type):
+    transport, _ = recording_transport(lambda r: image_response(JPEG, content_type))
+    result = await fetch("https://a.example.com/a.jpg", transport, DNS)
+    assert result.mimetype == "image/jpeg"
 
 
 async def test_content_type_parameters_ignored():

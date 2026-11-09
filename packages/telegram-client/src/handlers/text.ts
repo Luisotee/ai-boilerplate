@@ -195,16 +195,25 @@ export async function handleTextMessage(
     }
 
     // Images last (sendPhoto with the bytes; captions max 1024 chars). Never throws.
+    // With no text sent (images-only reply), the first image quotes the
+    // triggering message, as the first text chunk would have.
     if (replyMedia) {
+      let quote: number | undefined = sentCount === 0 ? messageId : undefined;
       await sendReplyMedia(replyMedia.jobId, replyMedia.media, {
-        image: (buffer, item) =>
-          telegramApi.sendImage(
+        image: async (buffer, item) => {
+          await telegramApi.sendImage(
             chatId,
             buffer,
             item.mimetype === 'image/png' ? 'image.png' : 'image.jpg',
-            item.caption || undefined
-          ),
-        text: (fallback) => telegramApi.sendText(chatId, fallback),
+            item.caption || undefined,
+            quote
+          );
+          quote = undefined;
+        },
+        text: async (fallback) => {
+          await telegramApi.sendText(chatId, fallback, quote);
+          quote = undefined;
+        },
       });
     }
   } catch (error) {

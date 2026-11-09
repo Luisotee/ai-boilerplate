@@ -205,7 +205,11 @@ export async function handleTextMessage(
     if (replyMedia) {
       await sendReplyMedia(replyMedia.jobId, replyMedia.media, {
         image: (buffer, item) =>
-          sendSerialized(whatsappJid, { image: buffer, caption: item.caption || undefined }),
+          sendSerialized(whatsappJid, {
+            image: buffer,
+            mimetype: item.mimetype,
+            caption: item.caption || undefined,
+          }),
         text: (fallback) => sendSerialized(whatsappJid, { text: fallback }),
       });
     }
