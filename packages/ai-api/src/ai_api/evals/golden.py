@@ -58,7 +58,7 @@ CASES = [
         "desligar_audio",
         EvalInput("para de me mandar áudio, prefiro texto"),
         ExpectedBehaviour(
-            tools=[ExpectedCall("update_tts_settings", {"enabled": False})],
+            tools=[ExpectedCall("settings", {"action": "tts", "enabled": False})],
             oracle_reply="Pronto, desliguei as respostas em áudio.",
         ),
     ),
@@ -66,7 +66,7 @@ CASES = [
         "transcricao_em_espanhol",
         EvalInput("meus áudios vão ser em espanhol a partir de agora, ajusta a transcrição"),
         ExpectedBehaviour(
-            tools=[ExpectedCall("update_stt_settings", {"language": "es"})],
+            tools=[ExpectedCall("settings", {"action": "stt", "language": "es"})],
             oracle_reply="Feito: vou transcrever seus áudios em espanhol.",
         ),
     ),
@@ -74,7 +74,7 @@ CASES = [
         "ver_configuracoes",
         EvalInput("quais são minhas configurações?"),
         ExpectedBehaviour(
-            tools=[ExpectedCall("get_user_settings")],
+            tools=[ExpectedCall("settings", {"action": "show"})],
             oracle_reply="Áudio desligado e transcrição automática.",
         ),
     ),
@@ -82,7 +82,7 @@ CASES = [
         "parar_avisos",
         EvalInput("não quero mais receber essas novidades de vocês"),
         ExpectedBehaviour(
-            tools=[ExpectedCall("set_broadcast_subscription", {"subscribed": False})],
+            tools=[ExpectedCall("settings", {"action": "announcements", "enabled": False})],
             oracle_reply="Pronto, você não vai mais receber os avisos.",
         ),
     ),
@@ -124,7 +124,7 @@ CASES = [
         "grupo_admin_desliga_audio",
         EvalInput("desliga o áudio aqui no grupo", chat="group", is_group_admin=True),
         ExpectedBehaviour(
-            tools=[ExpectedCall("update_tts_settings", {"enabled": False})],
+            tools=[ExpectedCall("settings", {"action": "tts", "enabled": False})],
             forbidden_tools=["clean_user_data"],
             oracle_reply="Pronto, desliguei o áudio no grupo.",
         ),

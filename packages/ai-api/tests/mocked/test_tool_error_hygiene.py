@@ -35,14 +35,14 @@ class TestSafeRollback:
         db.rollback.assert_called_once()
 
     async def test_tool_still_returns_generic_message_when_rollback_fails(self):
-        from ai_api.agent.tools.settings import update_tts_settings
+        from ai_api.agent.tools.settings import settings
 
         ctx = _ctx()
         ctx.deps.db.commit.side_effect = RuntimeError(SECRET)
         ctx.deps.db.rollback.side_effect = RuntimeError("connection is closed")
         with patch("ai_api.agent.tools.settings.get_or_create_preferences") as mock_prefs:
             mock_prefs.return_value = MagicMock(tts_enabled=False, tts_language="en")
-            result = await update_tts_settings(ctx, enabled=True)
+            result = await settings(ctx, "tts", enabled=True)
 
         assert result == "Failed to update TTS settings. Please try again."
 

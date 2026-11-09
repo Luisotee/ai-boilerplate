@@ -72,16 +72,15 @@ async def update_core_memory(ctx: RunContext[AgentDeps], content: str) -> str:
     core memory is shown in the system prompt — use it as the base when
     adding or modifying notes.
 
-    Use markdown formatting for organization (headings, bullets, etc.).
-    Keep it concise — max ~2000 characters.
+    Save lasting facts the user shares (name, place, work, family, preferences
+    about how you answer) without announcing it unless they asked you to
+    remember. Skip transient or trivial things. Short bullets, max ~2000 characters.
+    To forget everything, pass an empty string (in a group only an admin may clear it).
 
     Args:
         ctx: Run context with database and user info
         content: The full new markdown content for the core memory document.
             Must include ALL information you want to preserve.
-
-    Returns:
-        A short confirmation with the new size and the limit
     """
     logger.info("=" * 80)
     logger.info("TOOL CALLED: update_core_memory")

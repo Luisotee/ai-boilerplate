@@ -164,7 +164,7 @@ Fixtures, factories and the integration-test setup: `docs/testing.md`.
 
 Step lists: `docs/workflows.md`. Baileys handler, Cloud handler and Baileys multipart-route workflows: the matching package's `CLAUDE.md`.
 
-- **New agent tool** (use the `/agent-tool` skill): `async def tool_name(ctx: RunContext[AgentDeps], ...params) -> str` with `@agent.tool` in `agent/tools/`, imported in `agent/tools/__init__.py` (or the decorator never registers it), described in the system prompt in `agent/core.py`, with mocked tests in `tests/mocked/`
+- **New agent tool** (use the `/agent-tool` skill): `async def tool_name(ctx: RunContext[AgentDeps], ...params) -> str` with `@agent.tool` in `agent/tools/`, imported in `agent/tools/__init__.py` (or the decorator never registers it), described by its docstring (no `Returns:`, no prompt catalogue: `agent/CLAUDE.md` "Prompt surface"), mocked tests in `tests/mocked/`
   - Exception handlers that touch `ctx.deps.db` must call `safe_rollback(ctx.deps.db)` (`agent/tools/_db.py`), because all tools share one DB session per run and a failed flush/commit would make later tool calls hit `PendingRollbackError`
   - Error returns must be generic English, never raw `str(e)`, because SQLAlchemy/httpx exceptions can leak hostnames, SQL or internal URLs to the user; log details with `logger.error(..., exc_info=True)`. Pinned by `tests/mocked/test_tool_error_hygiene.py`
 - **New API endpoint** (use the `/api-route` skill): route in `routes/*.py` with `APIRouter` (`limiter` from `deps.py`), schemas in `schemas.py`, router registered in `main.py` via `app.include_router()`, integration tests in `tests/integration/`

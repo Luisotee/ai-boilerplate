@@ -82,11 +82,11 @@ async def test_a_group_admin_can_clear_the_memory():
     assert mem.content == ""
 
 
-async def test_prompt_documents_the_clear_path():
-    from ai_api.agent.core import DEFAULT_SYSTEM_PROMPT
+async def test_tool_documents_the_clear_path():
+    from ai_api.agent.core import agent
 
-    prompt = " ".join(DEFAULT_SYSTEM_PROMPT.split())
-    assert "to forget everything, pass an empty string" in prompt
+    description = agent._function_toolset.tools["update_core_memory"].tool_def.description
+    assert "To forget everything, pass an empty string" in " ".join(description.split())
 
 
 GROUP_DOC = "## Group\n- meets on Fridays at 18h\n- treasurer is Ana\n- dues are R$10"

@@ -28,9 +28,6 @@ async def search_conversation_history(ctx: RunContext[AgentDeps], search_query: 
     Args:
         ctx: Run context with database and user info
         search_query: The topic or question to search for in past messages
-
-    Returns:
-        Formatted string with relevant past messages or error message
     """
     logger.info("=" * 80)
     logger.info("🔍 TOOL CALLED: search_conversation_history")
@@ -123,9 +120,6 @@ async def search_knowledge_base(ctx: RunContext[AgentDeps], search_query: str) -
     Args:
         ctx: Run context with database and embedding service
         search_query: The question or topic to search for in documents
-
-    Returns:
-        Formatted string with relevant document passages and citations
     """
     logger.info("=" * 80)
     logger.info("📚 TOOL CALLED: search_knowledge_base")

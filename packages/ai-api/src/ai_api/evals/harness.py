@@ -183,7 +183,7 @@ def stubbed_environment(inputs: EvalInput) -> Iterator[SimpleNamespace]:
         "ai_api.agent.tools.settings.handle_clean_command": MagicMock(
             return_value="Deleted 12 messages."
         ),
-        "ai_api.agent.tools.broadcast.set_broadcast_opt_out": MagicMock(return_value=False),
+        "ai_api.agent.tools.settings.set_broadcast_opt_out": MagicMock(return_value=False),
         "ai_api.agent.tools.history.get_conversation_messages": MagicMock(return_value=[]),
         "ai_api.agent.tools.web.DDGS": _FakeDDGS,
         "ai_api.agent.tools.utility.wikipediaapi": _fake_wikipedia(),

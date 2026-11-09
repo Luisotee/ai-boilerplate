@@ -2,7 +2,7 @@
 name: agent-tool
 description: >-
   Scaffolds new Pydantic AI agent tools with @agent.tool decorator,
-  agent/tools/__init__.py registration, system prompt updates in agent/core.py,
+  agent/tools/__init__.py registration, a docstring-first description,
   AgentDeps wiring, and error hygiene. Use when adding or modifying tools for the
   AI agent.
 ---
@@ -31,9 +31,6 @@ async def tool_name(ctx: RunContext[AgentDeps], param: str) -> str:
     Args:
         ctx: Run context with dependencies
         param: Description of parameter
-
-    Returns:
-        String message describing outcome or retrieved information
     """
     # 1. Enforce group admin authorization if modifying group-scoped state
     # refusal = group_admin_refusal(ctx, "update this setting")
@@ -80,22 +77,9 @@ Importing the module registers the `@agent.tool` decorator with the agent instan
 from . import your_module_name
 ```
 
-## Step 3: Update Agent System Prompt
+## Step 3: Describe the tool in its docstring, not the system prompt
 
-Edit `packages/ai-api/src/ai_api/agent/core.py`.
-Add the tool description into the system prompt under the appropriate category:
-- Search Tools (1-2)
-- Web Tools (3-4)
-- WhatsApp Action Tools (5-8)
-- Utility Tools (9-12)
-- Settings & Management Tools (13-16)
-
-Format:
-```markdown
-N. **tool_name** - One-line description
-   Use for: specific use cases
-   Do NOT use for: things to avoid
-```
+The docstring IS the tool's description to the model (pydantic-ai sends it as the schema in every model request), so make it short and precise: what it does, when to use it, each argument. `DEFAULT_SYSTEM_PROMPT` in `agent/core.py` has no tool catalogue; add a one-line rule there only when the new tool competes with an existing one (e.g. "current facts: web_search; stable facts: wikipedia_lookup"). No `Returns:` section (it becomes a `<returns>` block the model never needs). If the tool can't work in some chats (a client, private vs group, a flag), hide it with a `prepare` hook (`agent/tools/_prepare.py`, compose with `all_of`). Then regenerate the prompt snapshot and commit it: `cd packages/ai-api && UPDATE_PROMPT_SURFACE=1 uv run pytest tests/mocked/test_prompt_surface.py`. Details: `packages/ai-api/src/ai_api/agent/CLAUDE.md` "Prompt surface"
 
 ## Step 4: Check `AgentDeps` Requirements
 

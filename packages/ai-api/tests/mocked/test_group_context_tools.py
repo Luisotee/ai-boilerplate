@@ -102,15 +102,37 @@ def group_row():
 
 
 class TestFeatureFlag:
+    @staticmethod
+    def _ctx(jid="5511999999999@s.whatsapp.net", client_id=None):
+        ctx = MagicMock()
+        ctx.deps.whatsapp_jid = jid
+        ctx.deps.client_id = client_id
+        return ctx
+
     async def test_tools_hidden_when_disabled(self, _env_runtime_config):
         _env_runtime_config.get.side_effect = lambda key: False
         tool_def = MagicMock()
-        assert await shared_group_tools_enabled(MagicMock(), tool_def) is None
+        assert await shared_group_tools_enabled(self._ctx(), tool_def) is None
 
     async def test_tools_visible_when_enabled(self, _env_runtime_config):
         _env_runtime_config.get.side_effect = lambda key: True
         tool_def = MagicMock()
-        assert await shared_group_tools_enabled(MagicMock(), tool_def) is tool_def
+        assert await shared_group_tools_enabled(self._ctx(), tool_def) is tool_def
+
+    async def test_tools_hidden_inside_a_group_chat(self, _env_runtime_config):
+        _env_runtime_config.get.side_effect = lambda key: True
+        ctx = self._ctx(jid="120363000000000000@g.us")
+        assert await shared_group_tools_enabled(ctx, MagicMock()) is None
+
+    async def test_tools_hidden_on_the_cloud_api(self, _env_runtime_config):
+        _env_runtime_config.get.side_effect = lambda key: True
+        assert await shared_group_tools_enabled(self._ctx(client_id="cloud"), MagicMock()) is None
+
+    async def test_tools_visible_on_telegram_private_chats(self, _env_runtime_config):
+        _env_runtime_config.get.side_effect = lambda key: True
+        tool_def = MagicMock()
+        ctx = self._ctx(jid="tg:12345", client_id="telegram")
+        assert await shared_group_tools_enabled(ctx, tool_def) is tool_def
 
     def test_default_is_off(self):
         from ai_api.config import Settings

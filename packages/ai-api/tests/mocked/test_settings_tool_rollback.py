@@ -6,12 +6,7 @@ state and poisons subsequent tool calls that share the session.
 
 from unittest.mock import MagicMock, patch
 
-from ai_api.agent.tools.settings import (
-    clean_user_data,
-    get_user_settings,
-    update_stt_settings,
-    update_tts_settings,
-)
+from ai_api.agent.tools.settings import clean_user_data, settings
 
 
 def _make_ctx():
@@ -29,7 +24,7 @@ class TestUpdateTtsSettingsRollback:
 
         with patch("ai_api.agent.tools.settings.get_or_create_preferences") as mock_prefs:
             mock_prefs.return_value = MagicMock(tts_enabled=False, tts_language="en")
-            result = await update_tts_settings(ctx, enabled=True)
+            result = await settings(ctx, "tts", enabled=True)
 
         ctx.deps.db.rollback.assert_called_once()
         assert result == "Failed to update TTS settings. Please try again."
@@ -39,7 +34,7 @@ class TestUpdateTtsSettingsRollback:
         ctx = _make_ctx()
         with patch("ai_api.agent.tools.settings.get_or_create_preferences") as mock_prefs:
             mock_prefs.return_value = MagicMock(tts_enabled=False, tts_language="en")
-            result = await update_tts_settings(ctx, enabled=True)
+            result = await settings(ctx, "tts", enabled=True)
 
         ctx.deps.db.commit.assert_called_once()
         ctx.deps.db.rollback.assert_not_called()
@@ -53,7 +48,7 @@ class TestUpdateSttSettingsRollback:
 
         with patch("ai_api.agent.tools.settings.get_or_create_preferences") as mock_prefs:
             mock_prefs.return_value = MagicMock(stt_language=None)
-            result = await update_stt_settings(ctx, language="en")
+            result = await settings(ctx, "stt", language="en")
 
         ctx.deps.db.rollback.assert_called_once()
         assert result == "Failed to update STT settings. Please try again."
@@ -66,7 +61,7 @@ class TestUpdateSttSettingsRollback:
 
         with patch("ai_api.agent.tools.settings.get_or_create_preferences") as mock_prefs:
             mock_prefs.return_value = MagicMock(stt_language="en")
-            result = await update_stt_settings(ctx, language="auto")
+            result = await settings(ctx, "stt", language="auto")
 
         ctx.deps.db.rollback.assert_called_once()
         assert result == "Failed to update STT settings. Please try again."
@@ -81,7 +76,7 @@ class TestGetUserSettingsRollback:
 
         with patch("ai_api.agent.tools.settings.get_or_create_preferences") as mock_prefs:
             mock_prefs.side_effect = RuntimeError("integrity error")
-            result = await get_user_settings(ctx)
+            result = await settings(ctx, "show")
 
         ctx.deps.db.rollback.assert_called_once()
         assert result == "Failed to retrieve settings. Please try again."
@@ -94,7 +89,7 @@ class TestGetUserSettingsRollback:
         ):
             mock_prefs.return_value = MagicMock()
             mock_fmt.return_value = "settings-blob"
-            result = await get_user_settings(ctx)
+            result = await settings(ctx, "show")
 
         ctx.deps.db.rollback.assert_not_called()
         assert result == "settings-blob"

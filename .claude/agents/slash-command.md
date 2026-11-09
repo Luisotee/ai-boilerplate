@@ -104,7 +104,7 @@ Edit `packages/ai-api/src/ai_api/routes/chat.py` — the `/chat/enqueue` endpoin
 
 ### Step 6 (optional): Add parallel agent tool
 
-Some commands exist in BOTH places — as slash commands AND as agent tools. For example, settings are available via `/settings` command and also via the `get_user_settings` agent tool.
+Some commands exist in BOTH places — as slash commands AND as agent tools. For example, settings are available via `/settings` command and also via the `settings` agent tool (`action="show"`).
 
 If the user wants the AI agent to also handle this functionality conversationally, inform them that a corresponding agent tool should be created (using the agent-tool subagent or manually).
 

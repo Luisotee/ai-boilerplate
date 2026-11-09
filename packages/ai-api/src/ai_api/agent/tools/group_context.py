@@ -51,8 +51,16 @@ CLOUD_UNSUPPORTED = (
 async def shared_group_tools_enabled(
     ctx: RunContext[AgentDeps], tool_def: ToolDefinition
 ) -> ToolDefinition | None:
-    """`prepare` hook: hide both tools unless SHARED_GROUP_TOOLS_ENABLED is on."""
-    return tool_def if runtime_config.get("shared_group_tools_enabled") else None
+    """`prepare` hook: show both tools only where they can work.
+
+    That is: SHARED_GROUP_TOOLS_ENABLED is on, the chat is private (inside a
+    group both refuse), and the client isn't the Cloud API (no group context).
+    """
+    if not runtime_config.get("shared_group_tools_enabled"):
+        return None
+    if is_group_jid(ctx.deps.whatsapp_jid) or platform_of(ctx.deps.client_id) == "cloud":
+        return None
+    return tool_def
 
 
 def _match_shared_group(
@@ -147,10 +155,6 @@ async def get_group_context(
         search_query: Optional topic to semantically search within the group.
         limit: Optional cap on how many recent messages to return (transcript mode).
         since_hours: Optional window — only messages from the last N hours.
-
-    Returns:
-        A list of shared groups, a group transcript, search results, or an
-        explanatory message.
     """
     deps = ctx.deps
     logger.info(
@@ -287,9 +291,6 @@ async def send_group_message(
         message: The message text to relay into the group.
         sender_name: The requester's name for the attribution line (from memory or
             this conversation). If you don't know it, ask before sending.
-
-    Returns:
-        A confirmation that the message was sent, or an explanatory message.
     """
     deps = ctx.deps
     logger.info(

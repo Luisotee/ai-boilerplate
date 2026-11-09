@@ -338,7 +338,7 @@ def handle_clean_command(
 def set_broadcast_opt_out(db: Session, user_id: str, opt_out: bool) -> bool | None:
     """Set a chat's broadcast opt-out flag; returns the previous value (None = no user).
 
-    Shared by `/broadcast` and the `set_broadcast_subscription` agent tool. On a
+    Shared by `/broadcast` and the `settings` agent tool (`announcements`). On a
     group row it is the group's flag — callers enforce the admin check.
     """
     user = db.get(User, user_id)
