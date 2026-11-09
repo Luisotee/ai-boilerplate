@@ -29,11 +29,11 @@ from .delivery import (
 )
 from .manager import (
     GROUP_NAME,
-    HEARTBEAT_INTERVAL_SECONDS,
     acknowledge_message,
     claim_orphaned_chat_entries,
+    forget_consumer_group,
     read_stream_messages,
-    refresh_heartbeat,
+    start_heartbeat_thread,
     stream_entry_time_ms,
 )
 from .processor import process_chat_job_direct
@@ -152,6 +152,7 @@ async def process_user_stream(redis: Redis, user_id: str, running_flag: dict):
 
         except Exception as e:
             errors += 1
+            forget_consumer_group(redis, user_id)
             logger.error(f"Error in stream processing for user {user_id}: {e}")
             if errors >= MAX_CONSECUTIVE_STREAM_ERRORS:
                 logger.error(f"Giving up on the stream of user {user_id} until the next cycle")
@@ -266,21 +267,21 @@ async def _process_run(redis: Redis, user_id: str, run: list[tuple[str, dict]]) 
         return
     try:
         pending = []
+        jobs = []
         for message_id, data in run:
-            if await _already_finished(redis, data):
-                logger.info(f"Chat job in entry {message_id} already finished; acking only")
-                await _push_unconfirmed_late_reply(redis, message_id, data)
+            if await _finished_already(redis, message_id, data):
                 continue
             try:
-                _job_kwargs(message_id, data)
+                jobs.append(_job_kwargs(message_id, data))
             except Exception as invalid:
                 logger.error(f"Dropping malformed chat entry {message_id}: {invalid}")
+                await _fail_dropped_job(redis, data)
                 continue
             pending.append((message_id, data))
         if len(pending) == 1:
             await _run_entry(redis, user_id, *pending[0])
         elif pending:
-            await _process_merged_run(redis, user_id, pending)
+            await _process_merged_run(redis, user_id, pending, jobs)
     except Exception as run_error:
         logger.error(
             f"Error processing a merged run of {len(run)} jobs for user {user_id}: {run_error}",
@@ -294,14 +295,17 @@ async def _process_run(redis: Redis, user_id: str, run: list[tuple[str, dict]]) 
                 logger.error(f"Failed to acknowledge message {message_id}: {ack_error}")
 
 
-async def _process_merged_run(redis: Redis, user_id: str, run: list[tuple[str, dict]]) -> None:
+async def _process_merged_run(
+    redis: Redis, user_id: str, run: list[tuple[str, dict]], jobs: list[dict] | None = None
+) -> None:
     """Answer several jobs of one sender with one agent run.
 
     The last job carries the reply (its message is the one reactions and tools
     refer to, and its poller started last); the earlier ones are closed as
     merged and their clients send nothing.
     """
-    jobs = [_job_kwargs(message_id, data) for message_id, data in run]
+    if jobs is None:
+        jobs = [_job_kwargs(message_id, data) for message_id, data in run]
     carrier = jobs[-1]
     absorbed = [job["job_id"] for job in jobs[:-1]]
 
@@ -357,6 +361,30 @@ async def _already_finished(redis: Redis, data: dict) -> bool:
     return True
 
 
+async def _finished_already(redis: Redis, message_id: str, data: dict) -> bool:
+    """True (after pushing an undelivered late reply) when the entry's job
+    already ran to the end, so the caller only acks it."""
+    if not await _already_finished(redis, data):
+        return False
+    logger.info(f"Chat job in entry {message_id} already finished; acking only")
+    await _push_unconfirmed_late_reply(redis, message_id, data)
+    return True
+
+
+async def _fail_dropped_job(redis: Redis, data: dict) -> None:
+    """Mark a malformed entry's job failed (when its id is readable), so its
+    poller reports an error instead of timing out and promising a reply."""
+    job_id = _safe_decode(data.get(b"job_id"))
+    if not job_id:
+        return
+    try:
+        await set_job_metadata(
+            redis, job_id, {"status": "failed", "total_chunks": 0, "error": "malformed job"}
+        )
+    except Exception:
+        logger.error(f"[Job {job_id}] Failed to mark a dropped job failed", exc_info=True)
+
+
 async def _push_unconfirmed_late_reply(redis: Redis, message_id: str, data: dict) -> None:
     """A finished, late job whose reply nobody delivered (the worker died
     between writing the result and pushing it): push it now. The client
@@ -393,10 +421,7 @@ async def _push_unconfirmed_late_reply(redis: Redis, message_id: str, data: dict
 async def _process_entry(redis: Redis, user_id: str, message_id: str, data: dict) -> None:
     """Run one stream entry and ack it, whatever happens (no infinite retries)."""
     try:
-        if not is_scheduled_entry(data) and await _already_finished(redis, data):
-            logger.info(f"Chat job in entry {message_id} already finished; acking only")
-            await _push_unconfirmed_late_reply(redis, message_id, data)
-        else:
+        if is_scheduled_entry(data) or not await _finished_already(redis, message_id, data):
             await _run_entry(redis, user_id, message_id, data)
     except Exception as msg_error:
         logger.error(
@@ -570,7 +595,7 @@ async def run_stream_consumer(redis: Redis):
     """
     running_flag = {"running": True}
     logger.info("🚀 Starting Redis Streams consumer")
-    heartbeat = asyncio.create_task(_heartbeat_loop(redis), name="chat-consumer-heartbeat")
+    heartbeat = start_heartbeat_thread()
 
     try:
         while running_flag["running"]:
@@ -609,15 +634,4 @@ async def run_stream_consumer(redis: Redis):
         logger.info("Shutting down consumer...")
         running_flag["running"] = False
     finally:
-        heartbeat.cancel()
-
-
-async def _heartbeat_loop(redis: Redis) -> None:
-    """Keep this worker's liveness key fresh, so other workers never take over
-    the jobs it is running (and do take them over once it is gone)."""
-    while True:
-        try:
-            await refresh_heartbeat(redis)
-        except Exception as e:
-            logger.warning(f"Failed to refresh the chat consumer heartbeat: {e}")
-        await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
+        heartbeat.set()

@@ -160,6 +160,8 @@ async def test_malformed_entry_does_not_kill_the_burst(redis):
     assert processor.await_args.kwargs["job_id"] == "y"
     assert processor.await_args.kwargs["absorbed_job_ids"] == ["x"]
     assert (await redis.xpending(STREAM, GROUP_NAME))["pending"] == 0
+    # Its poller reports a failure instead of promising a reply
+    assert json.loads(await redis.get("job:meta:bad"))["status"] == "failed"
 
 
 async def test_single_survivor_still_expires(redis):

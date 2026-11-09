@@ -12,12 +12,16 @@ Two kinds of stream:
 import json
 import os
 import socket
+import threading
 import uuid
+import weakref
 from datetime import UTC, datetime
 
+import redis as sync_redis
 from redis.asyncio import Redis
 from redis.exceptions import WatchError
 
+from ..config import settings
 from ..logger import logger
 
 # Constants
@@ -29,17 +33,20 @@ CONSUMER_ID = f"worker-{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:8
 
 # Liveness of chat consumers. Each worker refreshes its key while it runs; a
 # pending chat entry whose consumer has no key is an orphan of a dead worker.
+# The key is refreshed from a thread (start_heartbeat_thread), so an event loop
+# blocked by a slow sync DB call doesn't make a live worker look dead.
 HEARTBEAT_KEY_PREFIX = "chat_worker:alive:"
 HEARTBEAT_TTL_SECONDS = 30
 HEARTBEAT_INTERVAL_SECONDS = 10
 # Another worker's pending entry is taken over only once it has been idle this
-# long AND that worker's heartbeat is gone. The idle floor covers a worker that
-# is alive but missed its heartbeat (an event loop blocked by a slow DB call,
-# or a worker from before heartbeats existed during an overlapping deploy): it
-# exceeds a worst-case agent run, so a job still in flight is never run twice.
-# It also makes XCLAIM race-safe: the first claim resets the idle time, so a
-# second worker claiming the same orphan gets nothing.
-ORPHAN_CLAIM_MIN_IDLE_MS = 300_000
+# long AND that worker's heartbeat is gone. It makes XCLAIM race-safe: the
+# first claim resets the idle time, so a second worker claiming the same orphan
+# gets nothing.
+ORPHAN_CLAIM_MIN_IDLE_MS = 10_000
+
+# Streams whose consumer group this process already created (per client), so
+# XGROUP CREATE runs once per stream instead of every round.
+_known_groups: "weakref.WeakKeyDictionary[Redis, set[str]]" = weakref.WeakKeyDictionary()
 
 
 async def add_message_to_stream(redis: Redis, user_id: str, job_data: dict) -> str:
@@ -73,11 +80,22 @@ async def ensure_consumer_group(redis: Redis, user_id: str):
         user_id: User ID to create consumer group for
     """
     stream_key = f"stream:user:{user_id}"
+    known = _known_groups.setdefault(redis, set())
+    if stream_key in known:
+        return
     try:
         await redis.xgroup_create(stream_key, GROUP_NAME, id="0", mkstream=True)
     except Exception as e:
         if "BUSYGROUP" not in str(e):
             logger.error(f"Error creating group: {e}")
+            return
+    known.add(stream_key)
+
+
+def forget_consumer_group(redis: Redis, user_id: str) -> None:
+    """Drop the cached "group exists" for a stream (after an error on it, e.g.
+    the stream was deleted), so the next round creates the group again."""
+    _known_groups.get(redis, set()).discard(f"stream:user:{user_id}")
 
 
 async def read_stream_messages(
@@ -130,9 +148,33 @@ def stream_entry_time_ms(message_id: str) -> int | None:
         return None
 
 
-async def refresh_heartbeat(redis: Redis) -> None:
-    """Mark this worker's chat consumer as alive for HEARTBEAT_TTL_SECONDS."""
-    await redis.set(f"{HEARTBEAT_KEY_PREFIX}{CONSUMER_ID}", "1", ex=HEARTBEAT_TTL_SECONDS)
+def start_heartbeat_thread(client: "sync_redis.Redis | None" = None) -> threading.Event:
+    """Refresh this worker's heartbeat from a daemon thread, independent of the
+    event loop. Set the returned event to stop it; the key is then deleted, so
+    other workers take over this worker's leftovers at once."""
+    client = client or sync_redis.Redis(
+        host=settings.redis_host,
+        port=settings.redis_port,
+        db=settings.redis_db,
+        password=settings.redis_password,
+    )
+    key = f"{HEARTBEAT_KEY_PREFIX}{CONSUMER_ID}"
+    stop = threading.Event()
+
+    def beat() -> None:
+        while not stop.is_set():
+            try:
+                client.set(key, "1", ex=HEARTBEAT_TTL_SECONDS)
+            except Exception as e:
+                logger.warning(f"Failed to refresh the chat consumer heartbeat: {e}")
+            stop.wait(HEARTBEAT_INTERVAL_SECONDS)
+        try:
+            client.delete(key)
+        except Exception:
+            pass
+
+    threading.Thread(target=beat, name="chat-consumer-heartbeat", daemon=True).start()
+    return stop
 
 
 async def is_consumer_alive(redis: Redis, consumer: str) -> bool:
@@ -178,13 +220,22 @@ async def claim_orphaned_chat_entries(
     ):
         return None  # too recent to be sure its worker is gone; retry later
 
-    ids = [_decode(p["message_id"]) for p in pending]
     # This worker's own leftovers (a failed ack) need no idle floor: per-user
     # processing is sequential here, so none of them is in flight.
-    min_idle = 0 if owners == {CONSUMER_ID} else ORPHAN_CLAIM_MIN_IDLE_MS
-    claimed = await redis.xclaim(stream_key, GROUP_NAME, CONSUMER_ID, min_idle, ids)
+    own = [_decode(p["message_id"]) for p in pending if _decode(p["consumer"]) == CONSUMER_ID]
+    foreign = [_decode(p["message_id"]) for p in pending if _decode(p["consumer"]) != CONSUMER_ID]
+    claimed = []
+    if own:
+        claimed += await redis.xclaim(stream_key, GROUP_NAME, CONSUMER_ID, 0, own) or []
+    if foreign:
+        claimed += (
+            await redis.xclaim(
+                stream_key, GROUP_NAME, CONSUMER_ID, ORPHAN_CLAIM_MIN_IDLE_MS, foreign
+            )
+            or []
+        )
     out: list[tuple[str, dict[bytes, bytes]]] = []
-    for message_id, data in claimed or []:
+    for message_id, data in claimed:
         mid = _decode(message_id)
         if not data:  # trimmed from the stream (maxlen); nothing left to run
             await redis.xack(stream_key, GROUP_NAME, mid)

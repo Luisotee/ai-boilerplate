@@ -143,10 +143,82 @@ async def test_failed_job_is_still_acked(redis):
     assert (await redis.xpending(STREAM, GROUP_NAME))["pending"] == 0
 
 
-async def test_heartbeat_marks_this_worker_alive(redis):
-    await manager.refresh_heartbeat(redis)
+def test_heartbeat_thread_keeps_this_worker_alive_until_stopped():
+    """The key is refreshed from a thread (a blocked event loop can't stall it)
+    and deleted on a clean stop, so the next worker takes over at once."""
+    import threading
+
+    server = fakeredis.FakeServer()
+    client = fakeredis.FakeRedis(server=server)
+    key = f"{manager.HEARTBEAT_KEY_PREFIX}{manager.CONSUMER_ID}"
+    stop = manager.start_heartbeat_thread(client)
+    try:
+        for _ in range(100):
+            if client.exists(key):
+                break
+            threading.Event().wait(0.01)
+        assert client.exists(key)
+        assert 0 < client.ttl(key) <= manager.HEARTBEAT_TTL_SECONDS
+    finally:
+        stop.set()
+    for _ in range(100):
+        if not client.exists(key):
+            break
+        threading.Event().wait(0.01)
+    assert not client.exists(key)
+
+
+async def test_heartbeat_key_means_alive(redis):
+    await redis.set(f"{manager.HEARTBEAT_KEY_PREFIX}{manager.CONSUMER_ID}", "1", ex=30)
     assert await manager.is_consumer_alive(redis, manager.CONSUMER_ID)
     assert not await manager.is_consumer_alive(redis, "worker-gone")
+
+
+async def test_own_recent_leftover_keeps_its_place_next_to_a_dead_workers_entry(redis):
+    """Own leftovers are claimed without the idle floor, a dead worker's with it."""
+    import asyncio
+
+    await redis.xadd(STREAM, _job("old"))
+    await _deliver_to(redis, "worker-dead")
+    await asyncio.sleep(0.1)
+    await redis.xadd(STREAM, _job("mine"))
+    await _deliver_to(redis, manager.CONSUMER_ID)  # e.g. a failed ack, moments ago
+    await redis.xadd(STREAM, _job("new"))
+
+    merged: list[str] = []
+
+    async def merged_run(**kwargs):
+        merged.extend([*kwargs["absorbed_job_ids"], kwargs["job_id"]])
+
+    with (
+        patch.object(manager, "ORPHAN_CLAIM_MIN_IDLE_MS", 50),
+        patch.object(consumer_module, "process_chat_job_direct", side_effect=merged_run),
+    ):
+        ran = await _run_user_stream(redis)
+
+    # The two recovered entries run first (merged: same sender), then the new one
+    assert merged + ran == ["old", "mine", "new"]
+
+
+async def test_consumer_group_is_created_once_per_stream():
+    client = fakeredis.FakeAsyncRedis()
+    real_create = client.xgroup_create
+    calls = []
+
+    async def create(*args, **kwargs):
+        calls.append(args)
+        return await real_create(*args, **kwargs)
+
+    try:
+        with patch.object(client, "xgroup_create", create):
+            await manager.ensure_consumer_group(client, "u9")
+            await manager.ensure_consumer_group(client, "u9")
+            assert len(calls) == 1
+            manager.forget_consumer_group(client, "u9")
+            await manager.ensure_consumer_group(client, "u9")
+            assert len(calls) == 2
+    finally:
+        await client.aclose()
 
 
 def test_consumer_id_is_unique_per_process_start():
