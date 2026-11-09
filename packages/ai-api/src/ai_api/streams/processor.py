@@ -43,6 +43,7 @@ async def process_chat_job_direct(
     sender_name: str | None = None,
     client_id: str | None = None,
     is_group_admin: bool | None = None,
+    run_user_message_ids: list[str] | None = None,
 ) -> dict:
     """
     Process a chat message asynchronously (one Redis Streams job).
@@ -71,6 +72,8 @@ async def process_chat_job_direct(
         document_path: Path to the document file (optional)
         document_filename: Original filename of the document (optional)
         sender_name: Sender's display name for group messages (optional)
+        run_user_message_ids: Every saved user message this run answers, oldest
+            first (several for a merged burst); defaults to [user_message_id]
 
     Returns:
         Dict with processing result including success status, job_id, chunk count
@@ -96,7 +99,17 @@ async def process_chat_job_direct(
         try:
             # Step 1: Get conversation history from PostgreSQL
             logger.info(f"[Job {job_id}] Fetching conversation history...")
-            history = get_conversation_history(db, whatsapp_jid, conversation_type)
+            # The messages being answered were saved by /chat/enqueue before the
+            # job ran; they go to the model as the prompt, so keep them (and
+            # anything saved after them) out of the history.
+            answered_ids = run_user_message_ids or [user_message_id]
+            history = get_conversation_history(
+                db,
+                whatsapp_jid,
+                conversation_type,
+                before_message_id=answered_ids[0],
+                exclude_ids=answered_ids,
+            )
             message_history = format_message_history(history) if history else None
             logger.info(
                 f"[Job {job_id}] Retrieved {len(history) if history else 0} messages from history"
@@ -195,7 +208,8 @@ async def process_chat_job_direct(
                 db=db,
                 user_id=user_id,
                 whatsapp_jid=whatsapp_jid,
-                recent_message_ids=[str(msg.id) for msg in history] if history else [],
+                # Also the answered messages, so a search never returns them.
+                recent_message_ids=[str(msg.id) for msg in history or []] + list(answered_ids),
                 embedding_service=embedding_service,
                 http_client=http_client,
                 whatsapp_client=whatsapp_client,
