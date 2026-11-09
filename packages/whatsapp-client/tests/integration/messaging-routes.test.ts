@@ -17,9 +17,12 @@ import type { FastifyInstance } from 'fastify';
 // Mock the Baileys state service
 // sendSerialized forwards to the mocked socket, so the routes' sendMessage
 // payloads can still be asserted on mockSocket.sendMessage.
-vi.mock('../../src/services/baileys.js', () => {
+vi.mock('../../src/services/baileys.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/services/baileys.js')>();
   const getBaileysSocket = vi.fn();
   return {
+    SendTimeoutError: actual.SendTimeoutError,
+    WhatsAppNotReadyError: actual.WhatsAppNotReadyError,
     getBaileysSocket,
     isBaileysReady: vi.fn(),
     setBaileysSocket: vi.fn(),
@@ -82,6 +85,40 @@ describe('Messaging routes — /whatsapp/*', () => {
 
       expect(res.statusCode).toBe(503);
       expect(res.json()).toEqual({ error: 'WhatsApp not connected' });
+    });
+
+    it('returns 503 when the link drops before the send could run (nothing sent)', async () => {
+      mockIsBaileysReady.mockReturnValue(true);
+      const { sendSerialized, WhatsAppNotReadyError } =
+        await import('../../src/services/baileys.js');
+      (sendSerialized as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new WhatsAppNotReadyError()
+      );
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/whatsapp/send-text',
+        payload: { phoneNumber: '5511999999999', text: 'Hello' },
+      });
+
+      expect(res.statusCode).toBe(503);
+      expect(res.json()).toEqual({ error: 'WhatsApp not connected' });
+    });
+
+    it('returns 500 when a send times out (it may still land)', async () => {
+      mockIsBaileysReady.mockReturnValue(true);
+      const { sendSerialized, SendTimeoutError } = await import('../../src/services/baileys.js');
+      (sendSerialized as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new SendTimeoutError(60000)
+      );
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/whatsapp/send-text',
+        payload: { phoneNumber: '5511999999999', text: 'Hello' },
+      });
+
+      expect(res.statusCode).toBe(500);
     });
 
     it('returns 400 when required fields are missing', async () => {

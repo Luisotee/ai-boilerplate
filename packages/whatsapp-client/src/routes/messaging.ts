@@ -1,6 +1,11 @@
 import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
-import { getBaileysSocket, isBaileysReady, sendSerialized } from '../services/baileys.js';
+import {
+  getBaileysSocket,
+  isBaileysReady,
+  sendSerialized,
+  WhatsAppNotReadyError,
+} from '../services/baileys.js';
 import { normalizeJid } from '../utils/jid.js';
 import {
   SendTextSchema,
@@ -41,6 +46,10 @@ export async function registerMessagingRoutes(app: FastifyInstance) {
         const result = await sendSerialized(normalizedJid, { text });
         return { success: true, message_id: result?.key.id ?? undefined };
       } catch (err) {
+        // Nothing was sent: 503 lets a caller (the broadcast lane) retry safely.
+        if (err instanceof WhatsAppNotReadyError) {
+          return reply.code(503).send({ error: 'WhatsApp not connected' });
+        }
         const error = err as Error;
         app.log.error({ error }, 'Failed to send message');
 
@@ -86,6 +95,10 @@ export async function registerMessagingRoutes(app: FastifyInstance) {
         });
         return { success: true };
       } catch (err) {
+        // Nothing was sent: 503 lets a caller (the broadcast lane) retry safely.
+        if (err instanceof WhatsAppNotReadyError) {
+          return reply.code(503).send({ error: 'WhatsApp not connected' });
+        }
         const error = err as Error;
         app.log.error({ error }, 'Failed to send reaction');
 
@@ -127,6 +140,10 @@ export async function registerMessagingRoutes(app: FastifyInstance) {
         await sock.sendPresenceUpdate(state, normalizedJid);
         return { success: true };
       } catch (err) {
+        // Nothing was sent: 503 lets a caller (the broadcast lane) retry safely.
+        if (err instanceof WhatsAppNotReadyError) {
+          return reply.code(503).send({ error: 'WhatsApp not connected' });
+        }
         const error = err as Error;
         app.log.error({ error }, 'Failed to update typing indicator');
 
@@ -173,6 +190,10 @@ export async function registerMessagingRoutes(app: FastifyInstance) {
         await sock.readMessages(keys);
         return { success: true };
       } catch (err) {
+        // Nothing was sent: 503 lets a caller (the broadcast lane) retry safely.
+        if (err instanceof WhatsAppNotReadyError) {
+          return reply.code(503).send({ error: 'WhatsApp not connected' });
+        }
         const error = err as Error;
         app.log.error({ error }, 'Failed to mark messages as read');
 

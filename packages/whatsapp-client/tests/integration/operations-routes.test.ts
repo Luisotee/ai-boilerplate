@@ -14,9 +14,12 @@ import type { FastifyInstance } from 'fastify';
 
 // sendSerialized forwards to the mocked socket, so the routes' sendMessage
 // payloads can still be asserted on mockSocket.sendMessage.
-vi.mock('../../src/services/baileys.js', () => {
+vi.mock('../../src/services/baileys.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/services/baileys.js')>();
   const getBaileysSocket = vi.fn();
   return {
+    SendTimeoutError: actual.SendTimeoutError,
+    WhatsAppNotReadyError: actual.WhatsAppNotReadyError,
     getBaileysSocket,
     isBaileysReady: vi.fn(),
     setBaileysSocket: vi.fn(),

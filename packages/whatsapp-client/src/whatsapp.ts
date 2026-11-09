@@ -21,6 +21,7 @@ import {
   clearBaileysSocket,
   sendSerialized,
   noteInbound,
+  stopSends,
   setLastDisconnect,
   setReconnectAttempts,
 } from './services/baileys.js';
@@ -209,6 +210,7 @@ export async function logoutWhatsApp(): Promise<void> {
  */
 export async function shutdownWhatsApp(): Promise<void> {
   shuttingDown = true;
+  stopSends(); // queued sends fail now instead of waiting 15s for a reopen
   resetReconnectionState();
   const sock = getLiveSocket();
   if (sock) {

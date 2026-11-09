@@ -11,7 +11,11 @@ const liveSock = vi.hoisted(() => ({
   current: null as null | { sendMessage: (...args: unknown[]) => unknown },
 }));
 
-vi.mock('../../src/services/baileys.js', () => ({
+vi.mock('../../src/services/baileys.js', async (importOriginal) => ({
+  SendTimeoutError: (await importOriginal<typeof import('../../src/services/baileys.js')>())
+    .SendTimeoutError,
+  WhatsAppNotReadyError: (await importOriginal<typeof import('../../src/services/baileys.js')>())
+    .WhatsAppNotReadyError,
   getLiveSocket: vi.fn(() => null),
   sendSerialized: vi.fn((...args: unknown[]) => liveSock.current!.sendMessage(...args)),
 }));
@@ -71,6 +75,7 @@ vi.mock('../../src/utils/message-split.js', async (importOriginal) => {
 });
 
 import { handleTextMessage } from '../../src/handlers/text.js';
+import { SendTimeoutError, WhatsAppNotReadyError } from '../../src/services/baileys.js';
 import { getGroupSubject } from '../../src/services/group-cache.js';
 import { sendMessageToAI } from '../../src/api-client.js';
 import { sleep } from '../../src/utils/message-split.js';
@@ -370,5 +375,72 @@ describe('handleTextMessage — senderJid (group participant as a phone JID)', (
     await handleTextMessage(makeMockSocket() as never, makeTextMsg('hi') as never, 'hi');
 
     expect(optsOf(0).senderJid).toBeUndefined();
+  });
+});
+
+describe('handleTextMessage — dead link and presence failures', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSplitConfig.enabled = true;
+  });
+
+  const textSends = (sock: ReturnType<typeof makeMockSocket>) =>
+    sock.sendMessage.mock.calls.filter(([, content]) => 'text' in (content as object));
+  const reactions = (sock: ReturnType<typeof makeMockSocket>) =>
+    sock.sendMessage.mock.calls.filter(([, content]) => 'react' in (content as object));
+
+  it.each([
+    ['SendTimeoutError', () => new SendTimeoutError(60000)],
+    ['WhatsAppNotReadyError', () => new WhatsAppNotReadyError()],
+  ])('skips the ❌ and error reply when the reply send fails with %s', async (_n, makeErr) => {
+    const sock = makeMockSocket();
+    sock.sendMessage.mockRejectedValueOnce(makeErr());
+    mockSendMessageToAI.mockResolvedValueOnce('answer');
+
+    await handleTextMessage(sock as never, makeTextMsg('hey') as never, 'hey');
+
+    expect(sock.sendMessage).toHaveBeenCalledTimes(1); // only the failed reply
+    expect(reactions(sock)).toHaveLength(0);
+  });
+
+  it('still sends ❌ and the error reply on other errors, and a failing reply does not throw', async () => {
+    const sock = makeMockSocket();
+    mockSendMessageToAI.mockRejectedValueOnce(new Error('AI API down'));
+    sock.sendMessage
+      .mockResolvedValueOnce({ key: { id: 'r' } }) // ❌ reaction
+      .mockRejectedValueOnce(new Error('send failed')); // error reply
+
+    await expect(
+      handleTextMessage(sock as never, makeTextMsg('hey') as never, 'hey')
+    ).resolves.toBeUndefined();
+    expect(reactions(sock)).toHaveLength(1);
+    expect(textSends(sock)).toHaveLength(1);
+  });
+
+  it('a failing composing presence does not abort the reply', async () => {
+    const sock = makeMockSocket();
+    sock.sendPresenceUpdate.mockRejectedValue(new Error('Connection Closed'));
+    mockSendMessageToAI.mockResolvedValueOnce('answer');
+
+    await handleTextMessage(sock as never, makeTextMsg('hey') as never, 'hey');
+
+    expect(textSends(sock).map(([, c]) => c)).toEqual([{ text: 'answer' }]);
+    expect(reactions(sock)).toHaveLength(0);
+  });
+
+  it('a failing recording presence after the reply does not trigger the error path', async () => {
+    const { getUserPreferences, textToSpeech } = await import('../../src/api-client.js');
+    (getUserPreferences as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ tts_enabled: true });
+    (textToSpeech as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+    const sock = makeMockSocket();
+    sock.sendPresenceUpdate.mockImplementation(async (state: string) => {
+      if (state === 'recording') throw new Error('Connection Closed');
+    });
+    mockSendMessageToAI.mockResolvedValueOnce('answer');
+
+    await handleTextMessage(sock as never, makeTextMsg('hey') as never, 'hey');
+
+    expect(textSends(sock).map(([, c]) => c)).toEqual([{ text: 'answer' }]);
+    expect(reactions(sock)).toHaveLength(0);
   });
 });

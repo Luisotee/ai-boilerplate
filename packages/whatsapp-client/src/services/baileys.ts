@@ -49,7 +49,10 @@ export function isBaileysReady(): boolean {
 //   dead socket can hang forever;
 // - runs sends to the same chat one at a time, in call order (a per-JID FIFO).
 //   Chats don't wait for each other, so one slow media upload never holds every
-//   other user's reply.
+//   other user's reply. Exception: a send that times out keeps running in
+//   Baileys (it can't be cancelled), so the next send to that chat may overlap
+//   it and arrive first. Holding the queue until it settles would bring back
+//   the unbounded hang the timeout exists to prevent.
 
 type SendArgs = Parameters<WASocket['sendMessage']>;
 type SendResult = Awaited<ReturnType<WASocket['sendMessage']>>;
@@ -70,6 +73,15 @@ export class WhatsAppNotReadyError extends Error {
     super('WhatsApp not connected');
     this.name = 'WhatsAppNotReadyError';
   }
+}
+
+// Set at process shutdown: queued and new sends fail at once instead of
+// waiting for a link that won't reopen, so SIGTERM finishes inside Docker's grace.
+let sendsStopped = false;
+
+/** Fail every queued and future send immediately (process shutdown). */
+export function stopSends(): void {
+  sendsStopped = true;
 }
 
 // Tail of each chat's queue. The stored promise never rejects; an entry is
@@ -99,9 +111,10 @@ async function runSend(
   options: SendArgs[2],
   readyDeadline: number
 ): Promise<SendResult> {
+  if (sendsStopped) throw new WhatsAppNotReadyError();
   while (!isBaileysReady()) {
     const left = readyDeadline - Date.now();
-    if (left <= 0) throw new WhatsAppNotReadyError();
+    if (left <= 0 || sendsStopped) throw new WhatsAppNotReadyError();
     await sleep(Math.min(READY_POLL_MS, left));
   }
   const sock = baileysSocket!;

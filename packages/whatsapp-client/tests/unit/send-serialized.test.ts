@@ -146,4 +146,17 @@ describe('sendSerialized', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(mod.pendingSendQueues()).toBe(0);
   });
+
+  it('after stopSends, queued and new sends fail at once', async () => {
+    const queued = mod.sendSerialized('a@s.whatsapp.net', { text: '1' }); // waiting for ready
+    const queuedResult = expect(queued).rejects.toBeInstanceOf(mod.WhatsAppNotReadyError);
+    mod.stopSends();
+    await vi.advanceTimersByTimeAsync(500); // one poll, not the 15s deadline
+    await queuedResult;
+
+    connect(socket());
+    await expect(mod.sendSerialized('b@s.whatsapp.net', { text: '2' })).rejects.toBeInstanceOf(
+      mod.WhatsAppNotReadyError
+    );
+  });
 });

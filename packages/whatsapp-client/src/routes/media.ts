@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import type { MultipartFile } from '@fastify/multipart';
-import { isBaileysReady, sendSerialized } from '../services/baileys.js';
+import { isBaileysReady, sendSerialized, WhatsAppNotReadyError } from '../services/baileys.js';
 import { normalizeJid } from '../utils/jid.js';
 import { validateMediaFile } from '../utils/file-validation.js';
 import { buildVCard, validateContactInfo } from '../utils/vcard-builder.js';
@@ -144,6 +144,10 @@ export async function registerMediaRoutes(app: FastifyInstance) {
         app.log.debug({ messageId: result?.key.id }, 'Message sent successfully');
         return { success: true, message_id: result?.key.id ?? undefined };
       } catch (err) {
+        // Nothing was sent: 503 lets a caller (the broadcast lane) retry safely.
+        if (err instanceof WhatsAppNotReadyError) {
+          return reply.code(503).send({ error: 'WhatsApp not connected' });
+        }
         const error = err as Error & { code?: string };
         // Extract error details for proper logging
         const errorDetails = {
@@ -329,6 +333,10 @@ export async function registerMediaRoutes(app: FastifyInstance) {
         app.log.debug({ messageId: result?.key.id }, 'Message sent successfully');
         return { success: true, message_id: result?.key.id ?? undefined };
       } catch (err) {
+        // Nothing was sent: 503 lets a caller (the broadcast lane) retry safely.
+        if (err instanceof WhatsAppNotReadyError) {
+          return reply.code(503).send({ error: 'WhatsApp not connected' });
+        }
         const error = err as Error & { code?: string };
         // Extract error details for proper logging
         const errorDetails = {
@@ -509,6 +517,10 @@ export async function registerMediaRoutes(app: FastifyInstance) {
         app.log.debug({ messageId: result?.key.id }, 'Message sent successfully');
         return { success: true, message_id: result?.key.id ?? undefined };
       } catch (err) {
+        // Nothing was sent: 503 lets a caller (the broadcast lane) retry safely.
+        if (err instanceof WhatsAppNotReadyError) {
+          return reply.code(503).send({ error: 'WhatsApp not connected' });
+        }
         const error = err as Error & { code?: string };
         // Extract error details for proper logging
         const errorDetails = {
@@ -692,6 +704,10 @@ export async function registerMediaRoutes(app: FastifyInstance) {
         app.log.debug({ messageId: result?.key.id }, 'Message sent successfully');
         return { success: true, message_id: result?.key.id ?? undefined };
       } catch (err) {
+        // Nothing was sent: 503 lets a caller (the broadcast lane) retry safely.
+        if (err instanceof WhatsAppNotReadyError) {
+          return reply.code(503).send({ error: 'WhatsApp not connected' });
+        }
         const error = err as Error & { code?: string };
         // Extract error details for proper logging
         const errorDetails = {
@@ -776,6 +792,10 @@ export async function registerMediaRoutes(app: FastifyInstance) {
 
         return { success: true, message_id: result?.key.id ?? undefined };
       } catch (err) {
+        // Nothing was sent: 503 lets a caller (the broadcast lane) retry safely.
+        if (err instanceof WhatsAppNotReadyError) {
+          return reply.code(503).send({ error: 'WhatsApp not connected' });
+        }
         const error = err as Error;
         app.log.error({ error }, 'Failed to send location');
         if (error.message?.includes('not registered on WhatsApp')) {
@@ -842,6 +862,10 @@ export async function registerMediaRoutes(app: FastifyInstance) {
 
         return { success: true, message_id: result?.key.id ?? undefined };
       } catch (err) {
+        // Nothing was sent: 503 lets a caller (the broadcast lane) retry safely.
+        if (err instanceof WhatsAppNotReadyError) {
+          return reply.code(503).send({ error: 'WhatsApp not connected' });
+        }
         const error = err as Error;
         app.log.error({ error }, 'Failed to send contact');
         if (error.message?.includes('not registered on WhatsApp')) {

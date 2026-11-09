@@ -6,7 +6,12 @@ import { stripDeviceSuffix, isGroupChat, resolveParticipantJid } from '../utils/
 import { getPushName, getSenderName } from '../utils/message.js';
 import { getGroupSubject } from '../services/group-cache.js';
 import { sendFailureReaction } from '../utils/reactions.js';
-import { getLiveSocket, sendSerialized } from '../services/baileys.js';
+import {
+  getLiveSocket,
+  sendSerialized,
+  SendTimeoutError,
+  WhatsAppNotReadyError,
+} from '../services/baileys.js';
 import { splitResponseIntoBursts, stripSplitDelimiters, sleep } from '../utils/message-split.js';
 
 interface ImageData {
@@ -90,8 +95,15 @@ export async function handleTextMessage(
   // for minutes (AI polling), and a reconnect leaves `sock` dead.
   const liveSocket = () => getLiveSocket() ?? sock;
 
+  // Presence is cosmetic: a failure (e.g. a socket not open yet mid-reconnect)
+  // must never abort the reply or trigger the error path.
+  const setPresence = (state: 'composing' | 'recording' | 'paused') =>
+    liveSocket()
+      .sendPresenceUpdate(state, whatsappJid)
+      .catch((err: unknown) => logger.debug({ err, whatsappJid, state }, 'Presence update failed'));
+
   // Send typing indicator
-  await liveSocket().sendPresenceUpdate('composing', whatsappJid);
+  await setPresence('composing');
 
   try {
     const response = await sendMessageToAI(whatsappJid, text, {
@@ -165,7 +177,7 @@ export async function handleTextMessage(
       const prefs = await getUserPreferences(whatsappJid);
       if (prefs?.tts_enabled) {
         logger.info({ whatsappJid }, 'TTS enabled, generating voice message');
-        await liveSocket().sendPresenceUpdate('recording', whatsappJid);
+        await setPresence('recording');
         const audioBuffer = await textToSpeech(stripSplitDelimiters(response), whatsappJid);
         if (audioBuffer) {
           await sendSerialized(whatsappJid, {
@@ -181,11 +193,16 @@ export async function handleTextMessage(
     }
   } catch (error) {
     logger.error({ error, whatsappJid }, 'Error processing message');
+    // The link is down or a send hung: a ❌ and an error reply would only queue
+    // behind it and stall this chat (and the inbound loop) for minutes more.
+    if (error instanceof SendTimeoutError || error instanceof WhatsAppNotReadyError) return;
     await sendFailureReaction(msg);
-    await sendSerialized(whatsappJid, { text: config.errorReplyText });
+    try {
+      await sendSerialized(whatsappJid, { text: config.errorReplyText });
+    } catch (replyErr) {
+      logger.warn({ error: replyErr, whatsappJid }, 'Failed to send the error reply');
+    }
   } finally {
-    await liveSocket()
-      .sendPresenceUpdate('paused', whatsappJid)
-      .catch((err: unknown) => logger.debug({ err, whatsappJid }, 'Failed to clear presence'));
+    await setPresence('paused');
   }
 }

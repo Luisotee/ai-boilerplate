@@ -177,9 +177,14 @@ async def test_timelock_wait_is_clamped_and_unknown_end_waits_an_hour():
     )
     assert await bc._timelock_wait_seconds(client) == bc.TIMELOCK_MAX_WAIT_SECONDS
     client.get_reachout_timelock.return_value = ReachoutTimelock(
-        active=True, ends_at=bc._utcnow() - timedelta(minutes=1)
+        active=True, ends_at=bc._utcnow() + timedelta(seconds=5)
     )
     assert await bc._timelock_wait_seconds(client) == bc.TIMELOCK_MIN_WAIT_SECONDS
+    # A cached "active" whose end already passed counts as over.
+    client.get_reachout_timelock.return_value = ReachoutTimelock(
+        active=True, ends_at=bc._utcnow() - timedelta(minutes=1)
+    )
+    assert await bc._timelock_wait_seconds(client) == 0.0
     client.get_reachout_timelock.return_value = ReachoutTimelock(active=True)
     assert await bc._timelock_wait_seconds(client) == bc.TIMELOCK_UNKNOWN_END_WAIT_SECONDS
 

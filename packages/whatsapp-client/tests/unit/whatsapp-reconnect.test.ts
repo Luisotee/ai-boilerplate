@@ -49,6 +49,7 @@ vi.mock('../../src/services/baileys.js', () => ({
   noteInbound: vi.fn(),
   setLastDisconnect: vi.fn(),
   setReconnectAttempts: vi.fn(),
+  stopSends: vi.fn(),
 }));
 
 vi.mock('@whiskeysockets/baileys', async (importOriginal) => ({
@@ -179,6 +180,8 @@ describe('reconnect policy', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(sock.end).toHaveBeenCalled();
     expect(flushPendingCredsSave).toHaveBeenCalled();
+    const { stopSends } = await import('../../src/services/baileys.js');
+    expect(stopSends).toHaveBeenCalled(); // queued sends fail fast
 
     await close(DisconnectReason.connectionClosed);
     await vi.advanceTimersByTimeAsync(2_000_000);

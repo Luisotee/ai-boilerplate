@@ -601,6 +601,9 @@ async def _timelock_wait_seconds(client: WhatsAppClient) -> float:
     if lock.ends_at is None:
         return TIMELOCK_UNKNOWN_END_WAIT_SECONDS
     seconds = (lock.ends_at - _utcnow()).total_seconds()
+    if seconds <= 0:
+        # Already over (the client caches its answer for 5 min): send now.
+        return 0.0
     return min(max(seconds, TIMELOCK_MIN_WAIT_SECONDS), TIMELOCK_MAX_WAIT_SECONDS)
 
 
