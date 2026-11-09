@@ -20,6 +20,9 @@ import {
   isBaileysReady,
   clearBaileysSocket,
   sendSerialized,
+  noteInbound,
+  setLastDisconnect,
+  setReconnectAttempts,
 } from './services/baileys.js';
 import { getWaVersionConfig } from './services/wa-version.js';
 import { flushPendingCredsSave, useAtomicMultiFileAuthState } from './services/auth-state.js';
@@ -255,6 +258,37 @@ function calculateBackoffDelay(attempt: number): number {
   return baseDelay + jitter;
 }
 
+// Transport watchdog. rc13 already ends a socket after ~35s without a frame
+// (keepalive), but its end() awaits ws.close() before emitting 'close'; if that
+// hangs we never reconnect. This backstop tears the socket down itself after
+// 5 min with no WebSocket frame. Deliberately NOT an app-level "no messages"
+// watchdog: quiet accounts would flap.
+const TRANSPORT_WATCHDOG_MS = 5 * 60_000;
+const WATCHDOG_CHECK_MS = 60_000;
+let watchdogTimer: NodeJS.Timeout | null = null;
+
+function stopWatchdog(): void {
+  if (watchdogTimer) {
+    clearInterval(watchdogTimer);
+    watchdogTimer = null;
+  }
+}
+
+/** Drop a socket that stopped talking and reconnect, without waiting for its 'close'. */
+function forceReconnect(sock: WASocket, reason: string): void {
+  socketEpoch++; // the old socket's late events go inert
+  sock.ev.removeAllListeners('connection.update');
+  sock.ev.removeAllListeners('creds.update');
+  void Promise.resolve()
+    .then(() => sock.end(undefined))
+    .catch((err: unknown) => logger.trace({ err }, 'socket.end() failed (already dead)'));
+  clearBaileysSocket();
+  clearStableTimer();
+  setConnectionStatus('disconnected');
+  setLastDisconnect(null, reason);
+  scheduleReconnect();
+}
+
 function clearStableTimer(): void {
   if (stableTimer) {
     clearTimeout(stableTimer);
@@ -267,8 +301,10 @@ function clearStableTimer(): void {
  */
 function resetReconnectionState(): void {
   reconnectionAttempts = 0;
+  setReconnectAttempts(0);
   isReconnecting = false;
   clearStableTimer();
+  stopWatchdog();
   if (reconnectionTimer) {
     clearTimeout(reconnectionTimer);
     reconnectionTimer = null;
@@ -313,6 +349,7 @@ function scheduleReconnect(delayOverrideMs?: number): void {
 
   isReconnecting = true;
   reconnectionAttempts++;
+  setReconnectAttempts(reconnectionAttempts);
 
   // Calculate backoff delay (a 440 conflict passes its own, longer one)
   const delayMs = delayOverrideMs ?? calculateBackoffDelay(reconnectionAttempts - 1);
@@ -357,6 +394,9 @@ export async function initializeWhatsApp(): Promise<void> {
     ...versionConfig,
     logger: logger.child({ module: 'baileys' }),
     browser: ['AI Boilerplate', 'Chrome', '131.0.0'],
+    // rc13 defaults to true, which keeps the number "online" and mutes push
+    // notifications on the phone that owns it.
+    markOnlineOnConnect: false,
   });
   // Track at creation (not on 'open') so teardown can reach a not-yet-open socket.
   setBaileysSocket(sock);
@@ -380,6 +420,12 @@ export async function initializeWhatsApp(): Promise<void> {
       setLatestQr(null); // the socket that issued the QR is gone — don't serve a stale code
       clearBaileysSocket(); // the socket is dead — stop reporting "ready" until re-open
       clearStableTimer(); // it didn't stay up long enough to count as healthy
+      stopWatchdog();
+      const disconnectError = lastDisconnect?.error as Boom | undefined;
+      setLastDisconnect(
+        disconnectError?.output?.statusCode ?? null,
+        disconnectError?.message ?? null
+      );
       if (shuttingDown) {
         logger.info('WhatsApp connection closed for shutdown');
         return;
@@ -448,11 +494,32 @@ export async function initializeWhatsApp(): Promise<void> {
         clearTimeout(reconnectionTimer);
         reconnectionTimer = null;
       }
+      stopWatchdog();
+      let lastFrameAt = Date.now();
+      sock.ws?.on('frame', () => {
+        lastFrameAt = Date.now();
+      });
+      watchdogTimer = setInterval(() => {
+        if (myEpoch !== socketEpoch || shuttingDown) {
+          stopWatchdog();
+          return;
+        }
+        const silentMs = Date.now() - lastFrameAt;
+        if (silentMs < TRANSPORT_WATCHDOG_MS) return;
+        logger.error(
+          { silentMs },
+          'No WebSocket frame from WhatsApp for 5 min while connected — forcing a reconnect'
+        );
+        stopWatchdog();
+        forceReconnect(sock, 'transport_watchdog');
+      }, WATCHDOG_CHECK_MS);
+
       clearStableTimer();
       stableTimer = setTimeout(() => {
         stableTimer = null;
         if (myEpoch !== socketEpoch) return;
         reconnectionAttempts = 0;
+        setReconnectAttempts(0);
         logger.debug('WhatsApp connection stable — reconnection backoff reset');
       }, config.reconnection.stableMs);
     }
@@ -516,6 +583,7 @@ export async function initializeWhatsApp(): Promise<void> {
         );
 
         if (msg.key.fromMe || msg.key.remoteJid === 'status@broadcast') continue;
+        noteInbound();
         if (!msg.key.remoteJid) continue;
 
         // Extract phone number and LID for user identity resolution.

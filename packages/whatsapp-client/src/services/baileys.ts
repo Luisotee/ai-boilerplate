@@ -175,3 +175,42 @@ export function setLatestQr(qr: string | null): void {
 export function getConnectionInfo(): WhatsAppConnectionInfo {
   return { status: connectionStatus, qr: latestQr, qrGeneratedAt, phoneNumber: pairedPhoneNumber };
 }
+
+// ── Connection health (for GET /health) ──────────────────────────────────────
+// Lets an operator spot a zombie link ("connected" but nothing arriving) and a
+// reconnect loop without reading logs.
+
+export interface LastDisconnect {
+  at: string;
+  statusCode: number | null;
+  reason: string | null;
+}
+
+let lastInboundAt: string | null = null;
+let lastDisconnect: LastDisconnect | null = null;
+let reconnectAttempts = 0;
+
+/** Record that a message arrived from WhatsApp. */
+export function noteInbound(): void {
+  lastInboundAt = new Date().toISOString();
+}
+
+export function setLastDisconnect(statusCode: number | null, reason: string | null): void {
+  lastDisconnect = {
+    at: new Date().toISOString(),
+    statusCode,
+    reason: reason?.slice(0, 200) ?? null,
+  };
+}
+
+export function setReconnectAttempts(attempts: number): void {
+  reconnectAttempts = attempts;
+}
+
+export function getConnectionHealth(): {
+  lastInboundAt: string | null;
+  lastDisconnect: LastDisconnect | null;
+  reconnectAttempts: number;
+} {
+  return { lastInboundAt, lastDisconnect, reconnectAttempts };
+}

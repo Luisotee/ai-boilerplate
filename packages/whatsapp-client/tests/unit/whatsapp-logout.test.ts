@@ -23,6 +23,9 @@ vi.mock('../../src/services/baileys.js', () => ({
   setPairedPhoneNumber: vi.fn(),
   getPairedPhoneNumber: vi.fn(),
   getConnectionInfo: vi.fn(),
+  noteInbound: vi.fn(),
+  setLastDisconnect: vi.fn(),
+  setReconnectAttempts: vi.fn(),
 }));
 
 // Keep the rest of fs/promises + baileys real; only swap the pieces logoutWhatsApp

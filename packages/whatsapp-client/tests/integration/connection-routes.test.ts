@@ -26,7 +26,7 @@ vi.mock('../../src/whatsapp.js', () => ({
 }));
 
 import { buildTestApp } from '../helpers/fastify.js';
-import { getConnectionInfo } from '../../src/services/baileys.js';
+import { getBaileysSocket, getConnectionInfo, isBaileysReady } from '../../src/services/baileys.js';
 import { logoutWhatsApp } from '../../src/whatsapp.js';
 
 const mockGetConnectionInfo = getConnectionInfo as ReturnType<typeof vi.fn>;
@@ -138,6 +138,60 @@ describe('Connection routes', () => {
 
       expect(res.statusCode).toBe(500);
       expect(res.json()).toEqual({ error: 'Failed to logout WhatsApp session' });
+    });
+  });
+
+  describe('GET /whatsapp/reachout-timelock', () => {
+    const mockIsReady = isBaileysReady as ReturnType<typeof vi.fn>;
+    const mockGetSocket = getBaileysSocket as ReturnType<typeof vi.fn>;
+
+    it('returns 503 when WhatsApp is not connected', async () => {
+      mockIsReady.mockReturnValue(false);
+      const res = await app.inject({ method: 'GET', url: '/whatsapp/reachout-timelock' });
+      expect(res.statusCode).toBe(503);
+    });
+
+    it('reports an active timelock with its end time, and caches it per socket', async () => {
+      const ends = new Date('2026-11-10T00:00:00.000Z');
+      const sock = {
+        fetchAccountReachoutTimelock: vi.fn().mockResolvedValue({
+          isActive: true,
+          timeEnforcementEnds: ends,
+          enforcementType: 'DEFAULT',
+        }),
+      };
+      mockIsReady.mockReturnValue(true);
+      mockGetSocket.mockReturnValue(sock);
+
+      const res = await app.inject({ method: 'GET', url: '/whatsapp/reachout-timelock' });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({
+        active: true,
+        ends_at: ends.toISOString(),
+        enforcement_type: 'DEFAULT',
+      });
+
+      await app.inject({ method: 'GET', url: '/whatsapp/reachout-timelock' });
+      expect(sock.fetchAccountReachoutTimelock).toHaveBeenCalledOnce();
+    });
+
+    it('reports an inactive timelock', async () => {
+      mockIsReady.mockReturnValue(true);
+      mockGetSocket.mockReturnValue({
+        fetchAccountReachoutTimelock: vi.fn().mockResolvedValue({ isActive: false }),
+      });
+      const res = await app.inject({ method: 'GET', url: '/whatsapp/reachout-timelock' });
+      expect(res.json()).toEqual({ active: false, ends_at: null, enforcement_type: null });
+    });
+
+    it('returns 500 with a generic error when the query fails', async () => {
+      mockIsReady.mockReturnValue(true);
+      mockGetSocket.mockReturnValue({
+        fetchAccountReachoutTimelock: vi.fn().mockRejectedValue(new Error('internal host x')),
+      });
+      const res = await app.inject({ method: 'GET', url: '/whatsapp/reachout-timelock' });
+      expect(res.statusCode).toBe(500);
+      expect(res.json()).toEqual({ error: 'Failed to fetch the reach-out timelock' });
     });
   });
 });

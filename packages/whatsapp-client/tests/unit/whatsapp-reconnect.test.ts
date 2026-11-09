@@ -46,6 +46,9 @@ vi.mock('../../src/services/baileys.js', () => ({
   getPairedPhoneNumber: vi.fn(),
   getConnectionInfo: vi.fn(),
   sendSerialized: vi.fn(),
+  noteInbound: vi.fn(),
+  setLastDisconnect: vi.fn(),
+  setReconnectAttempts: vi.fn(),
 }));
 
 vi.mock('@whiskeysockets/baileys', async (importOriginal) => ({
@@ -70,6 +73,7 @@ vi.mock('../../src/services/wa-version.js', () => ({
 }));
 
 import { DisconnectReason } from '@whiskeysockets/baileys';
+import { EventEmitter } from 'node:events';
 
 type Handler = (update: unknown) => unknown;
 type CapturingSocket = { handlers: Map<string, Handler> };
@@ -87,6 +91,7 @@ function makeCapturingSocket(): CapturingSocket & Record<string, unknown> {
       removeAllListeners: vi.fn(),
     },
     end: vi.fn().mockResolvedValue(undefined),
+    ws: new EventEmitter(),
   };
 }
 
@@ -178,5 +183,41 @@ describe('reconnect policy', () => {
     await close(DisconnectReason.connectionClosed);
     await vi.advanceTimersByTimeAsync(2_000_000);
     expect(socks).toHaveLength(1);
+  });
+
+  it('connects with markOnlineOnConnect: false', () => {
+    expect(makeWASocket.mock.calls[0][0]).toMatchObject({ markOnlineOnConnect: false });
+  });
+
+  it('transport watchdog: 5 min without a WebSocket frame forces a reconnect', async () => {
+    const { setLastDisconnect } = await import('../../src/services/baileys.js');
+    await open();
+    const first = latest() as unknown as {
+      ws: EventEmitter;
+      end: ReturnType<typeof vi.fn>;
+    };
+
+    // Frames keep arriving: no reconnect, however long it runs.
+    for (let i = 0; i < 10; i++) {
+      await vi.advanceTimersByTimeAsync(60_000);
+      first.ws.emit('frame', {});
+    }
+    expect(socks).toHaveLength(1);
+
+    // Then silence: torn down within the next check after 5 min, and re-inited.
+    await vi.advanceTimersByTimeAsync(6 * 60_000);
+    expect(first.end).toHaveBeenCalled();
+    expect(setLastDisconnect).toHaveBeenCalledWith(null, 'transport_watchdog');
+    expect(socks).toHaveLength(2);
+  });
+
+  it('transport watchdog stops when the socket closes', async () => {
+    await open();
+    await close(DisconnectReason.connectionClosed);
+    await msUntilReconnect(); // the normal reconnect, 1s
+    const first = socks[0] as unknown as { end: ReturnType<typeof vi.fn> };
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(first.end).not.toHaveBeenCalled();
+    expect(socks).toHaveLength(2);
   });
 });
