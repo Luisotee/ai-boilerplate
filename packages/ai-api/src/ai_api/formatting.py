@@ -224,3 +224,40 @@ def markdown_to_whatsapp(text: str) -> str:
         text = placeholder_re.sub(lambda m: protected[int(m.group(1))], text)
 
     return text
+
+
+_FENCE_LINE_RE = re.compile(r"^```")
+_DELIMITER_LINE_RE = re.compile(r"^---\s*$")
+
+
+def strip_split_delimiters(text: str) -> str:
+    """Drop the `---` burst lines outside code fences and collapse blank runs.
+
+    Mirrors ``stripSplitDelimiters`` in the TS clients' ``utils/message-split.ts``
+    (same delimiter and fence rules). Used for the web surface, where a reply is
+    one message and a ``---`` under a text line would render as a Markdown heading.
+    """
+    if not text:
+        return text
+    kept: list[str] = []
+    in_fence = False
+    for line in text.split("\n"):
+        if _FENCE_LINE_RE.match(line):
+            in_fence = not in_fence
+        elif not in_fence and _DELIMITER_LINE_RE.match(line):
+            line = ""
+        kept.append(line)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
+
+
+def render_reply(text: str, markdown: bool) -> str:
+    """The reply as delivered to the user's surface.
+
+    Chat clients (WhatsApp, Telegram) and the terminal chat get WhatsApp markup;
+    a Markdown surface (the ``/v1`` web API) gets the model's Markdown as is,
+    minus the burst delimiters. The text saved to history is always
+    ``markdown_to_whatsapp`` (see ``streams/processor.py``), whatever the surface.
+    """
+    if markdown:
+        return strip_split_delimiters(text)
+    return markdown_to_whatsapp(text)

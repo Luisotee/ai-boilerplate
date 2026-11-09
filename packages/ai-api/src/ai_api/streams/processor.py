@@ -11,11 +11,12 @@ from ..agent.model_chain import MODEL_ERRORS
 from ..config import get_whatsapp_api_key, get_whatsapp_client_url, settings
 from ..database import SessionLocal, get_conversation_history, save_message
 from ..embeddings import create_embedding_service
-from ..formatting import markdown_to_whatsapp
+from ..formatting import markdown_to_whatsapp, render_reply
 from ..logger import logger
 from ..queue.connection import get_redis_client
 from ..queue.utils import delete_job_image, get_job_image, save_job_chunk, set_job_metadata
 from ..services.bug_reports import record_auto_report
+from ..surfaces import renders_markdown, surface_of
 from ..whatsapp import WhatsAppClient, create_whatsapp_client
 from .manager import enqueue_pdf_processing
 
@@ -300,10 +301,16 @@ async def process_chat_job_direct(
             # reply is delivered, embedded or saved — saved Markdown would be
             # replayed as history and reinforce the habit. `---` burst lines are
             # left untouched, so the clients still split on them.
+            # The web surface (/v1) renders Markdown, so it gets the reply as
+            # written (surfaces.py); history always gets the converted text, so
+            # it stays uniform for a user linked across WhatsApp and the web.
+            delivered = render_reply(
+                full_response, renders_markdown(surface_of(client_id, whatsapp_jid))
+            )
             full_response = markdown_to_whatsapp(full_response)
 
             # Save complete response as single chunk
-            await save_job_chunk(redis, job_id, 0, full_response)
+            await save_job_chunk(redis, job_id, 0, delivered)
             chunk_index = 1
 
             logger.info(f"[Job {job_id}] AI response completed.")

@@ -25,21 +25,25 @@ WEB_CLIENT_ID = "web"
 CLI_CLIENT_ID = "cli"
 
 
+def _starts(jid: object, prefix: str) -> bool:
+    return isinstance(jid, str) and jid.startswith(prefix)
+
+
 def is_app_jid(jid: str | None) -> bool:
     """A JID that belongs to an app surface, not to a WhatsApp/Telegram chat."""
-    return bool(jid) and (jid.startswith(WEB_JID_PREFIX) or jid.startswith(CLI_JID_PREFIX))
+    return _starts(jid, WEB_JID_PREFIX) or _starts(jid, CLI_JID_PREFIX)
 
 
 def is_cli_jid(jid: str | None) -> bool:
-    return bool(jid) and jid.startswith(CLI_JID_PREFIX)
+    return _starts(jid, CLI_JID_PREFIX)
 
 
 def surface_of(client_id: str | None, jid: str | None) -> Surface:
     """The surface a job's reply goes to. ``client_id`` wins over the JID, because
     a web key linked to a WhatsApp user runs on that user's WhatsApp JID."""
-    if client_id == WEB_CLIENT_ID or (jid or "").startswith(WEB_JID_PREFIX):
+    if client_id == WEB_CLIENT_ID or _starts(jid, WEB_JID_PREFIX):
         return "web"
-    if client_id == CLI_CLIENT_ID or (jid or "").startswith(CLI_JID_PREFIX):
+    if client_id == CLI_CLIENT_ID or _starts(jid, CLI_JID_PREFIX):
         return "cli"
     return "chat"
 

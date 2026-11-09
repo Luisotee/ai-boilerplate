@@ -36,6 +36,7 @@ from ...whatsapp import WhatsAppNotConnectedError
 from ...whatsapp.client import SharedGroup
 from ..core import AgentDeps, agent
 from ._db import safe_rollback
+from ._surface import chat_client_only
 
 # Caps only an *explicitly requested* message count, so the agent can't ask for
 # an unbounded window. When no limit is passed, get_conversation_messages falls
@@ -51,8 +52,11 @@ CLOUD_UNSUPPORTED = (
 async def shared_group_tools_enabled(
     ctx: RunContext[AgentDeps], tool_def: ToolDefinition
 ) -> ToolDefinition | None:
-    """`prepare` hook: hide both tools unless SHARED_GROUP_TOOLS_ENABLED is on."""
-    return tool_def if runtime_config.get("shared_group_tools_enabled") else None
+    """`prepare` hook: hide both tools unless SHARED_GROUP_TOOLS_ENABLED is on,
+    and on the app surfaces (surfaces.py), which have no chat client."""
+    if not runtime_config.get("shared_group_tools_enabled"):
+        return None
+    return await chat_client_only(ctx, tool_def)
 
 
 def _match_shared_group(

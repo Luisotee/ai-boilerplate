@@ -8,9 +8,10 @@ from ...logger import logger
 from ..core import AgentDeps, agent
 from ._db import safe_rollback
 from ._group import group_admin_refusal
+from ._surface import not_app_only_chat
 
 
-@agent.tool
+@agent.tool(prepare=not_app_only_chat)
 async def set_broadcast_subscription(ctx: RunContext[AgentDeps], subscribed: bool) -> str:
     """
     Turn update announcements (broadcasts) on or off for this chat.
