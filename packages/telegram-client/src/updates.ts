@@ -42,7 +42,8 @@ export function registerUpdateHandlers(): void {
   });
 
   bot.on('message:contact', async (ctx) => {
-    if ((await resolveGate(ctx)).skip) return;
+    // A shared contact is not a question: it must not consume the window.
+    if ((await resolveGate(ctx, { mentionWindow: false })).skip) return;
     await handleSharedContact(ctx);
   });
 
@@ -77,15 +78,19 @@ export function registerUpdateHandlers(): void {
   // no reaction, and the mention window is neither opened nor consumed.
   // Caption edits are skipped (the row holds an `[Image: …]` marker).
   bot.on('edited_message:text', async (ctx) => {
-    const { skip, isGroup } = await resolveGate(ctx, { mentionWindow: false });
+    const { skip, isGroup, saveOnly } = await resolveGate(ctx, { mentionWindow: false });
     if (skip || !ctx.chat) return;
+    // Same text the save path stored: an addressed group message is saved
+    // with the bot mention stripped, chatter verbatim.
+    const text = ctx.editedMessage.text;
+    const cleanText = isGroup && !saveOnly ? stripBotMentionFromCtx(ctx, text) : text;
     const changed = await editMessage(
       {
         whatsappJid: chatIdToJid(ctx.chat.id),
         messageId: String(ctx.editedMessage.message_id),
         senderJid: isGroup && ctx.from ? chatIdToJid(ctx.from.id) : undefined,
       },
-      ctx.editedMessage.text
+      cleanText
     );
     logger.info(
       { chatId: ctx.chat.id, messageId: ctx.editedMessage.message_id, changed },
@@ -244,12 +249,6 @@ export function registerUpdateHandlers(): void {
  * whitelist live in a separate set the matcher never consults here, so a bare
  * number can never accidentally admit a Telegram chat with the same digits.
  */
-async function passesWhitelist(chatId: number | undefined): Promise<boolean> {
-  const wl = await getLiveWhitelist();
-  if (!wl) return false; // unavailable → fail closed
-  return chatListedIn(wl, chatId);
-}
-
 function chatListedIn(wl: Whitelist, chatId: number | undefined): boolean {
   if (wl.size === 0) return true;
   if (chatId === undefined) return false;
@@ -322,7 +321,7 @@ async function resolveGate(ctx: TelegramContext, options: GateOptions = {}): Pro
 }
 
 // Exported for unit tests only.
-export const _internals = { passesWhitelist, resolveGate };
+export const _internals = { resolveGate };
 
 /**
  * `bot.botInfo` THROWS when the bot has not been initialized (grammY >= 1.4x) —
@@ -358,7 +357,9 @@ function isAddressed(ctx: TelegramContext, options: GateOptions = {}): boolean {
   const me = botIdentity();
   if (!message || !me) return false;
   const addressing = addressingOf(message, me);
-  if (options.mentionWindow === false) return addressing !== null;
+  // Anonymous admins all share `from` = GroupAnonymousBot, so a window keyed
+  // on it would let one admin's mention open it for another: skip it for them.
+  if (options.mentionWindow === false || message.sender_chat) return addressing !== null;
 
   const windowKey = `${ctx.chat?.id}|${ctx.from?.id}`;
   if (addressing === 'mention') {

@@ -199,6 +199,14 @@ describe('edited_message', () => {
     expect(sendMessageToAI).not.toHaveBeenCalled();
   });
 
+  it('strips the bot mention from an addressed edit, as the save path does', async () => {
+    const { bot, editMessage } = await boot('jid', `tg:${GROUP_ID}`);
+    const update = groupEdit(MEMBER, '@MyBot what is Y');
+    update.edited_message!.entities = [{ type: 'mention', offset: 0, length: 6 }];
+    await bot.handleUpdate(update);
+    expect(editMessage.mock.calls[0][1]).toBe('what is Y');
+  });
+
   it('drops an edit in a chat outside the whitelist', async () => {
     const { bot, editMessage } = await boot('jid', `tg:${MEMBER}`);
     await bot.handleUpdate(groupEdit(MEMBER, 'fixed'));
@@ -211,6 +219,41 @@ describe('edited_message', () => {
     await bot.handleUpdate(groupEdit(MEMBER, '@MyBot now with a question'));
     await bot.handleUpdate(groupText(MEMBER, 'the question', false));
     expect(sendMessageToAI.mock.calls[1][2].saveOnly ?? false).toBe(false);
+  });
+});
+
+describe('mention window exclusions', () => {
+  it('a shared contact does not consume the window', async () => {
+    const { bot, sendMessageToAI } = await boot('jid', `tg:${GROUP_ID}`);
+    await bot.handleUpdate(groupText(MEMBER, '@MyBot', true));
+    const contact = groupText(MEMBER, '', false);
+    delete (contact.message as { text?: string }).text;
+    (contact.message as unknown as { contact: object }).contact = {
+      phone_number: '+5511999999999',
+      first_name: 'Ana',
+    };
+    await bot.handleUpdate(contact);
+    await bot.handleUpdate(groupText(MEMBER, 'the question', false));
+    const last = sendMessageToAI.mock.calls.at(-1)!;
+    expect(last[1]).toBe('the question');
+    expect(last[2].saveOnly ?? false).toBe(false);
+  });
+
+  it('anonymous admins (sender_chat) neither open nor use the window', async () => {
+    const { bot, sendMessageToAI } = await boot('jid', `tg:${GROUP_ID}`);
+    const anon = (text: string, mention: boolean) => {
+      const u = groupText(1087968824, text, mention);
+      (u.message as unknown as { sender_chat: object }).sender_chat = {
+        id: GROUP_ID,
+        type: 'supergroup',
+        title: 'Team chat',
+      };
+      return u;
+    };
+    await bot.handleUpdate(anon('@MyBot', true));
+    await bot.handleUpdate(anon('the question', false));
+    expect(sendMessageToAI.mock.calls[0][2].saveOnly ?? false).toBe(false);
+    expect(sendMessageToAI.mock.calls[1][2].saveOnly).toBe(true);
   });
 });
 

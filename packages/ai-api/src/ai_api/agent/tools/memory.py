@@ -1,6 +1,6 @@
 from pydantic_ai import RunContext
 
-from ...database import get_or_create_core_memory
+from ...database import get_or_create_core_memory, is_group_jid
 from ...logger import logger
 from ...runtime_config import runtime_config
 from ..core import AgentDeps, agent
@@ -31,6 +31,27 @@ def is_destructive_rewrite(previous: str, new: str) -> bool:
     new_lines = {line.strip() for line in new.splitlines() if line.strip()}
     kept = sum(len(line) for line in previous_lines if line in new_lines)
     return kept / total < MIN_KEPT_SHARE
+
+
+def backup_after_save(previous: str, backup: str | None, *, trusted: bool) -> str | None:
+    """The ``/memories undo`` backup to keep when ``previous`` is replaced.
+
+    One level, but a backup worth keeping is never lost to a save:
+      - an empty ``previous`` never replaces a backup (after a mistaken
+        ``/memories clear``, the next save must not overwrite the cleared text);
+      - an untrusted save (a group member who isn't a confirmed admin) moves
+        the backup only when it is empty, so it keeps the last state from
+        before the members' edits. However a member erodes the document, one
+        cut at a time or by appending filler then cutting to it, an admin's
+        ``/memories undo`` restores that state.
+    A trusted save (a private chat, or a confirmed group admin) keeps the
+    document it replaced. Pure, so an operation-based memory tool can reuse it.
+    """
+    if not previous.strip():
+        return backup
+    if trusted or not (backup or "").strip():
+        return previous
+    return backup
 
 
 @agent.tool
@@ -82,7 +103,12 @@ async def update_core_memory(ctx: RunContext[AgentDeps], content: str) -> str:
                 return refusal
 
         if content != previous:
-            mem.previous_content = previous  # one level of /memories undo
+            # Same rule as group_admin_refusal: a private chat, or a group
+            # admin confirmed by the client (anything but True is not).
+            trusted = not is_group_jid(ctx.deps.whatsapp_jid) or ctx.deps.is_group_admin is True
+            mem.previous_content = backup_after_save(
+                previous, mem.previous_content, trusted=trusted
+            )
             mem.content = content
             ctx.deps.db.commit()
 

@@ -30,12 +30,19 @@ interface DrainLog {
  * POLL_MAX_DURATION_MS would stall every other chat); per-chat ordering is
  * restored by `sequentialize` in bot.ts.
  */
+/**
+ * Update types this bot subscribes to, in both modes (polling here, webhook via
+ * `setWebhook` in main.ts). `edited_message` keeps saved history in step with
+ * edits (`updates.ts`); Telegram sends no update for a deletion.
+ */
+export const ALLOWED_UPDATES = ['message', 'edited_message'] as const;
+
 export async function startLongPolling(): Promise<RunnerHandle> {
   await bot.api.deleteWebhook({ drop_pending_updates: config.telegram.dropPendingUpdates });
   return run(bot, {
     runner: {
       fetch: {
-        allowed_updates: ['message'],
+        allowed_updates: [...ALLOWED_UPDATES],
         timeout: config.telegram.pollTimeoutSeconds,
       },
       // The runner's own default is 15 HOURS of exponential backoff before it

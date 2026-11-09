@@ -11,6 +11,7 @@ vi.mock('../../src/logger.js', () => ({
 }));
 
 import {
+  carriesHandledContent,
   getPushName,
   getSenderName,
   isBotMentioned,
@@ -690,5 +691,23 @@ describe('isBotMentioned with typed names', () => {
   it('shouldRespondInGroup passes the typed names through', () => {
     const msg = createMessage({ message: { conversation: '@Curupira bom dia' } });
     expect(shouldRespondInGroup(msg, botJid, undefined, names)).toBe(true);
+  });
+});
+
+describe('carriesHandledContent', () => {
+  it('is true for text, audio, image and document', () => {
+    expect(carriesHandledContent({ conversation: 'hi' })).toBe(true);
+    expect(carriesHandledContent({ extendedTextMessage: { text: 'hi' } })).toBe(true);
+    expect(carriesHandledContent({ audioMessage: {} })).toBe(true);
+    expect(carriesHandledContent({ imageMessage: {} })).toBe(true);
+    expect(carriesHandledContent({ documentMessage: {} })).toBe(true);
+  });
+
+  it('is false for reactions, stickers, polls, protocol messages and nothing', () => {
+    expect(carriesHandledContent({ reactionMessage: { text: '👍' } })).toBe(false);
+    expect(carriesHandledContent({ stickerMessage: {} })).toBe(false);
+    expect(carriesHandledContent({ pollUpdateMessage: {} })).toBe(false);
+    expect(carriesHandledContent({ protocolMessage: { type: 14 } })).toBe(false);
+    expect(carriesHandledContent(undefined)).toBe(false);
   });
 });

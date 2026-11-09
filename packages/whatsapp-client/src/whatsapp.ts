@@ -46,7 +46,7 @@ import {
 } from './utils/jid.js';
 import { isWhitelisted } from './utils/whitelist.js';
 import { gateMessage, type Gate } from './utils/gating.js';
-import { isBotMentioned, isReplyToBotMessage } from './utils/message.js';
+import { carriesHandledContent, isBotMentioned, isReplyToBotMessage } from './utils/message.js';
 import { createMentionWindow } from './utils/mention-window.js';
 
 const DEFAULT_IMAGE_PROMPT = 'Please describe and analyze this image';
@@ -508,11 +508,14 @@ export async function initializeWhatsApp(): Promise<void> {
           const typedNames = [config.botName, sock.user?.name, botJid.split('@')[0]];
           const windowKey = `${whatsappJid}|${stripDeviceSuffix(msg.key.participant ?? '')}`;
           const mentioned = isBotMentioned(msg, botJid, botLid, typedNames);
+          // Only content the bot handles touches the window, so a reaction or
+          // an edit's protocol upsert between "@bot" and the question can't eat it.
+          const windowed = carriesHandledContent(normalizedMessage);
           addressed =
             mentioned ||
             isReplyToBotMessage(msg, botJid, botLid) ||
-            mentionWindow.consume(windowKey, Date.now());
-          if (mentioned) mentionWindow.arm(windowKey, Date.now());
+            (windowed && mentionWindow.consume(windowKey, Date.now()));
+          if (mentioned && windowed) mentionWindow.arm(windowKey, Date.now());
         }
         const saveOnly = isGroup && (gate.suppressResponse || !addressed);
 

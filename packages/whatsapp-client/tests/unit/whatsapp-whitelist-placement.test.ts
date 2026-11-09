@@ -368,6 +368,28 @@ describe('mention window (GROUP_GATING=membership)', () => {
 
   const saveOnlyOf = (call: number) => handleTextMessage.mock.calls[call][5]?.saveOnly === true;
 
+  it('a reaction or an edit between the mention and the question keeps the window', async () => {
+    await drive(makeGroupMsg(MEMBER, true));
+    await drive({
+      key: { remoteJid: GROUP, participant: MEMBER, fromMe: false, id: 'R1' },
+      message: { reactionMessage: { key: { id: 'X' }, text: '👍' } },
+    });
+    await drive({
+      key: { remoteJid: GROUP, participant: MEMBER, fromMe: false, id: 'E1' },
+      message: {
+        protocolMessage: {
+          type: 14,
+          key: { id: 'M1' },
+          editedMessage: { conversation: '@bot fixed typo' },
+        },
+      },
+    });
+    await drive(plain(MEMBER));
+
+    expect(handleTextMessage).toHaveBeenCalledTimes(2);
+    expect(saveOnlyOf(1)).toBe(false);
+  });
+
   it("answers the sender's next message after a pill mention, once", async () => {
     await drive(makeGroupMsg(MEMBER, true));
     await drive(plain(MEMBER));

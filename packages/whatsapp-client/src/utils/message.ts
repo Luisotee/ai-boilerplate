@@ -76,6 +76,23 @@ export function getMessageText(message: proto.IMessage | null | undefined): stri
 }
 
 /**
+ * Whether a (normalized) message carries content the router handles: text,
+ * audio, an image or a document. Reactions, stickers, polls and protocol
+ * messages (an edit's or revoke's own upsert) don't, so they must not open or
+ * consume the mention window.
+ */
+export function carriesHandledContent(message: proto.IMessage | null | undefined): boolean {
+  if (!message) return false;
+  return Boolean(
+    message.conversation ||
+    message.extendedTextMessage?.text ||
+    message.audioMessage ||
+    message.imageMessage ||
+    message.documentMessage
+  );
+}
+
+/**
  * Check if bot is mentioned in group message.
  *
  * A mention pill (`contextInfo.mentionedJid`) is checked in both phone JID

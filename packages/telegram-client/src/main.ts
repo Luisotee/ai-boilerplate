@@ -17,7 +17,7 @@ import {
 import { bot } from './bot.js';
 import { logger } from './logger.js';
 import { markBotDisconnected, markBotReady } from './services/bot-state.js';
-import { startLongPolling, stopLongPolling } from './polling.js';
+import { ALLOWED_UPDATES, startLongPolling, stopLongPolling } from './polling.js';
 import type { RunnerHandle } from '@grammyjs/runner';
 import { registerUpdateHandlers } from './updates.js';
 import { registerHealthRoutes } from './routes/health.js';
@@ -178,7 +178,7 @@ async function start() {
     try {
       await bot.api.setWebhook(config.telegram.publicWebhookUrl, {
         secret_token: config.telegram.webhookSecret || undefined,
-        allowed_updates: ['message'],
+        allowed_updates: [...ALLOWED_UPDATES],
         drop_pending_updates: config.telegram.dropPendingUpdates,
       });
       app.log.info(

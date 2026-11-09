@@ -406,8 +406,9 @@ def _handle_memories_command(db: Session, user_id: str, parts: list[str]) -> str
         return "Core memories cleared. Send /memories undo to bring them back."
 
     if sub == "undo":
-        # One level: swap the document with the one before the last change,
-        # so a second undo re-applies it.
+        # One level: swap the document with its backup, so a second undo
+        # re-applies it. In a group the backup survives non-admin saves
+        # (agent/tools/memory.py backup_after_save).
         mem = get_or_create_core_memory(db, user_id)
         if mem.previous_content is None or mem.previous_content == mem.content:
             return "Nothing to undo."

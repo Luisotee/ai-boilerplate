@@ -7,7 +7,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ai_api.agent.tools.memory import is_destructive_rewrite, update_core_memory
+from ai_api.agent.tools.memory import (
+    backup_after_save,
+    is_destructive_rewrite,
+    update_core_memory,
+)
 
 MODULE = "ai_api.agent.tools.memory"
 
@@ -128,6 +132,61 @@ async def test_a_group_member_can_add_and_edit_a_line():
     assert result.startswith("Core memory saved")
     assert mem.content == new
     assert mem.previous_content == GROUP_DOC
+
+
+async def _save(ctx, mem, content):
+    with (
+        patch(f"{MODULE}.get_or_create_core_memory", return_value=mem),
+        patch(f"{MODULE}.runtime_config") as mock_rc,
+    ):
+        mock_rc.get.return_value = 2000
+        return await update_core_memory(ctx, content)
+
+
+async def test_two_step_erosion_by_a_member_leaves_the_original_as_the_backup():
+    # Append filler (every old line kept), then cut down to the filler: each
+    # step passes the per-save guard, but the backup keeps the pre-member
+    # document, so an admin's /memories undo brings it back.
+    ctx = _group_ctx(None)
+    filler = "\n".join(f"- filler line {i:03d} padding padding" for i in range(30))
+    mem = MagicMock(content=GROUP_DOC, previous_content=None)
+    assert (await _save(ctx, mem, GROUP_DOC + "\n" + filler)).startswith("Core memory saved")
+    assert (await _save(ctx, mem, filler)).startswith("Core memory saved")
+    assert mem.content == filler
+    assert mem.previous_content == GROUP_DOC
+
+
+async def test_a_save_after_a_clear_keeps_the_cleared_document_as_the_backup():
+    # /memories clear left content "" and the backup X; a member's next
+    # message makes the agent save "Y". The backup must still be X.
+    ctx = _group_ctx(None)
+    mem = MagicMock(content="", previous_content=GROUP_DOC)
+    await _save(ctx, mem, "## Group\n- new fact")
+    assert mem.content == "## Group\n- new fact"
+    assert mem.previous_content == GROUP_DOC
+
+
+async def test_an_admin_save_moves_the_backup():
+    ctx = _group_ctx(True)
+    mem = MagicMock(content=GROUP_DOC + "\n- a", previous_content=GROUP_DOC)
+    await _save(ctx, mem, GROUP_DOC + "\n- b")
+    assert mem.previous_content == GROUP_DOC + "\n- a"
+
+
+@pytest.mark.parametrize(
+    ("previous", "backup", "trusted", "expected"),
+    [
+        ("A", None, False, "A"),  # untrusted, no backup yet: take it
+        ("A", "", False, "A"),
+        ("B", "A", False, "A"),  # untrusted never moves a real backup
+        ("B", "A", True, "B"),  # trusted keeps the replaced document
+        ("", "A", True, "A"),  # an empty document never replaces a backup
+        ("  ", "A", False, "A"),
+        ("", None, True, None),
+    ],
+)
+def test_backup_after_save(previous, backup, trusted, expected):
+    assert backup_after_save(previous, backup, trusted=trusted) == expected
 
 
 async def test_a_group_admin_can_shrink_the_memory():
