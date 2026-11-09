@@ -12,8 +12,21 @@ from redis.asyncio import Redis
 
 from ..config import settings
 from ..logger import logger
-from ..queue.utils import delete_job_image, get_job_metadata, save_job_chunk, set_job_metadata
-from .delivery import EXPIRED_JOB_NOTICE, is_expired, push_text_once
+from ..queue.utils import (
+    delete_job_image,
+    get_job_chunks,
+    get_job_metadata,
+    save_job_chunk,
+    set_job_metadata,
+)
+from .delivery import (
+    EXPIRED_JOB_NOTICE,
+    claim_key,
+    is_expired,
+    is_late,
+    job_age_seconds,
+    push_text_once,
+)
 from .manager import (
     GROUP_NAME,
     HEARTBEAT_INTERVAL_SECONDS,
@@ -34,12 +47,23 @@ TERMINAL_STATUSES = frozenset({"complete", "failed"})
 BURST_MAX_JOBS = 10
 BURST_MAX_IMAGES = 10
 
+#: process_user_stream gives up on a stream after this many errors in a row,
+#: so one broken stream can't hold the consumer's gather (and every other
+#: user's replies) forever. Discovery picks it up again next cycle.
+MAX_CONSECUTIVE_STREAM_ERRORS = 3
+
+#: An expired entry older than this is acked without a notice: a user who
+#: wrote a day ago (e.g. a job left pending by a worker before crash recovery
+#: existed) gains nothing from "please send it again".
+SILENT_EXPIRY_AGE_SECONDS = 24 * 3600
+
 
 def is_scheduled_entry(data: dict) -> bool:
     """Stream entries added by the scheduler (``trigger=scheduled``).
 
-    They carry their own ``run_id``/``job_id`` semantics and no platform message
-    id, so the chat-specific steps here (the already-finished check, burst
+    The scheduler (PR #50) writes them to the same per-user stream, with their
+    own ``run_id``/``job_id`` semantics and no platform message id, so the
+    chat-specific steps here (the already-finished and expiry checks, burst
     merging) never touch them: each one goes to process_single_message alone.
     """
     return data.get(b"trigger") == b"scheduled"
@@ -110,6 +134,7 @@ async def process_user_stream(redis: Redis, user_id: str, running_flag: dict):
         user_id: User ID to process messages for
         running_flag: Dict with 'running' key to control loop
     """
+    errors = 0
     while running_flag.get("running", True):
         try:
             entries = await claim_orphaned_chat_entries(redis, user_id)
@@ -123,9 +148,14 @@ async def process_user_stream(redis: Redis, user_id: str, running_flag: dict):
             entries = await _collect_burst(redis, user_id, entries)
             for run in plan_runs(entries):
                 await _process_run(redis, user_id, run)
+            errors = 0
 
         except Exception as e:
+            errors += 1
             logger.error(f"Error in stream processing for user {user_id}: {e}")
+            if errors >= MAX_CONSECUTIVE_STREAM_ERRORS:
+                logger.error(f"Giving up on the stream of user {user_id} until the next cycle")
+                break
             await asyncio.sleep(1)
 
 
@@ -153,6 +183,7 @@ def _is_mergeable(data: dict) -> bool:
 _RUN_KEYS = (
     b"whatsapp_jid",
     b"conversation_type",
+    b"sender_jid",
     b"sender_name",
     b"client_id",
     b"is_group_admin",
@@ -238,10 +269,16 @@ async def _process_run(redis: Redis, user_id: str, run: list[tuple[str, dict]]) 
         for message_id, data in run:
             if await _already_finished(redis, data):
                 logger.info(f"Chat job in entry {message_id} already finished; acking only")
-            else:
-                pending.append((message_id, data))
+                await _push_unconfirmed_late_reply(redis, message_id, data)
+                continue
+            try:
+                _job_kwargs(message_id, data)
+            except Exception as invalid:
+                logger.error(f"Dropping malformed chat entry {message_id}: {invalid}")
+                continue
+            pending.append((message_id, data))
         if len(pending) == 1:
-            await process_single_message(user_id, *pending[0])
+            await _run_entry(redis, user_id, *pending[0])
         elif pending:
             await _process_merged_run(redis, user_id, pending)
     except Exception as run_error:
@@ -307,7 +344,50 @@ async def _already_finished(redis: Redis, data: dict) -> bool:
     if not raw_job_id:
         return False
     metadata = await get_job_metadata(redis, raw_job_id.decode("utf-8", "replace"))
-    return metadata is not None and metadata.get("status", "complete") in TERMINAL_STATUSES
+    if metadata is None or metadata.get("status", "complete") not in TERMINAL_STATUSES:
+        return False
+    carrier = metadata.get("merged_into")
+    if carrier:
+        # Absorbed jobs are closed when the merged run starts; the burst is
+        # done only once its carrier is, else recovery re-runs all of it.
+        carrier_meta = await get_job_metadata(redis, carrier)
+        return (
+            carrier_meta is not None and carrier_meta.get("status", "complete") in TERMINAL_STATUSES
+        )
+    return True
+
+
+async def _push_unconfirmed_late_reply(redis: Redis, message_id: str, data: dict) -> None:
+    """A finished, late job whose reply nobody delivered (the worker died
+    between writing the result and pushing it): push it now. The client
+    already promised the user the answer would come."""
+    if is_scheduled_entry(data) or not is_late(stream_entry_time_ms(message_id)):
+        return
+    raw_job_id = data.get(b"job_id")
+    raw_jid = data.get(b"whatsapp_jid")
+    if not raw_job_id or not raw_jid:
+        return
+    job_id = raw_job_id.decode("utf-8", "replace")
+    try:
+        if await redis.exists(claim_key(job_id)):
+            return  # the poller or an earlier push delivered it
+        metadata = await get_job_metadata(redis, job_id) or {}
+        if metadata.get("merged_into"):
+            return  # nothing of its own to send
+        text = "".join(c["content"] for c in await get_job_chunks(redis, job_id))
+        if not text:
+            return
+        client_id = data.get(b"client_id")
+        await push_text_once(
+            redis,
+            client_id.decode() if client_id else None,
+            job_id,
+            raw_jid.decode("utf-8", "replace"),
+            text,
+            stream_entry_time_ms(message_id),
+        )
+    except Exception:
+        logger.error(f"[Job {job_id}] Failed to push an unconfirmed late reply", exc_info=True)
 
 
 async def _process_entry(redis: Redis, user_id: str, message_id: str, data: dict) -> None:
@@ -315,10 +395,9 @@ async def _process_entry(redis: Redis, user_id: str, message_id: str, data: dict
     try:
         if not is_scheduled_entry(data) and await _already_finished(redis, data):
             logger.info(f"Chat job in entry {message_id} already finished; acking only")
-        elif not is_scheduled_entry(data) and is_expired(stream_entry_time_ms(message_id)):
-            await _expire_entry(redis, message_id, data)
+            await _push_unconfirmed_late_reply(redis, message_id, data)
         else:
-            await process_single_message(user_id, message_id, data)
+            await _run_entry(redis, user_id, message_id, data)
     except Exception as msg_error:
         logger.error(
             f"Error processing message {message_id} for user {user_id}: {msg_error}",
@@ -331,9 +410,24 @@ async def _process_entry(redis: Redis, user_id: str, message_id: str, data: dict
             logger.error(f"Failed to acknowledge message {message_id}: {ack_error}")
 
 
+async def _run_entry(redis: Redis, user_id: str, message_id: str, data: dict) -> None:
+    """Run one unfinished entry, or expire it when it waited too long (no ack)."""
+    if not is_scheduled_entry(data) and is_expired(stream_entry_time_ms(message_id)):
+        await _expire_entry(redis, message_id, data)
+    else:
+        await process_single_message(user_id, message_id, data)
+
+
 async def _expire_entry(redis: Redis, message_id: str, data: dict) -> None:
     """Close a chat job that waited past CHAT_JOB_MAX_AGE_SECONDS without
-    running it (an outage backlog): the user gets a short notice instead."""
+    running it (an outage backlog): the user gets a short notice instead,
+    unless it is over SILENT_EXPIRY_AGE_SECONDS old (then it is only acked)."""
+    age = job_age_seconds(stream_entry_time_ms(message_id))
+    if age is not None and age > SILENT_EXPIRY_AGE_SECONDS:
+        logger.warning(f"Chat entry {message_id} is {age / 3600:.0f}h old; dropping it silently")
+        if data.get(b"has_image") == b"true" and data.get(b"job_id"):
+            await delete_job_image(redis, data[b"job_id"].decode("utf-8", "replace"))
+        return
 
     def field(name: bytes) -> str | None:
         value = data.get(name)

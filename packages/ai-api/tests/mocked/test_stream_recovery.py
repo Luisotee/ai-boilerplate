@@ -157,3 +157,88 @@ def test_consumer_id_is_unique_per_process_start():
 def test_stream_entry_time():
     assert manager.stream_entry_time_ms("1794236767849-0") == 1794236767849
     assert manager.stream_entry_time_ms("garbage") is None
+
+
+async def test_new_stream_without_a_group_is_processed():
+    """XADD creates the stream but not the group (a new user's first message)."""
+    client = fakeredis.FakeAsyncRedis()
+    try:
+        await client.xadd(STREAM, _job("first"))
+        ran = await _run_user_stream(client)
+        assert ran == ["first"]
+        assert (await client.xpending(STREAM, GROUP_NAME))["pending"] == 0
+    finally:
+        await client.aclose()
+
+
+async def test_a_failing_stream_gives_up_after_repeated_errors(redis):
+    failing = AsyncMock(side_effect=RuntimeError("boom"))
+    with (
+        patch.object(consumer_module, "claim_orphaned_chat_entries", failing),
+        patch.object(consumer_module.asyncio, "sleep", AsyncMock()),
+    ):
+        await consumer_module.process_user_stream(redis, USER, {"running": True})
+    assert failing.await_count == consumer_module.MAX_CONSECUTIVE_STREAM_ERRORS
+
+
+async def test_recently_delivered_entry_of_a_silent_worker_is_not_taken(redis):
+    """No heartbeat but delivered moments ago: maybe a live worker that missed
+    its heartbeat (blocked loop, pre-heartbeat worker), so wait."""
+    await redis.xadd(STREAM, _job("inflight"))
+    await _deliver_to(redis, "worker-quiet")
+    await redis.xadd(STREAM, _job("next"))
+
+    ran = await _run_user_stream(redis)
+
+    assert ran == []
+    pending = await redis.xpending_range(STREAM, GROUP_NAME, "-", "+", 10)
+    assert [p["consumer"] for p in pending] == [b"worker-quiet"]
+
+
+async def test_day_old_orphan_is_dropped_without_a_notice(redis):
+    await redis.xadd(STREAM, _job("ancient"), id="1000-0")
+    await _deliver_to(redis, "worker-1")
+
+    with (
+        patch.object(manager, "ORPHAN_CLAIM_MIN_IDLE_MS", 0),
+        patch.object(consumer_module, "push_text_once", AsyncMock()) as push,
+    ):
+        ran = await _run_user_stream(redis)
+
+    assert ran == []
+    push.assert_not_awaited()
+    assert await redis.get("job:meta:ancient") is None
+    assert (await redis.xpending(STREAM, GROUP_NAME))["pending"] == 0
+
+
+class TestUnconfirmedLateReply:
+    async def _finished_late_orphan(self, redis):
+        import time
+
+        late_ms = int((time.time() - 300) * 1000)
+        await redis.xadd(STREAM, _job("slow"), id=f"{late_ms}-0")
+        await _deliver_to(redis, "worker-dead")
+        await redis.set("job:meta:slow", json.dumps({"total_chunks": 1}))
+        await redis.rpush("job:chunks:slow", json.dumps({"index": 0, "content": "the answer"}))
+
+    async def test_is_pushed_on_recovery(self, redis):
+        await self._finished_late_orphan(redis)
+        with (
+            patch.object(manager, "ORPHAN_CLAIM_MIN_IDLE_MS", 0),
+            patch.object(consumer_module, "push_text_once", AsyncMock()) as push,
+        ):
+            ran = await _run_user_stream(redis)
+
+        assert ran == []
+        assert push.await_args.args[4] == "the answer"
+
+    async def test_is_not_pushed_when_already_delivered(self, redis):
+        await self._finished_late_orphan(redis)
+        await redis.set("job:claim:slow", "poll")
+        with (
+            patch.object(manager, "ORPHAN_CLAIM_MIN_IDLE_MS", 0),
+            patch.object(consumer_module, "push_text_once", AsyncMock()) as push,
+        ):
+            await _run_user_stream(redis)
+
+        push.assert_not_awaited()

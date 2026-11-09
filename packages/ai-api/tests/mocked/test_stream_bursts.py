@@ -147,6 +147,47 @@ async def test_finished_job_inside_a_burst_is_skipped(redis):
     assert processor.await_args.kwargs["absorbed_job_ids"] == ["x"]
 
 
+async def test_malformed_entry_does_not_kill_the_burst(redis):
+    bad = _job("bad")
+    del bad["user_message_id"]
+    await redis.xadd(STREAM, _job("x"))
+    await redis.xadd(STREAM, bad)
+    await redis.xadd(STREAM, _job("y"))
+
+    processor, _ = await _run(redis)
+
+    assert processor.await_count == 1
+    assert processor.await_args.kwargs["job_id"] == "y"
+    assert processor.await_args.kwargs["absorbed_job_ids"] == ["x"]
+    assert (await redis.xpending(STREAM, GROUP_NAME))["pending"] == 0
+
+
+async def test_single_survivor_still_expires(redis):
+    import time
+
+    old_ms = int((time.time() - 7200) * 1000)
+    await redis.xadd(STREAM, _job("done"), id=f"{old_ms}-0")
+    await redis.xadd(STREAM, _job("late"), id=f"{old_ms}-1")
+    await redis.set("job:meta:done", json.dumps({"total_chunks": 1}))
+
+    with patch.object(consumer_module, "push_text_once", AsyncMock()) as push:
+        processor, singles = await _run(redis)
+
+    assert singles == [] and processor.await_count == 0
+    assert json.loads(await redis.get("job:meta:late"))["expired"] is True
+    assert push.await_count == 1
+
+
+async def test_absorbed_job_is_rerun_until_its_carrier_finished(redis):
+    # A crash mid-run: the absorbed job is closed, the carrier never finished.
+    await redis.set(
+        "job:meta:x", json.dumps({"status": "complete", "merged_into": "y", "total_chunks": 0})
+    )
+    assert await consumer_module._already_finished(redis, {b"job_id": b"x"}) is False
+    await redis.set("job:meta:y", json.dumps({"total_chunks": 1}))
+    assert await consumer_module._already_finished(redis, {b"job_id": b"x"}) is True
+
+
 class TestPlanRuns:
     def _ids(self, runs):
         return [[data[b"job_id"].decode() for _mid, data in run] for run in runs]
@@ -167,6 +208,14 @@ class TestPlanRuns:
             ("3-0", _b(_job("c", sender_name="Bia", **group))),
         ]
         assert self._ids(plan_runs(entries)) == [["a", "b"], ["c"]]
+
+    def test_same_name_different_sender_ids_are_not_merged(self):
+        group = {"conversation_type": "group", "whatsapp_jid": "1203@g.us", "sender_name": "Ana"}
+        entries = [
+            ("1-0", _b(_job("a", sender_jid="111@s.whatsapp.net", **group))),
+            ("2-0", _b(_job("b", sender_jid="222@s.whatsapp.net", **group))),
+        ]
+        assert self._ids(plan_runs(entries)) == [["a"], ["b"]]
 
     def test_admin_flag_must_match(self):
         entries = [
@@ -197,7 +246,10 @@ class TestProcessorClosesAbsorbedJobs:
         async def get_client():
             yield fake
 
+        closed_before_agent = []
+
         async def agent(*_a, **_kw):
+            closed_before_agent.append(await fake.get("job:meta:early") is not None)
             yield "one answer"
 
         with (
@@ -230,6 +282,8 @@ class TestProcessorClosesAbsorbedJobs:
                 early = (await c.get("/chat/job/early", headers=headers)).json()
                 carrier = (await c.get("/chat/job/carrier", headers=headers)).json()
 
+        # Closed when the run starts, so the early poller never sends a late notice
+        assert closed_before_agent == [True]
         assert early["complete"] is True and early["silent"] is True
         assert carrier["full_response"] == "one answer" and carrier["silent"] is False
 

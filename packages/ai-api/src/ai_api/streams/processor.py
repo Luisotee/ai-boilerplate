@@ -86,7 +86,7 @@ async def process_chat_job_direct(
         image_sources: (job_id, mimetype, count) of every job whose images this
             run sees (a merged burst); defaults to this job's own images
         absorbed_job_ids: Earlier jobs of a burst merged into this run. They are
-            closed as merged (their clients send nothing) when the run ends
+            closed as merged (their clients send nothing) when the run starts
 
     Returns:
         Dict with processing result including success status, job_id, chunk count
@@ -113,6 +113,12 @@ async def process_chat_job_direct(
         whatsapp_client: WhatsAppClient | None = None
 
         try:
+            # Close the burst's absorbed jobs at once, so their pollers stop
+            # (silently) instead of each sending a late notice. Recovery still
+            # re-runs the burst after a crash: consumer._already_finished
+            # counts a merged job as finished only once its carrier is.
+            await _close_absorbed_jobs(redis, absorbed_job_ids or [], job_id)
+
             # Step 1: Get conversation history from PostgreSQL
             logger.info(f"[Job {job_id}] Fetching conversation history...")
             # The messages being answered were saved by /chat/enqueue before the
@@ -472,9 +478,6 @@ async def process_chat_job_direct(
             raise
 
         finally:
-            # Close the burst's absorbed jobs only now: a worker dying mid-run
-            # leaves them pending too, so recovery re-runs the whole burst.
-            await _close_absorbed_jobs(redis, absorbed_job_ids or [], job_id)
             # Close HTTP client
             if http_client:
                 await http_client.aclose()

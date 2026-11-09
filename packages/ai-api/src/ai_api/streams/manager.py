@@ -32,10 +32,14 @@ CONSUMER_ID = f"worker-{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:8
 HEARTBEAT_KEY_PREFIX = "chat_worker:alive:"
 HEARTBEAT_TTL_SECONDS = 30
 HEARTBEAT_INTERVAL_SECONDS = 10
-# XCLAIM only entries idle at least this long, so when two live workers race
-# for the same orphan, the first claim resets its idle time and the second
-# claims nothing.
-ORPHAN_CLAIM_MIN_IDLE_MS = 1000
+# Another worker's pending entry is taken over only once it has been idle this
+# long AND that worker's heartbeat is gone. The idle floor covers a worker that
+# is alive but missed its heartbeat (an event loop blocked by a slow DB call,
+# or a worker from before heartbeats existed during an overlapping deploy): it
+# exceeds a worst-case agent run, so a job still in flight is never run twice.
+# It also makes XCLAIM race-safe: the first claim resets the idle time, so a
+# second worker claiming the same orphan gets nothing.
+ORPHAN_CLAIM_MIN_IDLE_MS = 300_000
 
 
 async def add_message_to_stream(redis: Redis, user_id: str, job_data: dict) -> str:
@@ -147,15 +151,18 @@ async def claim_orphaned_chat_entries(
     is never delivered again as a new (``">"``) entry.
 
     Returns:
-        None when a live worker other than this one holds pending entries of
-        this stream: that worker is processing this user, so leave the stream
-        alone (one worker per user keeps the order). Otherwise the entries
+        None when another worker holds pending entries of this stream and is
+        alive, or its entries were delivered less than ORPHAN_CLAIM_MIN_IDLE_MS
+        ago: leave the stream alone (one worker per user keeps the order). Otherwise the entries
         claimed for this worker, oldest first (empty when there were none).
         Entries this worker itself left pending (a failed ack) count as
         orphans too: per-user processing in one worker is sequential, so none
         of them is in flight while this runs.
     """
     stream_key = f"stream:user:{user_id}"
+    # XADD creates the stream but not the group; XPENDING on a stream without
+    # it fails with NOGROUP (a new user's first message).
+    await ensure_consumer_group(redis, user_id)
     pending = await redis.xpending_range(stream_key, GROUP_NAME, "-", "+", count)
     if not pending:
         return []
@@ -164,9 +171,18 @@ async def claim_orphaned_chat_entries(
     for owner in owners - {CONSUMER_ID}:
         if await is_consumer_alive(redis, owner):
             return None
+    if any(
+        _decode(p["consumer"]) != CONSUMER_ID
+        and p.get("time_since_delivered", 0) < ORPHAN_CLAIM_MIN_IDLE_MS
+        for p in pending
+    ):
+        return None  # too recent to be sure its worker is gone; retry later
 
     ids = [_decode(p["message_id"]) for p in pending]
-    claimed = await redis.xclaim(stream_key, GROUP_NAME, CONSUMER_ID, ORPHAN_CLAIM_MIN_IDLE_MS, ids)
+    # This worker's own leftovers (a failed ack) need no idle floor: per-user
+    # processing is sequential here, so none of them is in flight.
+    min_idle = 0 if owners == {CONSUMER_ID} else ORPHAN_CLAIM_MIN_IDLE_MS
+    claimed = await redis.xclaim(stream_key, GROUP_NAME, CONSUMER_ID, min_idle, ids)
     out: list[tuple[str, dict[bytes, bytes]]] = []
     for message_id, data in claimed or []:
         mid = _decode(message_id)
