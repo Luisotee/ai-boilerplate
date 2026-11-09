@@ -61,10 +61,18 @@ class EvalInput:
 
 @dataclass(frozen=True)
 class ExpectedCall:
-    """A tool the model should call; ``args`` lists only the arguments that matter."""
+    """A tool the model should call; ``args`` lists only the arguments that matter.
+
+    ``contains``: text that must appear somewhere in the call's arguments
+    (case-insensitive), for nested arguments such as memory operations.
+    ``oracle_args``: what the local oracle sends instead of ``args`` (it must
+    be a complete, valid call).
+    """
 
     name: str
     args: dict[str, Any] = field(default_factory=dict)
+    contains: str = ""
+    oracle_args: dict[str, Any] | None = None
 
 
 @dataclass
@@ -92,6 +100,10 @@ class ToolCall:
     def matches(self, want: ExpectedCall) -> bool:
         if self.name != want.name:
             return False
+        if want.contains:
+            blob = json.dumps(self.args, ensure_ascii=False).lower()
+            if want.contains.lower() not in blob:
+                return False
         for key, value in want.args.items():
             got = self.args.get(key)
             if isinstance(value, str) and isinstance(got, str):
@@ -274,6 +286,10 @@ async def run_case(inputs: EvalInput, model: Model | None = None) -> EvalOutput:
     return EvalOutput(route="agent", reply=reply, tool_calls=calls, tool_returns=returns)
 
 
+def _oracle_args(call: ExpectedCall) -> dict[str, Any]:
+    return call.oracle_args if call.oracle_args is not None else call.args
+
+
 def oracle_model(expected: ExpectedBehaviour) -> FunctionModel:
     """A scripted model that does what the case expects (free, deterministic).
 
@@ -292,7 +308,9 @@ def oracle_model(expected: ExpectedBehaviour) -> FunctionModel:
         if _tool_round(messages):
             return ModelResponse(
                 parts=[
-                    ToolCallPart(call.name, json.dumps(call.args), tool_call_id=f"call_{i}")
+                    ToolCallPart(
+                        call.name, json.dumps(_oracle_args(call)), tool_call_id=f"call_{i}"
+                    )
                     for i, call in enumerate(expected.tools)
                 ]
             )
@@ -303,7 +321,9 @@ def oracle_model(expected: ExpectedBehaviour) -> FunctionModel:
         if _tool_round(messages):
             yield {
                 i: DeltaToolCall(
-                    name=call.name, json_args=json.dumps(call.args), tool_call_id=f"call_{i}"
+                    name=call.name,
+                    json_args=json.dumps(_oracle_args(call)),
+                    tool_call_id=f"call_{i}",
                 )
                 for i, call in enumerate(expected.tools)
             }

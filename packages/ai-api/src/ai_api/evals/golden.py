@@ -90,7 +90,13 @@ CASES = [
         "lembrar_fato",
         EvalInput("lembra que eu sou alérgico a camarão"),
         ExpectedBehaviour(
-            tools=[ExpectedCall("update_core_memory", {"content": "camarão"})],
+            tools=[
+                ExpectedCall(
+                    "memory",
+                    contains="camarão",
+                    oracle_args={"operations": [{"action": "add", "text": "- alérgico a camarão"}]},
+                )
+            ],
             oracle_reply="Anotado, vou lembrar.",
         ),
     ),

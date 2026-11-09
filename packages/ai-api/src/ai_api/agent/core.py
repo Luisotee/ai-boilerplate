@@ -225,12 +225,17 @@ async def bug_report_guidance(ctx: RunContext[AgentDeps]) -> str:
 
 @agent.instructions
 async def inject_core_memory(ctx: RunContext[AgentDeps]) -> str:
-    """Inject the user's core memory document into the system prompt."""
+    """Inject the chat's core memory document, with its size, into the instructions.
+
+    Keep it the LAST instructions hook: everything above it is the same for
+    every chat, so it stays a cacheable prefix (test_language_guidance.py).
+    """
     mem = get_or_create_core_memory(ctx.deps.db, ctx.deps.user_id)
     if not mem.content:
         return ""
+    # The size lets the model consolidate before it hits the limit.
+    max_length = runtime_config.get("core_memory_max_length")
     return (
-        "\n\n== CORE MEMORY (your persistent notes about this user) ==\n"
-        + mem.content
-        + "\n== END CORE MEMORY =="
+        f"\n\n== CORE MEMORY (your persistent notes about this chat; "
+        f"{len(mem.content)}/{max_length} chars) ==\n" + mem.content + "\n== END CORE MEMORY =="
     )

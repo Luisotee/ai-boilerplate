@@ -49,7 +49,7 @@ class TestSafeRollback:
 
 class TestMemoryTool:
     async def test_commit_failure_rolls_back_without_leaking(self):
-        from ai_api.agent.tools.memory import update_core_memory
+        from ai_api.agent.tools.memory import MemoryOperation, memory
 
         ctx = _ctx()
         ctx.deps.db.commit.side_effect = RuntimeError(SECRET)
@@ -59,7 +59,7 @@ class TestMemoryTool:
         ):
             mock_mem.return_value = MagicMock(content="")
             mock_rc.get.return_value = 10_000
-            result = await update_core_memory(ctx, "likes tea")
+            result = await memory(ctx, [MemoryOperation(action="add", text="likes tea")])
 
         ctx.deps.db.rollback.assert_called_once()
         assert SECRET not in result
