@@ -115,3 +115,45 @@ async def test_kb_vector_query_orders_by_halfvec_distance():
     await search_knowledge_base(db, [0.1] * 3072, limit=5, similarity_threshold=0.5)
     search_sql = _sql_calls(db)[-1]
     assert "(c.embedding::halfvec(3072) <=> CAST(:embedding AS halfvec(3072)))" in search_sql
+
+
+def test_content_tsv_generated_column_and_gin_index_ddl():
+    from sqlalchemy.schema import CreateTable
+
+    table = Base.metadata.tables["knowledge_base_chunks"]
+    ddl = str(CreateTable(table).compile(dialect=postgresql.dialect()))
+    assert (
+        "content_tsv TSVECTOR GENERATED ALWAYS AS "
+        "(to_tsvector('kb_search'::regconfig, coalesce(heading, '') || ' ' || content)) STORED"
+    ) in ddl
+    assert "embedding_format SMALLINT" in ddl
+    gin = _index_ddl("knowledge_base_chunks", "idx_kb_chunks_content_tsv")
+    assert "USING gin (content_tsv)" in gin
+
+
+def test_content_tsv_is_deferred():
+    # Ordinary chunk loads must not select the tsvector.
+    from sqlalchemy import inspect
+
+    from ai_api.kb_models import KnowledgeBaseChunk
+
+    assert inspect(KnowledgeBaseChunk).attrs["content_tsv"].deferred
+
+
+@pytest.mark.parametrize(
+    ("language", "dicts"),
+    [("portuguese", ["unaccent", "portuguese_stem"]), ("simple", ["unaccent", "simple"])],
+)
+def test_kb_search_dictionaries(language, dicts):
+    from ai_api.database import _kb_search_dicts
+
+    assert _kb_search_dicts(language) == dicts
+
+
+def test_text_search_language_must_be_an_identifier():
+    from pydantic import ValidationError
+
+    from ai_api.config import Settings
+
+    with pytest.raises(ValidationError):
+        Settings(kb_text_search_language="english; DROP TABLE x")

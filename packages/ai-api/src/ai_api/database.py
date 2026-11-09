@@ -321,9 +321,89 @@ def init_db():
         conn.commit()
     logger.info("pgvector extension enabled")
 
+    # The KB keyword-search column is generated through the `kb_search` config,
+    # so it must exist before create_all() creates knowledge_base_chunks.
+    ensure_kb_text_search_config()
+
     # Create all tables
     Base.metadata.create_all(bind=engine)
     logger.info("Database initialized successfully")
+
+
+KB_TEXT_SEARCH_MIGRATION = "packages/ai-api/docs/migrations/2026-11-09-kb-hybrid-search.sql"
+
+_KB_SEARCH_DICTS_SQL = text("""
+    SELECT d.dictname
+    FROM pg_ts_config_map m
+    JOIN pg_ts_config c ON c.oid = m.mapcfg
+    JOIN pg_ts_dict d ON d.oid = m.mapdict
+    WHERE c.cfgname = 'kb_search'
+      AND m.maptokentype = (SELECT tokid FROM ts_token_type('default') WHERE alias = 'word')
+    ORDER BY m.mapseqno
+""")
+
+
+def _kb_search_dicts(language: str) -> list[str]:
+    """Dictionaries `kb_search` maps words through: unaccent, then the stemmer."""
+    return ["unaccent", "simple" if language == "simple" else f"{language}_stem"]
+
+
+def ensure_kb_text_search_config() -> None:
+    """Create the `unaccent` extension and the `kb_search` text-search config.
+
+    `kb_search` is a copy of KB_TEXT_SEARCH_LANGUAGE's config whose words go
+    through unaccent first. `to_tsvector('portuguese', unaccent(x))` can't be a
+    generated column (unaccent() is not immutable), but two-argument
+    to_tsvector over a config is, so the accent folding lives in the config.
+    Idempotent and safe when the API and the worker start at once. An existing
+    config is never changed: a different language only logs a warning, because
+    switching means rewriting the stored column (docs/media-and-kb.md).
+    """
+    language = settings.kb_text_search_language
+    wanted = _kb_search_dicts(language)
+    try:
+        with engine.connect() as conn:
+            exists = conn.execute(
+                text("SELECT 1 FROM pg_ts_config WHERE cfgname = 'kb_search'")
+            ).scalar()
+            if not exists:
+                conn.execute(text("CREATE EXTENSION IF NOT EXISTS unaccent"))
+                # language matches ^[a-z_]+$ (config.py), so it is safe to inline.
+                conn.execute(
+                    text(f"CREATE TEXT SEARCH CONFIGURATION kb_search (COPY = {language})")
+                )
+                conn.execute(
+                    text(
+                        "ALTER TEXT SEARCH CONFIGURATION kb_search "
+                        f"ALTER MAPPING FOR hword, hword_part, word WITH {', '.join(wanted)}"
+                    )
+                )
+                conn.commit()
+                logger.info(f"Created text-search config kb_search ({language} + unaccent)")
+    except Exception as e:
+        # Another process may have created it at the same moment; re-check.
+        with engine.connect() as conn:
+            exists = conn.execute(
+                text("SELECT 1 FROM pg_ts_config WHERE cfgname = 'kb_search'")
+            ).scalar()
+        if not exists:
+            logger.error("kb_search text-search config setup failed", exc_info=True)
+            raise RuntimeError(
+                "Could not create the `unaccent` extension or the `kb_search` text-search "
+                f"config (KB_TEXT_SEARCH_LANGUAGE={language!r}): {type(e).__name__}. "
+                "Check that the language is a Postgres text-search config and that the "
+                f"database role may create extensions, or apply {KB_TEXT_SEARCH_MIGRATION} "
+                "as a privileged user."
+            ) from e
+
+    with engine.connect() as conn:
+        current = [row[0] for row in conn.execute(_KB_SEARCH_DICTS_SQL)]
+    if current != wanted:
+        logger.warning(
+            f"Text-search config kb_search maps words through {current}, but "
+            f"KB_TEXT_SEARCH_LANGUAGE={language!r} expects {wanted}. Keyword search keeps "
+            "the existing config; to switch, follow packages/ai-api/docs/media-and-kb.md."
+        )
 
 
 def get_db():

@@ -17,6 +17,41 @@ Both embedding columns (`knowledge_base_chunks.embedding`, `conversation_message
 - Conversation search filters by `user_id`: the planner uses the HNSW index only for a chat holding a large share of the table and the `user_id` btree plus an exact sort otherwise, which is what we want.
 - Existing deployments apply `docs/migrations/2026-11-09-vector-hnsw-indexes.sql` (needs pgvector >= 0.7 for `halfvec`; the file says how to upgrade). Check with `\di *hnsw*` and `EXPLAIN` the query: the plan should show `Index Scan using idx_..._hnsw`.
 
+## Hybrid search
+
+`rag/knowledge_base.py` `search_knowledge_base` runs a vector arm and a keyword arm in one SQL statement and fuses them with reciprocal rank fusion (`rrf_fuse`, k = 60). The tool's signature didn't change.
+
+- **Vector arm**: the nearest `max(4 x limit, 20)` chunks by the halfvec distance (see Vector indexes), then only those with similarity >= `KB_SIMILARITY_THRESHOLD`.
+- **Keyword arm**: `knowledge_base_chunks.content_tsv`, a stored generated `tsvector` over heading + content with a GIN index (`idx_kb_chunks_content_tsv`). The query's lexemes are OR-ed, so the model's query needn't appear whole, and a chunk must hold at least half of them, so a word common to the whole KB can't fill the results alone. Ranked by lexemes matched, then `ts_rank_cd`. **The threshold doesn't apply here**: an exact law number, place or product name survives when no vector hit passes it.
+- **Results** keep every earlier key. `similarity_score` is the real cosine similarity, even for a keyword-only hit, and new keys are `rrf_score` and `match` (`vector`, `keyword`, `both`). A keyword-only hit is shown to the model as `relevance: 0.12, keyword match`.
+
+**Text-search language (`KB_TEXT_SEARCH_LANGUAGE`, default `portuguese`)**. `content_tsv` uses the `kb_search` config: a copy of that built-in config whose words go through `unaccent` first. A generated column can't call `unaccent()` (not immutable), but `to_tsvector('kb_search', ...)` can. `init_db()` creates the config before `create_all()`; an existing one is never changed, and a different setting only logs a warning. To switch an existing DB, for example to English:
+
+```sql
+ALTER TEXT SEARCH CONFIGURATION kb_search
+  ALTER MAPPING FOR hword, hword_part, word WITH unaccent, english_stem;
+ALTER TEXT SEARCH CONFIGURATION kb_search
+  ALTER MAPPING FOR asciiword, asciihword, hword_asciipart WITH english_stem;
+UPDATE knowledge_base_chunks SET content = content;  -- recomputes content_tsv
+```
+
+then set `KB_TEXT_SEARCH_LANGUAGE=english`. `simple` (no stemming, no stopwords) works for any language but matches far more loosely.
+
+**Embedding input**. New chunks are embedded from heading path + chunk text, with the document title (the filename without extension) as Gemini's `title` for `RETRIEVAL_DOCUMENT`, and stored with `embedding_format = 1`. The heading path comes from the chunker's section stack, carried across pages. Chunks are embedded 32 per call (`EmbeddingService.embed_documents`). A failed or timed-out batch falls back to one call per chunk, so one bad chunk skips only itself.
+
+**Moving a deployment over**
+
+1. Apply `docs/migrations/2026-11-09-vector-hnsw-indexes.sql` and `docs/migrations/2026-11-09-kb-hybrid-search.sql` (the second rewrites `knowledge_base_chunks` once; pass `-v kb_text_search_language=<lang>` when not portuguese). Old code keeps working on the new schema.
+2. Roll out the code. Keyword search covers every existing chunk at once, and the vector arm keeps using the old embeddings (same model and space).
+3. Optionally upgrade the old embeddings (`embedding_format IS NULL`) to the new input format. The script commits per batch, so it can be stopped and re-run; it rate-limits itself and backs off on 429/5xx:
+
+   ```bash
+   docker compose exec api python -m ai_api.scripts.reembed_kb --dry-run   # count
+   docker compose exec api python -m ai_api.scripts.reembed_kb             # --requests-per-minute 30 --batch-size 32 --limit N
+   ```
+
+   Old rows don't store the cross-page heading path, so they get their own heading; re-uploading a document gives the full path.
+
 ## PDF parsing
 
 LlamaParse (cloud, primary) via the `llama-cloud` SDK, with an **optional** Docling fallback behind the `[docling]` extra. `PDF_PARSER` is `auto` | `llamaparse` | `docling`. In `auto` mode LlamaParse runs when `LLAMA_CLOUD_API_KEY` is set and falls back to Docling on any parser error *if* the extra is installed.

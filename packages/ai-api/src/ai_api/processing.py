@@ -18,8 +18,8 @@ import tiktoken
 
 from .config import settings
 from .database import SessionLocal
-from .embeddings import create_embedding_service
-from .kb_models import KnowledgeBaseChunk, KnowledgeBaseDocument
+from .embeddings import EMBED_BATCH_SIZE, create_embedding_service
+from .kb_models import KB_EMBEDDING_FORMAT, KnowledgeBaseChunk, KnowledgeBaseDocument
 from .logger import logger
 from .runtime_config import runtime_config
 
@@ -72,6 +72,34 @@ class ParsedChunk:
     page_numbers: list[int] = field(default_factory=list)
     headings: list[str] = field(default_factory=list)
     doc_item_count: int = 0
+    # Enclosing section headings, outermost first, carried across pages (a
+    # section that continues onto the next page keeps its path).
+    heading_path: list[str] = field(default_factory=list)
+
+
+def _update_heading_stack(stack: list[tuple[int, str]], level: int, title: str) -> None:
+    """Apply one Markdown heading to the open-section stack (level 1 = `#`)."""
+    while stack and stack[-1][0] >= level:
+        stack.pop()
+    stack.append((level, title))
+
+
+def document_title(original_filename: str | None) -> str | None:
+    """Readable document title for embeddings: the filename without extension."""
+    if not original_filename:
+        return None
+    title = re.sub(r"[_\s]+", " ", Path(original_filename).stem.replace("-", " ")).strip()
+    return title or None
+
+
+def embedding_text(content: str, heading_path: list[str] | None) -> str:
+    """What a chunk's embedding is computed from: heading path + chunk text.
+
+    The document title goes separately, as Gemini's ``title`` for
+    RETRIEVAL_DOCUMENT. Used for new chunks and by scripts/reembed_kb.py.
+    """
+    path = " > ".join(h for h in (heading_path or []) if h)
+    return f"{path}\n\n{content}" if path else content
 
 
 def _docling_available() -> bool:
@@ -246,15 +274,28 @@ def _chunk_pages_tiktoken(
     BPE token boundary don't produce U+FFFD garbage in the stored text.
     """
     chunks: list[ParsedChunk] = []
+    # Open sections (level, title), carried across pages for heading_path.
+    stack: list[tuple[int, str]] = []
 
     for page_no, md in pages:
         if not md or not md.strip():
             continue
 
-        page_headings = [m.group(2).strip() for m in _HEADING_RE.finditer(_strip_code_fences(md))]
+        page_heading_matches = list(_HEADING_RE.finditer(_strip_code_fences(md)))
+        page_headings = [m.group(2).strip() for m in page_heading_matches]
+        # Real headings on this page (outside code fences), to tell them apart
+        # from `# comments` when walking paragraph by paragraph.
+        real_headings = {(len(m.group(1)), m.group(2).strip()) for m in page_heading_matches}
         paragraphs = [p for p in md.split("\n\n") if p.strip()]
         buf: list[str] = []
         buf_tokens = 0
+        buf_path: list[str] = []
+
+        def _apply_headings(para: str) -> None:
+            for m in _HEADING_RE.finditer(para):
+                key = (len(m.group(1)), m.group(2).strip())
+                if key in real_headings:
+                    _update_heading_stack(stack, *key)
 
         def _flush() -> None:
             nonlocal buf, buf_tokens
@@ -271,6 +312,7 @@ def _chunk_pages_tiktoken(
                     page_numbers=[page_no],
                     headings=inner_headings or page_headings[:1],
                     doc_item_count=1,
+                    heading_path=buf_path,
                 )
             )
             buf = []
@@ -280,6 +322,8 @@ def _chunk_pages_tiktoken(
             tokens = encoder.encode(para)
             if len(tokens) > max_tokens:
                 _flush()
+                _apply_headings(para)
+                para_path = [title for _, title in stack]
                 # Token-window split for a single oversized paragraph. Decode via
                 # bytes so split-codepoint sequences don't surface as U+FFFD.
                 for start in range(0, len(tokens), max_tokens):
@@ -292,12 +336,18 @@ def _chunk_pages_tiktoken(
                             page_numbers=[page_no],
                             headings=page_headings[:1],
                             doc_item_count=1,
+                            heading_path=para_path,
                         )
                     )
                 continue
 
             if buf_tokens + len(tokens) > max_tokens:
                 _flush()
+            _apply_headings(para)
+            if not buf:
+                # A chunk's path is the open sections at its first paragraph,
+                # including a heading that paragraph opens.
+                buf_path = [title for _, title in stack]
             buf.append(para)
             buf_tokens += len(tokens)
 
@@ -443,6 +493,7 @@ async def _process_pdf_document_impl(
                     embedding_service=embedding_service,
                     document_id=document_id,
                     db=db,
+                    title=document_title(document.original_filename),
                 ),
                 timeout=settings.kb_embedding_batch_timeout_seconds,
             )
@@ -557,69 +608,103 @@ async def _process_pdf_document_impl(
         logger.info(f"Processing completed for document {document_id}")
 
 
+async def _embed_one(embedding_service, text: str, title: str | None) -> list[float] | None:
+    """Single-chunk embedding call (the fallback path) under the per-call timeout."""
+    return await asyncio.wait_for(
+        embedding_service.generate(text, task_type="RETRIEVAL_DOCUMENT", title=title),
+        timeout=settings.kb_embedding_timeout_seconds,
+    )
+
+
 async def _generate_and_store_embeddings(
     chunks: list[ParsedChunk],
     embedding_service,
     document_id: str,
     db,
+    title: str | None = None,
 ) -> tuple[int, dict]:
-    """Generate embeddings for parsed chunks with per-chunk timeout."""
+    """Embed parsed chunks in batches and store them.
+
+    Each batch of EMBED_BATCH_SIZE chunks is one embedding call (title +
+    heading path + chunk, see ``embedding_text``), under the per-call timeout.
+    When a batch call fails or times out, that batch falls back to one call
+    per chunk, so the worst case is the old per-chunk behaviour and a single
+    bad chunk only skips itself.
+    """
     stored_count = 0
     skipped_chunks: list[int] = []
     failure_reasons: dict[int, str] = {}
 
-    for i, chunk in enumerate(chunks):
-        primary_page = chunk.page_numbers[0] if chunk.page_numbers else None
-        primary_heading = chunk.headings[0] if chunk.headings else None
-        chunk_metadata = {
-            "all_page_numbers": chunk.page_numbers,
-            "all_headings": chunk.headings,
-            "doc_item_count": chunk.doc_item_count,
-        }
+    for start in range(0, len(chunks), EMBED_BATCH_SIZE):
+        batch = chunks[start : start + EMBED_BATCH_SIZE]
+        texts = [embedding_text(chunk.text, chunk.heading_path) for chunk in batch]
 
-        logger.debug(
-            f"Chunk {i}: page={primary_page}, heading={primary_heading}, tokens={chunk.token_count}"
-        )
-
+        vectors: list[list[float]] | None
         try:
-            chunk_embedding = await asyncio.wait_for(
-                embedding_service.generate(chunk.text, task_type="RETRIEVAL_DOCUMENT"),
+            vectors = await asyncio.wait_for(
+                embedding_service.embed_documents(texts, title=title),
                 timeout=settings.kb_embedding_timeout_seconds,
             )
-        except TimeoutError:
+        except Exception as e:
             logger.warning(
-                f"Embedding timeout for chunk {i} after {settings.kb_embedding_timeout_seconds}s - skipping"
+                f"Batch embedding failed for chunks {start}-{start + len(batch) - 1} "
+                f"({type(e).__name__}); embedding them one by one"
             )
-            skipped_chunks.append(i)
-            failure_reasons[i] = "embedding_timeout"
-            continue
+            vectors = None
 
-        if not chunk_embedding:
-            logger.warning(f"Failed to generate embedding for chunk {i} - skipping")
-            skipped_chunks.append(i)
-            failure_reasons[i] = "embedding_generation_failed"
-            continue
+        for offset, chunk in enumerate(batch):
+            i = start + offset
+            primary_page = chunk.page_numbers[0] if chunk.page_numbers else None
+            primary_heading = chunk.headings[0] if chunk.headings else None
+            chunk_metadata = {
+                "all_page_numbers": chunk.page_numbers,
+                "all_headings": chunk.headings,
+                "heading_path": chunk.heading_path,
+                "doc_item_count": chunk.doc_item_count,
+            }
 
-        chunk_obj = KnowledgeBaseChunk(
-            document_id=document_id,
-            chunk_index=i,
-            content=chunk.text,
-            content_type="text",
-            page_number=primary_page,
-            heading=primary_heading,
-            embedding=chunk_embedding,
-            embedding_generated_at=datetime.now(UTC),
-            token_count=chunk.token_count,
-            chunk_metadata=chunk_metadata,
-        )
-        db.add(chunk_obj)
-        stored_count += 1
+            logger.debug(
+                f"Chunk {i}: page={primary_page}, heading={primary_heading}, tokens={chunk.token_count}"
+            )
 
-        if (i + 1) % 10 == 0:
-            db.commit()
-            logger.debug(f"Committed batch of 10 chunks (up to {i + 1})")
+            if vectors is not None:
+                chunk_embedding = vectors[offset]
+            else:
+                try:
+                    chunk_embedding = await _embed_one(embedding_service, texts[offset], title)
+                except TimeoutError:
+                    logger.warning(
+                        f"Embedding timeout for chunk {i} after {settings.kb_embedding_timeout_seconds}s - skipping"
+                    )
+                    skipped_chunks.append(i)
+                    failure_reasons[i] = "embedding_timeout"
+                    continue
 
-    db.commit()
+            if not chunk_embedding:
+                logger.warning(f"Failed to generate embedding for chunk {i} - skipping")
+                skipped_chunks.append(i)
+                failure_reasons[i] = "embedding_generation_failed"
+                continue
+
+            db.add(
+                KnowledgeBaseChunk(
+                    document_id=document_id,
+                    chunk_index=i,
+                    content=chunk.text,
+                    content_type="text",
+                    page_number=primary_page,
+                    heading=primary_heading,
+                    embedding=chunk_embedding,
+                    embedding_generated_at=datetime.now(UTC),
+                    embedding_format=KB_EMBEDDING_FORMAT,
+                    token_count=chunk.token_count,
+                    chunk_metadata=chunk_metadata,
+                )
+            )
+            stored_count += 1
+
+        db.commit()
+        logger.debug(f"Committed chunks up to {start + len(batch)}")
 
     failure_metadata = {
         "total_chunks_parsed": len(chunks),

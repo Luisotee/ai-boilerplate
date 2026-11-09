@@ -50,15 +50,15 @@ def _pgvector_supports_iterative_scan(db: Session) -> bool:
     return _iterative_scan_supported
 
 
-def prepare_hnsw_search(db: Session) -> None:
+def prepare_hnsw_search(db: Session, ef_search: int = HNSW_EF_SEARCH) -> None:
     """Tune the HNSW scan for the next query, in the current transaction only.
 
     Call it right before the search query, in the same transaction: the values
     are ``SET LOCAL`` (``set_config(..., true)``), so they last until that
     transaction ends and nothing else should rely on them.
 
-    - ``hnsw.ef_search`` is raised so an inner ``LIMIT`` up to
-      :data:`HNSW_EF_SEARCH` can be filled.
+    - ``hnsw.ef_search`` is raised (at least :data:`HNSW_EF_SEARCH`) so the
+      inner ``LIMIT`` can be filled; pass a larger ``ef_search`` for a larger LIMIT.
     - On pgvector >= 0.8, ``hnsw.iterative_scan = relaxed_order`` keeps scanning
       when filters (user, status, scope) drop candidates, so a filtered search
       still returns its LIMIT. Older pgvector rejects that setting, hence the
@@ -66,7 +66,7 @@ def prepare_hnsw_search(db: Session) -> None:
     """
     db.execute(
         text("SELECT set_config('hnsw.ef_search', :ef, true)"),
-        {"ef": str(HNSW_EF_SEARCH)},
+        {"ef": str(max(HNSW_EF_SEARCH, ef_search))},
     )
     if _pgvector_supports_iterative_scan(db):
         db.execute(text("SELECT set_config('hnsw.iterative_scan', 'relaxed_order', true)"))

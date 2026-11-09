@@ -10,7 +10,11 @@ Tests cover:
 - Excessive blank line removal
 """
 
-from ai_api.rag.knowledge_base import format_knowledge_base_results
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+from ai_api.rag import knowledge_base
+from ai_api.rag.knowledge_base import RRF_K, format_knowledge_base_results, rrf_fuse
 
 
 def _make_result(
@@ -155,3 +159,138 @@ class TestFormatKnowledgeBaseResults:
         assert "report.pdf" in result
         assert "page 10" in result
         assert "section 'Results'" in result
+
+
+# ---------------------------------------------------------------------------
+# rrf_fuse — fixed rankings
+# ---------------------------------------------------------------------------
+
+
+class TestRrfFuse:
+    def test_both_arms_add_up(self):
+        fused = dict(rrf_fuse(["a", "b"], ["b", "c"]))
+        assert fused["b"] == 1 / (RRF_K + 2) + 1 / (RRF_K + 1)
+        assert fused["a"] == 1 / (RRF_K + 1)
+        assert fused["c"] == 1 / (RRF_K + 2)
+
+    def test_fixed_ranking(self):
+        # b is in both lists, so it beats a (vector #1 only) and c.
+        assert [cid for cid, _ in rrf_fuse(["a", "b", "d"], ["b", "c"])] == ["b", "a", "c", "d"]
+
+    def test_keyword_only_when_no_vector_hit(self):
+        # Nothing passed the threshold: keyword hits must survive on their own.
+        assert [cid for cid, _ in rrf_fuse([], ["law-12651", "other"])] == ["law-12651", "other"]
+
+    def test_vector_only(self):
+        assert [cid for cid, _ in rrf_fuse(["x", "y"], [])] == ["x", "y"]
+
+    def test_empty(self):
+        assert rrf_fuse([], []) == []
+
+    def test_ties_break_by_vector_rank_then_keyword_rank_then_id(self):
+        # a: vector #1; z: keyword #1 -> same score; vector rank wins the tie.
+        assert [cid for cid, _ in rrf_fuse(["a"], ["z"])] == ["a", "z"]
+        # Same scores, neither in the vector list: keyword rank decides.
+        assert [cid for cid, _ in rrf_fuse([], ["q", "p"])] == ["q", "p"]
+
+    def test_deterministic(self):
+        runs = {tuple(rrf_fuse(["a", "b", "c"], ["c", "d", "a"])) for _ in range(5)}
+        assert len(runs) == 1
+
+    def test_limit(self):
+        assert len(rrf_fuse(["a", "b", "c"], ["d", "e"], limit=2)) == 2
+
+
+# ---------------------------------------------------------------------------
+# search_knowledge_base — rows from the hybrid query, fused
+# ---------------------------------------------------------------------------
+
+
+def _row(cid, vec_rank=None, kw_rank=None, similarity=0.5):
+    return SimpleNamespace(
+        id=cid,
+        document_id="doc-1",
+        chunk_index=0,
+        content=f"content {cid}",
+        content_type="text",
+        page_number=1,
+        heading=None,
+        token_count=10,
+        chunk_metadata=None,
+        filename="f.pdf",
+        original_filename="Manual.pdf",
+        upload_date="2026-11-09",
+        document_metadata=None,
+        is_conversation_scoped=False,
+        similarity=similarity,
+        vec_rank=vec_rank,
+        kw_rank=kw_rank,
+    )
+
+
+def _db_returning(rows):
+    db = MagicMock()
+    db.execute.return_value.fetchall.return_value = rows
+    db.execute.return_value.scalar.return_value = "0.8.0"
+    return db
+
+
+class TestSearchKnowledgeBase:
+    async def test_fuses_and_labels_matches(self):
+        rows = [
+            _row("v1", vec_rank=1, similarity=0.9),
+            _row("both", vec_rank=2, kw_rank=1, similarity=0.8),
+            _row("k1", kw_rank=2, similarity=0.2),
+        ]
+        results = await knowledge_base.search_knowledge_base(
+            _db_returning(rows), [0.1], query_text="lei 12.651", limit=5, similarity_threshold=0.7
+        )
+        assert [r["chunk"]["id"] for r in results] == ["both", "v1", "k1"]
+        assert [r["match"] for r in results] == ["both", "vector", "keyword"]
+        # similarity_score stays the real cosine similarity, even for a keyword hit.
+        assert results[2]["similarity_score"] == 0.2
+        assert results[0]["rrf_score"] > results[1]["rrf_score"]
+
+    async def test_keyword_hits_survive_without_vector_hits(self):
+        rows = [_row("k1", kw_rank=1, similarity=0.1), _row("k2", kw_rank=2, similarity=None)]
+        results = await knowledge_base.search_knowledge_base(
+            _db_returning(rows), [0.1], query_text="Xapuri", limit=5, similarity_threshold=0.99
+        )
+        assert [r["chunk"]["id"] for r in results] == ["k1", "k2"]
+        assert results[1]["similarity_score"] == 0.0
+
+    async def test_limit_applies_after_fusion(self):
+        rows = [_row(f"v{i}", vec_rank=i) for i in range(1, 6)] + [_row("k", kw_rank=1)]
+        results = await knowledge_base.search_knowledge_base(
+            _db_returning(rows), [0.1], query_text="x", limit=2, similarity_threshold=0.0
+        )
+        assert [r["chunk"]["id"] for r in results] == ["v1", "k"]
+
+    async def test_query_params(self):
+        db = _db_returning([])
+        await knowledge_base.search_knowledge_base(
+            db, [0.1], query_text=None, limit=5, similarity_threshold=0.7, whatsapp_jid="j"
+        )
+        sql, params = db.execute.call_args_list[-1].args
+        assert params["query_text"] == ""  # no text: the keyword arm matches nothing
+        assert params["pool"] == 20
+        assert params["threshold"] == 0.7 and params["whatsapp_jid"] == "j"
+        assert "kb_search" in str(sql) and "content_tsv @@" in str(sql)
+
+    async def test_missing_embedding_returns_empty(self):
+        db = _db_returning([])
+        assert await knowledge_base.search_knowledge_base(db, [], query_text="x") == []
+        db.execute.assert_not_called()
+
+
+class TestKeywordMatchLabel:
+    def test_keyword_only_hit_is_labelled(self):
+        result = _make_result(similarity_score=0.12)
+        result["match"] = "keyword"
+        out = format_knowledge_base_results([result])
+        assert "=== Source 1 (relevance: 0.12, keyword match) ===" in out
+
+    def test_vector_hit_unchanged(self):
+        result = _make_result(similarity_score=0.85)
+        result["match"] = "both"
+        assert "=== Source 1 (relevance: 0.85) ===" in format_knowledge_base_results([result])

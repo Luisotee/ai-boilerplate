@@ -57,7 +57,7 @@ Deep detail lives in `AGENTS.md` (symlinked to `CLAUDE.md`) next to the code. **
 | `docs/access-control.md` | Rate limits, group admins, whitelist matching, group gating |
 | `docs/docker.md` | Non-root images, ignore files, volume chown on upgrade, TS logging/shutdown |
 | `packages/ai-api/docs/admin-api.md` | `/admin` routes, runtime settings `REGISTRY` |
-| `packages/ai-api/docs/media-and-kb.md` | KB upload dedup, PDF parser and STT provider selection |
+| `packages/ai-api/docs/media-and-kb.md` | KB dedup, hybrid/vector search, PDF parser, STT |
 | `packages/ai-api/docs/markdown-formatting.md` | Model-output Markdown → WhatsApp/Telegram conversion |
 | `packages/ai-api/docs/logfire.md` | Logfire instrumentation details |
 | `docs/architecture.md`, `docs/commands.md`, `docs/testing.md`, `docs/workflows.md`, `docs/devflow.md` | Full message flow, command list, test patterns, workflow steps, Devflow board |

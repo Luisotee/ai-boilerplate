@@ -13,9 +13,12 @@ from ai_api.config import Settings, settings
 from ai_api.processing import (
     ParsedChunk,
     _chunk_pages_tiktoken,
+    _generate_and_store_embeddings,
     _parse_pdf,
     _parse_pdf_with_docling,
     _parse_pdf_with_llamaparse,
+    document_title,
+    embedding_text,
     process_pdf_document,
 )
 
@@ -804,3 +807,104 @@ class TestIsRetriableError:
         err = RuntimeError("docling failed")
         err.__cause__ = httpx.ConnectError("llamaparse down")
         assert processing.is_retriable_error(err) is True
+
+
+class TestHeadingPath:
+    @pytest.fixture
+    def encoder(self) -> "tiktoken.Encoding":
+        return tiktoken.get_encoding("cl100k_base")
+
+    def test_nested_path(self, encoder):
+        md = "# Manual\n\nIntro.\n\n## Prices\n\nThe price table."
+        chunks = _chunk_pages_tiktoken([(1, md)], max_tokens=512, encoder=encoder)
+        assert chunks[0].heading_path == ["Manual"]
+
+    def test_path_carries_across_pages(self, encoder):
+        pages = [
+            (1, "# Manual\n\n## Prices\n\nFirst part."),
+            (2, "Continuation without a heading."),
+            (3, "## Logistics\n\nTrucks."),
+            (4, "# Annex\n\nTables."),
+        ]
+        chunks = _chunk_pages_tiktoken(pages, max_tokens=512, encoder=encoder)
+        assert [c.heading_path for c in chunks] == [
+            ["Manual"],
+            ["Manual", "Prices"],
+            ["Manual", "Logistics"],
+            ["Annex"],
+        ]
+
+    def test_chunk_after_a_heading_gets_its_section(self, encoder):
+        filler = ("word " * 60).strip()
+        md = f"# Manual\n\n{filler}\n\n## Prices\n\n{filler}"
+        chunks = _chunk_pages_tiktoken([(1, md)], max_tokens=70, encoder=encoder)
+        assert len(chunks) == 2
+        # The second Prices paragraph starts a new chunk: it sits under Prices.
+        assert chunks[0].heading_path == ["Manual"]
+        assert chunks[1].heading_path == ["Manual", "Prices"]
+
+    def test_code_comments_are_not_headings(self, encoder):
+        md = "# Real\n\n```\n# not a heading\n```\n\nText."
+        chunks = _chunk_pages_tiktoken([(1, md)], max_tokens=512, encoder=encoder)
+        assert all("not a heading" not in c.heading_path for c in chunks)
+        assert chunks[0].heading_path == ["Real"]
+
+
+class TestEmbeddingInput:
+    def test_document_title_from_filename(self):
+        assert document_title("Lei_12651-2012__Codigo.pdf") == "Lei 12651 2012 Codigo"
+        assert document_title(None) is None
+        assert document_title("") is None
+
+    def test_embedding_text_prefixes_heading_path(self):
+        assert embedding_text("Body.", ["Manual", "Prices"]) == "Manual > Prices\n\nBody."
+        assert embedding_text("Body.", []) == "Body."
+        assert embedding_text("Body.", None) == "Body."
+
+
+class TestGenerateAndStoreEmbeddings:
+    def _chunks(self, n: int) -> list[ParsedChunk]:
+        return [
+            ParsedChunk(text=f"chunk {i}", token_count=2, page_numbers=[1], heading_path=["H"])
+            for i in range(n)
+        ]
+
+    async def test_batches_and_records_format(self, monkeypatch):
+        monkeypatch.setattr(processing, "EMBED_BATCH_SIZE", 2)
+        embedder = MagicMock()
+        embedder.embed_documents = AsyncMock(side_effect=lambda texts, title: [[0.1]] * len(texts))
+        embedder.generate = AsyncMock()
+        db = MagicMock()
+
+        stored, meta = await _generate_and_store_embeddings(
+            self._chunks(5), embedder, "doc-id", db, title="Manual"
+        )
+
+        assert stored == 5 and meta["chunks_skipped"] == 0
+        assert embedder.embed_documents.await_count == 3  # 2 + 2 + 1
+        first_call = embedder.embed_documents.await_args_list[0]
+        assert first_call.args[0] == ["H\n\nchunk 0", "H\n\nchunk 1"]
+        assert first_call.kwargs["title"] == "Manual"
+        embedder.generate.assert_not_called()
+        stored_chunk = db.add.call_args_list[0].args[0]
+        assert stored_chunk.embedding_format == processing.KB_EMBEDDING_FORMAT
+        assert stored_chunk.chunk_metadata["heading_path"] == ["H"]
+
+    async def test_failed_batch_falls_back_per_chunk(self, monkeypatch):
+        monkeypatch.setattr(processing, "EMBED_BATCH_SIZE", 3)
+        embedder = MagicMock()
+        embedder.embed_documents = AsyncMock(side_effect=RuntimeError("batch rejected"))
+        embedder.generate = AsyncMock(side_effect=[[0.1], None, [0.3]])
+        db = MagicMock()
+
+        stored, meta = await _generate_and_store_embeddings(
+            self._chunks(3), embedder, "doc-id", db, title="Manual"
+        )
+
+        assert stored == 2
+        assert meta["skipped_chunk_indices"] == [1]
+        assert meta["failure_reasons"] == {1: "embedding_generation_failed"}
+        assert embedder.generate.await_args_list[0].kwargs == {
+            "task_type": "RETRIEVAL_DOCUMENT",
+            "title": "Manual",
+        }
