@@ -61,6 +61,13 @@ def _sql_calls(db) -> list[str]:
 
 
 class TestPrepareHnswSearch:
+    @pytest.mark.parametrize(("asked", "sent"), [(5, "100"), (400, "400"), (5000, "1000")])
+    def test_ef_search_is_clamped(self, asked, sent):
+        # pgvector rejects hnsw.ef_search above 1000 with a DataError.
+        db = _db_with_version("0.8.0")
+        vector.prepare_hnsw_search(db, ef_search=asked)
+        assert db.execute.call_args_list[0].args[1] == {"ef": sent}
+
     def test_sets_ef_search_locally(self):
         db = _db_with_version("0.7.4")
         vector.prepare_hnsw_search(db)
@@ -140,7 +147,8 @@ def test_content_tsv_generated_column_and_gin_index_ddl():
     ddl = str(CreateTable(table).compile(dialect=postgresql.dialect()))
     assert (
         "content_tsv TSVECTOR GENERATED ALWAYS AS "
-        "(to_tsvector('kb_search'::regconfig, coalesce(heading, '') || ' ' || content)) STORED"
+        "(to_tsvector('kb_stem'::regconfig, coalesce(heading, '') || ' ' || content)"
+        " || to_tsvector('kb_fold'::regconfig, coalesce(heading, '') || ' ' || content)) STORED"
     ) in ddl
     assert "embedding_format SMALLINT" in ddl
     gin = _index_ddl("knowledge_base_chunks", "idx_kb_chunks_content_tsv")
@@ -157,13 +165,19 @@ def test_content_tsv_is_deferred():
 
 
 @pytest.mark.parametrize(
-    ("language", "dicts"),
-    [("portuguese", ["unaccent", "portuguese_stem"]), ("simple", ["unaccent", "simple"])],
+    ("language", "has_stop", "dicts"),
+    [
+        ("portuguese", True, ["kb_stop", "unaccent", "portuguese_stem"]),
+        ("basque", False, ["unaccent", "basque_stem"]),
+        ("simple", False, ["unaccent", "simple"]),
+    ],
 )
-def test_kb_search_dictionaries(language, dicts):
-    from ai_api.database import _kb_search_dicts
+def test_kb_fold_dictionaries(language, has_stop, dicts):
+    # Stop words are checked before unaccent folds them ("não" is a stop word,
+    # "nao" is not), and the stemmer comes last.
+    from ai_api.database import _kb_fold_dicts
 
-    assert _kb_search_dicts(language) == dicts
+    assert _kb_fold_dicts(language, has_stop) == dicts
 
 
 def test_text_search_language_must_be_an_identifier():

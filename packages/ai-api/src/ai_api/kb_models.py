@@ -123,14 +123,16 @@ class KnowledgeBaseChunk(Base):
     # `title`) + heading path + chunk text. scripts/reembed_kb.py upgrades NULL rows.
     embedding_format = Column(SmallInteger, nullable=True)
     # Keyword-search vector, computed by Postgres from heading + content through
-    # the `kb_search` text-search config (unaccent + the configured language's
-    # stemmer; created by init_db / the migration before this table). Deferred so
-    # ordinary chunk loads never select it.
+    # two text-search configs created by init_db / the migration before this
+    # table: `kb_stem` (the language's full stemming) and `kb_fold` (accents
+    # folded, so a query typed without them still matches). Deferred so ordinary
+    # chunk loads never select it.
     content_tsv = deferred(
         Column(
             TSVECTOR,
             Computed(
-                "to_tsvector('kb_search'::regconfig, coalesce(heading, '') || ' ' || content)",
+                "to_tsvector('kb_stem'::regconfig, coalesce(heading, '') || ' ' || content)"
+                " || to_tsvector('kb_fold'::regconfig, coalesce(heading, '') || ' ' || content)",
                 persisted=True,
             ),
         )

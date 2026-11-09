@@ -321,8 +321,9 @@ def init_db():
         conn.commit()
     logger.info("pgvector extension enabled")
 
-    # The KB keyword-search column is generated through the `kb_search` config,
-    # so it must exist before create_all() creates knowledge_base_chunks.
+    # The KB keyword-search column is generated through the `kb_stem` and
+    # `kb_fold` configs, so they must exist before create_all() creates
+    # knowledge_base_chunks.
     ensure_kb_text_search_config()
 
     # Create all tables
@@ -332,77 +333,112 @@ def init_db():
 
 KB_TEXT_SEARCH_MIGRATION = "packages/ai-api/docs/migrations/2026-11-09-kb-hybrid-search.sql"
 
-_KB_SEARCH_DICTS_SQL = text("""
+_WORD_DICTS_SQL = text("""
     SELECT d.dictname
     FROM pg_ts_config_map m
     JOIN pg_ts_config c ON c.oid = m.mapcfg
     JOIN pg_ts_dict d ON d.oid = m.mapdict
-    WHERE c.cfgname = 'kb_search'
+    WHERE c.cfgname = :cfg
       AND m.maptokentype = (SELECT tokid FROM ts_token_type('default') WHERE alias = 'word')
     ORDER BY m.mapseqno
 """)
 
+_STOP_WORDS_SQL = text(
+    "SELECT substring(dictinitoption FROM 'stopwords = ''([a-z_]+)''') "
+    "FROM pg_ts_dict WHERE dictname = :d"
+)
 
-def _kb_search_dicts(language: str) -> list[str]:
-    """Dictionaries `kb_search` maps words through: unaccent, then the stemmer."""
-    return ["unaccent", "simple" if language == "simple" else f"{language}_stem"]
+
+def _stemmer(language: str) -> str:
+    return "simple" if language == "simple" else f"{language}_stem"
+
+
+def _kb_fold_dicts(language: str, has_stop_words: bool) -> list[str]:
+    """Dictionaries `kb_fold` maps words through: stop words, unaccent, the stemmer."""
+    return (["kb_stop"] if has_stop_words else []) + ["unaccent", _stemmer(language)]
+
+
+def _ts_exists(conn, catalog: str, name: str) -> bool:
+    column = {"pg_ts_config": "cfgname", "pg_ts_dict": "dictname"}[catalog]
+    sql = text(f"SELECT 1 FROM {catalog} WHERE {column} = :n")
+    return bool(conn.execute(sql, {"n": name}).scalar())
+
+
+def _kb_configs_exist(conn) -> bool:
+    return _ts_exists(conn, "pg_ts_config", "kb_stem") and _ts_exists(
+        conn, "pg_ts_config", "kb_fold"
+    )
+
+
+def _create_kb_text_search_configs(conn, language: str) -> None:
+    """The steps of KB_TEXT_SEARCH_MIGRATION. language matches ^[a-z_]+$ (config.py)."""
+    conn.execute(text("CREATE EXTENSION IF NOT EXISTS unaccent"))
+    if not _ts_exists(conn, "pg_ts_config", "kb_stem"):
+        conn.execute(text(f"CREATE TEXT SEARCH CONFIGURATION kb_stem (COPY = {language})"))
+    if not _ts_exists(conn, "pg_ts_config", "kb_fold"):
+        stop_words = conn.execute(_STOP_WORDS_SQL, {"d": f"{language}_stem"}).scalar()
+        has_stop = _ts_exists(conn, "pg_ts_dict", "kb_stop")
+        if stop_words and not has_stop:
+            conn.execute(
+                text(
+                    "CREATE TEXT SEARCH DICTIONARY kb_stop "
+                    f"(TEMPLATE = simple, STOPWORDS = {stop_words}, ACCEPT = false)"
+                )
+            )
+            has_stop = True
+        conn.execute(text(f"CREATE TEXT SEARCH CONFIGURATION kb_fold (COPY = {language})"))
+        dicts = _kb_fold_dicts(language, has_stop)
+        conn.execute(
+            text(
+                "ALTER TEXT SEARCH CONFIGURATION kb_fold "
+                f"ALTER MAPPING FOR hword, hword_part, word WITH {', '.join(dicts)}"
+            )
+        )
+    conn.commit()
 
 
 def ensure_kb_text_search_config() -> None:
-    """Create the `unaccent` extension and the `kb_search` text-search config.
+    """Create the `unaccent` extension and the `kb_stem` / `kb_fold` text-search configs.
 
-    `kb_search` is a copy of KB_TEXT_SEARCH_LANGUAGE's config whose words go
-    through unaccent first. `to_tsvector('portuguese', unaccent(x))` can't be a
-    generated column (unaccent() is not immutable), but two-argument
-    to_tsvector over a config is, so the accent folding lives in the config.
-    Idempotent and safe when the API and the worker start at once. An existing
-    config is never changed: a different language only logs a warning, because
-    switching means rewriting the stored column (docs/media-and-kb.md).
+    Both copy KB_TEXT_SEARCH_LANGUAGE's config. `kb_stem` stays as it is, so the
+    Snowball stemmer sees the accents it needs (licitação and licitações both
+    stem to `licit`). `kb_fold` sends words through the language's stop words
+    (`kb_stop`, checked while still accented), then unaccent, then the stemmer,
+    so a query typed without accents matches too. A generated column can't call
+    `unaccent()` (not immutable), but two-argument to_tsvector over a config is
+    fine. Idempotent and safe when the API and the worker start at once.
+    Existing configs are never changed: a different language only logs a
+    warning, because switching means rewriting the stored column
+    (docs/media-and-kb.md).
     """
     language = settings.kb_text_search_language
-    wanted = _kb_search_dicts(language)
     try:
         with engine.connect() as conn:
-            exists = conn.execute(
-                text("SELECT 1 FROM pg_ts_config WHERE cfgname = 'kb_search'")
-            ).scalar()
-            if not exists:
-                conn.execute(text("CREATE EXTENSION IF NOT EXISTS unaccent"))
-                # language matches ^[a-z_]+$ (config.py), so it is safe to inline.
-                conn.execute(
-                    text(f"CREATE TEXT SEARCH CONFIGURATION kb_search (COPY = {language})")
-                )
-                conn.execute(
-                    text(
-                        "ALTER TEXT SEARCH CONFIGURATION kb_search "
-                        f"ALTER MAPPING FOR hword, hword_part, word WITH {', '.join(wanted)}"
-                    )
-                )
-                conn.commit()
-                logger.info(f"Created text-search config kb_search ({language} + unaccent)")
+            if not _kb_configs_exist(conn):
+                _create_kb_text_search_configs(conn, language)
+                logger.info(f"Created text-search configs kb_stem / kb_fold ({language})")
     except Exception as e:
-        # Another process may have created it at the same moment; re-check.
+        # Another process may have created them at the same moment; re-check.
         with engine.connect() as conn:
-            exists = conn.execute(
-                text("SELECT 1 FROM pg_ts_config WHERE cfgname = 'kb_search'")
-            ).scalar()
+            exists = _kb_configs_exist(conn)
         if not exists:
-            logger.error("kb_search text-search config setup failed", exc_info=True)
+            logger.error("kb_stem / kb_fold text-search config setup failed", exc_info=True)
             raise RuntimeError(
-                "Could not create the `unaccent` extension or the `kb_search` text-search "
-                f"config (KB_TEXT_SEARCH_LANGUAGE={language!r}): {type(e).__name__}. "
-                "Check that the language is a Postgres text-search config and that the "
-                f"database role may create extensions, or apply {KB_TEXT_SEARCH_MIGRATION} "
-                "as a privileged user."
+                "Could not create the `unaccent` extension or the `kb_stem` / `kb_fold` "
+                f"text-search configs (KB_TEXT_SEARCH_LANGUAGE={language!r}): "
+                f"{type(e).__name__}. Check that the language is a Postgres text-search "
+                "config and that the database role may create extensions, or apply "
+                f"{KB_TEXT_SEARCH_MIGRATION} as a privileged user."
             ) from e
 
+    wanted = [_stemmer(language)]
     with engine.connect() as conn:
-        current = [row[0] for row in conn.execute(_KB_SEARCH_DICTS_SQL)]
+        current = [row[0] for row in conn.execute(_WORD_DICTS_SQL, {"cfg": "kb_stem"})]
     if current != wanted:
         logger.warning(
-            f"Text-search config kb_search maps words through {current}, but "
+            f"Text-search config kb_stem maps words through {current}, but "
             f"KB_TEXT_SEARCH_LANGUAGE={language!r} expects {wanted}. Keyword search keeps "
-            "the existing config; to switch, follow packages/ai-api/docs/media-and-kb.md."
+            "the existing configs; to switch, follow packages/ai-api/docs/media-and-kb.md."
         )
 
 

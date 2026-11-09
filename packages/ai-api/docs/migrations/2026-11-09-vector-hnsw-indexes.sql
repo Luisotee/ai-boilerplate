@@ -7,16 +7,32 @@
 -- (halfvec indexes up to 4,000 dims); the queries in rag/ order by the same
 -- expression. Names and definitions match what create_all() emits on a fresh DB.
 --
--- Needs pgvector >= 0.7 (halfvec). Check with:
+-- Needs pgvector >= 0.8: halfvec arrived in 0.7, but before 0.8 an HNSW scan
+-- has no iterative scan, so a filtered search (user, scope, status) can come
+-- back short of its LIMIT, worse than the full scan it replaces. On an older
+-- version this file stops before creating anything. Check with:
 --   SELECT extversion FROM pg_extension WHERE extname = 'vector';
--- If older: `docker compose pull postgres && docker compose up -d postgres`,
--- then `ALTER EXTENSION vector UPDATE;` and run this file again.
+-- If older: `docker compose pull postgres && docker compose up -d postgres`
+-- (pgvector/pgvector:pg16 ships 0.8.x), then `ALTER EXTENSION vector UPDATE;`
+-- and run this file again.
 --
 -- CONCURRENTLY keeps the bot saving messages while the index builds, which can
 -- take minutes on a long history. It can't run inside a transaction, so apply
 -- this file with plain `psql < file` (no -1 / --single-transaction, and no
 -- migration runner that wraps files in a transaction). Safe to
 -- re-run: an index left INVALID by an interrupted build is dropped and rebuilt.
+
+SELECT coalesce(
+    (SELECT string_to_array(split_part(extversion, '-', 1), '.')::int[] >= '{0,8}'
+     FROM pg_extension WHERE extname = 'vector'),
+    false
+) AS pgvector_ok
+\gset
+\if :pgvector_ok
+\else
+\echo 'pgvector >= 0.8 is required; see the header of this file. Nothing was changed.'
+\quit
+\endif
 
 DO $$
 BEGIN

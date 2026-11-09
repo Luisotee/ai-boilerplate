@@ -17,11 +17,16 @@ EMBEDDING_DIMENSIONS = 3072
 
 # ``{col}`` is the embedding column (optionally table-qualified). The query
 # vector is bound as ``:embedding``.
-HALFVEC_DISTANCE_SQL = "({col}::halfvec(3072) <=> CAST(:embedding AS halfvec(3072)))"
+HALFVEC_DISTANCE_SQL = (
+    f"({{col}}::halfvec({EMBEDDING_DIMENSIONS}) "
+    f"<=> CAST(:embedding AS halfvec({EMBEDDING_DIMENSIONS})))"
+)
 
 # Candidates the HNSW scan considers. Must be >= the LIMIT of the inner ANN
 # query, or the index returns fewer rows than asked for.
 HNSW_EF_SEARCH = 100
+# pgvector rejects a larger hnsw.ef_search (DataError: valid range 1 .. 1000).
+HNSW_EF_SEARCH_MAX = 1000
 
 _iterative_scan_supported: bool | None = None
 
@@ -46,7 +51,14 @@ def _pgvector_supports_iterative_scan(db: Session) -> bool:
             except ValueError:
                 supported = False
         _iterative_scan_supported = supported
-        logger.info(f"pgvector {version}: HNSW iterative scan {'on' if supported else 'off'}")
+        if supported:
+            logger.info(f"pgvector {version}: HNSW iterative scan on")
+        else:
+            logger.warning(
+                f"pgvector {version} has no HNSW iterative scan (needs >= 0.8): filtered "
+                "vector searches can return fewer rows than asked for. Upgrade the image "
+                "and run ALTER EXTENSION vector UPDATE (docs/media-and-kb.md)."
+            )
     return _iterative_scan_supported
 
 
@@ -58,7 +70,8 @@ def prepare_hnsw_search(db: Session, ef_search: int = HNSW_EF_SEARCH) -> None:
     transaction ends and nothing else should rely on them.
 
     - ``hnsw.ef_search`` is raised (at least :data:`HNSW_EF_SEARCH`) so the
-      inner ``LIMIT`` can be filled; pass a larger ``ef_search`` for a larger LIMIT.
+      inner ``LIMIT`` can be filled; pass a larger ``ef_search`` for a larger
+      LIMIT. It is capped at :data:`HNSW_EF_SEARCH_MAX`, pgvector's maximum.
     - On pgvector >= 0.8, ``hnsw.iterative_scan = relaxed_order`` keeps scanning
       when filters (user, status, scope) drop candidates, so a filtered search
       still returns its LIMIT. Older pgvector rejects that setting, hence the
@@ -66,7 +79,7 @@ def prepare_hnsw_search(db: Session, ef_search: int = HNSW_EF_SEARCH) -> None:
     """
     db.execute(
         text("SELECT set_config('hnsw.ef_search', :ef, true)"),
-        {"ef": str(max(HNSW_EF_SEARCH, ef_search))},
+        {"ef": str(min(max(HNSW_EF_SEARCH, ef_search), HNSW_EF_SEARCH_MAX))},
     )
     if _pgvector_supports_iterative_scan(db):
         db.execute(text("SELECT set_config('hnsw.iterative_scan', 'relaxed_order', true)"))

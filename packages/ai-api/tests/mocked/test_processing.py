@@ -908,3 +908,43 @@ class TestGenerateAndStoreEmbeddings:
             "task_type": "RETRIEVAL_DOCUMENT",
             "title": "Manual",
         }
+
+    @pytest.mark.parametrize(
+        "error",
+        [TimeoutError(), "api-429", "api-503"],
+    )
+    async def test_retriable_batch_error_is_raised_not_fanned_out(self, monkeypatch, error):
+        # A rate-limited batch must not turn into one call per chunk: the PDF
+        # queue retries the whole document later.
+        from google.genai import errors as genai_errors
+
+        if isinstance(error, str):
+            error = genai_errors.APIError(int(error[-3:]), {})
+        embedder = MagicMock()
+        embedder.embed_documents = AsyncMock(side_effect=error)
+        embedder.generate = AsyncMock()
+
+        with pytest.raises(type(error)):
+            await _generate_and_store_embeddings(self._chunks(3), embedder, "doc-id", MagicMock())
+
+        embedder.generate.assert_not_called()
+        assert processing.is_retriable_error(error)
+
+    async def test_batch_timeout_scales_with_batch_size(self, monkeypatch):
+        monkeypatch.setattr(settings, "kb_embedding_timeout_seconds", 10)
+        assert processing.embedding_batch_timeout(1) == 10
+        assert processing.embedding_batch_timeout(2) == 20
+        assert processing.embedding_batch_timeout(32) == 40
+
+        timeouts = []
+        real_wait_for = asyncio.wait_for
+
+        async def spy(aw, timeout):
+            timeouts.append(timeout)
+            return await real_wait_for(aw, timeout)
+
+        monkeypatch.setattr(processing.asyncio, "wait_for", spy)
+        embedder = MagicMock()
+        embedder.embed_documents = AsyncMock(side_effect=lambda texts, title: [[0.1]] * len(texts))
+        await _generate_and_store_embeddings(self._chunks(3), embedder, "doc-id", MagicMock())
+        assert timeouts == [30]

@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from ..database import ConversationMessage
 from ..logger import logger
 from ..runtime_config import runtime_config
-from .vector import HNSW_EF_SEARCH, halfvec_distance, prepare_hnsw_search
+from .vector import halfvec_distance, prepare_hnsw_search
 
 
 def get_context_messages(
@@ -249,7 +249,7 @@ async def search_conversation_history(
         ORDER BY similarity DESC
     """)
 
-    prepare_hnsw_search(db, ef_search=max(HNSW_EF_SEARCH, limit))
+    prepare_hnsw_search(db, ef_search=limit)
     result = db.execute(query_sql, params)
     rows = result.fetchall()
 

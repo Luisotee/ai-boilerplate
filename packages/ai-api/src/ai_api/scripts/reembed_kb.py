@@ -30,7 +30,6 @@ import sys
 import time
 from datetime import UTC, datetime
 
-from google.genai import errors as genai_errors
 from sqlalchemy import text
 
 from ..config import settings
@@ -38,29 +37,31 @@ from ..database import SessionLocal
 from ..embeddings import EMBED_BATCH_SIZE, create_embedding_service
 from ..kb_models import KB_EMBEDDING_FORMAT, KnowledgeBaseChunk
 from ..logger import logger
-from ..processing import document_title, embedding_text, is_retriable_error
+from ..processing import (
+    document_title,
+    embedding_batch_timeout,
+    embedding_text,
+    is_retriable_error,
+)
 
 MAX_RETRIES = 5
 BACKOFF_BASE_SECONDS = 5
-_RETRIABLE_API_CODES = frozenset({408, 429, 500, 502, 503, 504})
 
-# Chunks of documents search can return (completed or partial, not expired)
-# that still carry a legacy embedding.
+# Chunks of documents search can return (completed, not expired) that still
+# carry a legacy embedding.
 _PENDING_SQL = """
     FROM knowledge_base_chunks c
     JOIN knowledge_base_documents d ON c.document_id = d.id
     WHERE c.embedding_format IS NULL
       AND c.embedding IS NOT NULL
-      AND d.status IN ('completed', 'partial')
+      AND d.status = 'completed'
       AND (d.expires_at IS NULL OR d.expires_at > NOW())
       AND NOT (c.id::text = ANY(CAST(:skip AS text[])))
 """
 
 
 def is_retriable(error: BaseException) -> bool:
-    """Rate limits, server errors and timeouts are worth retrying."""
-    if isinstance(error, genai_errors.APIError):
-        return error.code in _RETRIABLE_API_CODES
+    """Rate limits, server errors and timeouts are worth retrying (same rule as the PDF queue)."""
     return is_retriable_error(error)
 
 
@@ -79,18 +80,7 @@ def next_batch(db, batch_size: int, skip: list[str]) -> list:
             SELECT c.id, c.document_id, c.content, c.heading, c.chunk_metadata,
                    d.original_filename
             {_PENDING_SQL}
-              AND c.document_id = (
-                  SELECT c2.document_id
-                  FROM knowledge_base_chunks c2
-                  JOIN knowledge_base_documents d2 ON c2.document_id = d2.id
-                  WHERE c2.embedding_format IS NULL
-                    AND c2.embedding IS NOT NULL
-                    AND d2.status IN ('completed', 'partial')
-                    AND (d2.expires_at IS NULL OR d2.expires_at > NOW())
-                    AND NOT (c2.id::text = ANY(CAST(:skip AS text[])))
-                  ORDER BY c2.document_id
-                  LIMIT 1
-              )
+              AND c.document_id = (SELECT c.document_id {_PENDING_SQL} ORDER BY 1 LIMIT 1)
             ORDER BY c.chunk_index
             LIMIT :batch_size
         """),
@@ -117,7 +107,7 @@ async def embed_batch(service, texts: list[str], title: str | None, pacer) -> li
         try:
             return await asyncio.wait_for(
                 service.embed_documents(texts, title=title),
-                timeout=settings.kb_embedding_timeout_seconds * 3,
+                timeout=embedding_batch_timeout(len(texts)),
             )
         except Exception as e:
             if not is_retriable(e):

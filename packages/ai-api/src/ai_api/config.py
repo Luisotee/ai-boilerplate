@@ -148,9 +148,9 @@ class Settings(BaseSettings):
     kb_max_chunk_tokens: int = 512
     # Postgres text-search language for the KB keyword search (a built-in config
     # such as portuguese, english, spanish, or simple). Baked into the stored
-    # knowledge_base_chunks.content_tsv column through the `kb_search` config when
-    # it is first created, so it is env-only: switching later is a manual step
-    # (packages/ai-api/docs/media-and-kb.md).
+    # knowledge_base_chunks.content_tsv column through the `kb_stem` / `kb_fold`
+    # configs when they are first created, so it is env-only: switching later is
+    # a manual step (packages/ai-api/docs/media-and-kb.md).
     kb_text_search_language: str = Field("portuguese", pattern=r"^[a-z_]+$")
 
     # PDF Processing Queue (stream:pdf_processing, consumed by the stream worker)

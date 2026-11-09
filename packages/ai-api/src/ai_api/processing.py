@@ -15,6 +15,7 @@ from pathlib import Path
 
 import httpx
 import tiktoken
+from google.genai import errors as genai_errors
 
 from .config import settings
 from .database import SessionLocal
@@ -608,6 +609,11 @@ async def _process_pdf_document_impl(
         logger.info(f"Processing completed for document {document_id}")
 
 
+def embedding_batch_timeout(batch_size: int) -> float:
+    """Timeout for one batch embedding call: the per-call timeout, scaled up to 4x."""
+    return settings.kb_embedding_timeout_seconds * max(1, min(batch_size, 4))
+
+
 async def _embed_one(embedding_service, text: str, title: str | None) -> list[float] | None:
     """Single-chunk embedding call (the fallback path) under the per-call timeout."""
     return await asyncio.wait_for(
@@ -626,10 +632,12 @@ async def _generate_and_store_embeddings(
     """Embed parsed chunks in batches and store them.
 
     Each batch of EMBED_BATCH_SIZE chunks is one embedding call (title +
-    heading path + chunk, see ``embedding_text``), under the per-call timeout.
-    When a batch call fails or times out, that batch falls back to one call
-    per chunk, so the worst case is the old per-chunk behaviour and a single
-    bad chunk only skips itself.
+    heading path + chunk, see ``embedding_text``), under
+    ``embedding_batch_timeout``. A retriable failure (timeout, 429, 5xx; see
+    ``is_retriable_error``) is raised, so the PDF queue retries the document
+    later instead of firing one call per chunk at a rate-limited API. Any
+    other batch failure falls back to one call per chunk, so a single bad
+    chunk only skips itself.
     """
     stored_count = 0
     skipped_chunks: list[int] = []
@@ -643,9 +651,15 @@ async def _generate_and_store_embeddings(
         try:
             vectors = await asyncio.wait_for(
                 embedding_service.embed_documents(texts, title=title),
-                timeout=settings.kb_embedding_timeout_seconds,
+                timeout=embedding_batch_timeout(len(batch)),
             )
         except Exception as e:
+            if is_retriable_error(e):
+                logger.warning(
+                    f"Batch embedding failed for chunks {start}-{start + len(batch) - 1} "
+                    f"({type(e).__name__}); leaving the document to the queue's retry"
+                )
+                raise
             logger.warning(
                 f"Batch embedding failed for chunks {start}-{start + len(batch) - 1} "
                 f"({type(e).__name__}); embedding them one by one"
@@ -730,6 +744,8 @@ def _is_retriable_single(error: BaseException) -> bool:
         return error.response.status_code in _RETRIABLE_HTTP_STATUSES
     if isinstance(error, ConnectionError):
         return True
+    if isinstance(error, genai_errors.APIError):  # Gemini embeddings
+        return error.code in _RETRIABLE_HTTP_STATUSES
     try:
         from llama_cloud import APIConnectionError, APIStatusError
     except ImportError:  # pragma: no cover - llama-cloud is a hard dependency
@@ -746,7 +762,7 @@ def is_retriable_error(error: BaseException) -> bool:
     Decide whether a failed PDF processing attempt is worth retrying.
 
     Retriable: timeouts (parser, embeddings, overall), network/transport errors,
-    and HTTP 408/429/5xx from LlamaParse or other HTTP calls.
+    and HTTP 408/429/5xx from LlamaParse, Gemini or other HTTP calls.
     Not retriable: everything else — missing API key / parser, file not found,
     empty parse result, programming errors — because a retry would fail the same
     way.

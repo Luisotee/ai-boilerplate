@@ -200,6 +200,39 @@ class TestRrfFuse:
     def test_limit(self):
         assert len(rrf_fuse(["a", "b", "c"], ["d", "e"], limit=2)) == 2
 
+    def _overlap_case(self):
+        # Reviewer's case: five chunks found by both arms, far down each list
+        # (ranks 16-20, 2/76..2/80 ~ 0.026), outscore the top hit of either arm
+        # alone (1/61 ~ 0.016).
+        overlap = [f"o{i}" for i in range(5)]
+        vector = ["vec-top"] + [f"v{i}" for i in range(14)] + overlap
+        keyword = ["law-8666"] + [f"k{i}" for i in range(14)] + overlap
+        return vector, keyword
+
+    def test_plain_rrf_would_drop_both_top_hits(self):
+        vector, keyword = self._overlap_case()
+        top5 = sorted(rrf_fuse(vector, keyword), key=lambda item: -item[1])[:5]
+        assert {cid for cid, _ in top5} == {f"o{i}" for i in range(5)}
+
+    def test_top_hit_of_each_arm_keeps_a_slot(self):
+        vector, keyword = self._overlap_case()
+        fused = rrf_fuse(vector, keyword, limit=5)
+        ids = [cid for cid, _ in fused]
+        assert len(ids) == 5
+        assert "vec-top" in ids and "law-8666" in ids
+        # Still ordered by score, and the overlap hits kept the other slots.
+        scores = [score for _, score in fused]
+        assert scores == sorted(scores, reverse=True)
+        assert ids[:3] == ["o0", "o1", "o2"]
+
+    def test_top_hit_guarantee_with_limit_one_keeps_the_fused_best(self):
+        vector, keyword = self._overlap_case()
+        assert [cid for cid, _ in rrf_fuse(vector, keyword, limit=1)] == ["o0"]
+
+    def test_same_top_hit_in_both_arms_takes_one_slot(self):
+        fused = rrf_fuse(["a", "b", "c"], ["a", "d", "e"], limit=2)
+        assert [cid for cid, _ in fused] == ["a", "b"]
+
 
 # ---------------------------------------------------------------------------
 # search_knowledge_base — rows from the hybrid query, fused
@@ -275,7 +308,19 @@ class TestSearchKnowledgeBase:
         assert params["query_text"] == ""  # no text: the keyword arm matches nothing
         assert params["pool"] == 20
         assert params["threshold"] == 0.7 and params["whatsapp_jid"] == "j"
-        assert "kb_search" in str(sql) and "content_tsv @@" in str(sql)
+        assert "content_tsv @@" in str(sql)
+        # Words match through both configs: kb_stem (stemming needs the
+        # accents) and kb_fold (accents folded, for queries typed without them).
+        assert "to_tsvector('kb_stem', t.token)" in str(sql)
+        assert "to_tsvector('kb_fold', t.token)" in str(sql)
+
+    async def test_pool_is_capped_at_the_ef_search_maximum(self):
+        # pool = 4 x 300 = 1200 would exceed hnsw.ef_search's 1000 (DataError).
+        db = _db_returning([])
+        await knowledge_base.search_knowledge_base(
+            db, [0.1], query_text="x", limit=300, similarity_threshold=0.7
+        )
+        assert db.execute.call_args_list[-1].args[1]["pool"] == 1000
 
     async def test_missing_embedding_returns_empty(self):
         db = _db_returning([])
