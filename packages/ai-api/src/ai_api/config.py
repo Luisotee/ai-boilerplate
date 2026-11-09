@@ -101,6 +101,12 @@ class Settings(BaseSettings):
     # A chat job older than this when the worker gets to it is not run; the
     # user gets a short "send it again" notice instead (an outage backlog).
     chat_job_max_age_seconds: int = 3600
+    # Burst merging: after a user's first pending message the worker waits for
+    # this much quiet (ms) and answers everything that arrived in one run.
+    # 0 disables it. The Telegram client uses the same value for albums.
+    chat_burst_quiet_ms: int = 2000
+    # ...but never waits longer than this in total (ms) for a burst to end.
+    chat_burst_max_wait_ms: int = 8000
 
     # Agent loop cap: model requests in one run (tool round-trips + the answer).
     # Pydantic AI's own default is 50, each request carrying every tool schema.

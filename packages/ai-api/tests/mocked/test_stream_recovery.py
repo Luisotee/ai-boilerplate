@@ -25,6 +25,14 @@ def _job(job_id: str, text: str = "hi") -> dict:
     }
 
 
+@pytest.fixture(autouse=True)
+def _no_burst_merging(monkeypatch):
+    """These tests are about recovery order; burst merging has its own tests."""
+    from ai_api.config import settings
+
+    monkeypatch.setattr(settings, "chat_burst_quiet_ms", 0)
+
+
 @pytest.fixture
 async def redis():
     client = fakeredis.FakeAsyncRedis()

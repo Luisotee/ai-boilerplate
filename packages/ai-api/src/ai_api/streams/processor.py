@@ -15,7 +15,7 @@ from ..embeddings import create_embedding_service
 from ..formatting import markdown_to_whatsapp
 from ..logger import logger
 from ..queue.connection import get_redis_client
-from ..queue.utils import delete_job_image, get_job_image, save_job_chunk, set_job_metadata
+from ..queue.utils import delete_job_image, get_job_images, save_job_chunk, set_job_metadata
 from ..services.bug_reports import record_auto_report
 from ..whatsapp import WhatsAppClient, create_whatsapp_client
 from .delivery import deliver_if_late
@@ -47,6 +47,9 @@ async def process_chat_job_direct(
     is_group_admin: bool | None = None,
     run_user_message_ids: list[str] | None = None,
     enqueued_at_ms: int | None = None,
+    image_count: int = 1,
+    image_sources: list[tuple[str, str | None, int]] | None = None,
+    absorbed_job_ids: list[str] | None = None,
 ) -> dict:
     """
     Process a chat message asynchronously (one Redis Streams job).
@@ -79,6 +82,11 @@ async def process_chat_job_direct(
             first (several for a merged burst); defaults to [user_message_id]
         enqueued_at_ms: When the job entered the stream (unix ms). A reply ready
             after the clients' polling window is pushed (streams/delivery.py)
+        image_count: Images stored for this job (more than 1 for an album)
+        image_sources: (job_id, mimetype, count) of every job whose images this
+            run sees (a merged burst); defaults to this job's own images
+        absorbed_job_ids: Earlier jobs of a burst merged into this run. They are
+            closed as merged (their clients send nothing) when the run ends
 
     Returns:
         Dict with processing result including success status, job_id, chunk count
@@ -92,6 +100,9 @@ async def process_chat_job_direct(
     logger.info(f"[Job {job_id}] WhatsApp message ID: {whatsapp_message_id}")
     logger.info(f"[Job {job_id}] Has image: {has_image}")
     logger.info(f"[Job {job_id}] Has document: {has_document}")
+
+    if image_sources is None:
+        image_sources = [(job_id, image_mimetype, image_count)] if has_image else []
 
     # Get Redis client with automatic cleanup
     async with get_redis_client() as redis:
@@ -233,24 +244,23 @@ async def process_chat_job_direct(
             # Step 5: Get AI response (with optional image for vision)
             logger.info(f"[Job {job_id}] Getting AI response...")
 
-            # Retrieve image data if present
-            image_data = None
-            if has_image:
-                image_data = await get_job_image(redis, job_id)
-                if image_data:
-                    logger.info(f"[Job {job_id}] Retrieved image data for vision processing")
-                else:
-                    logger.warning(
-                        f"[Job {job_id}] Image flag set but no image data found in Redis"
-                    )
+            # Retrieve image data if present (several for an album or a burst)
+            images: list[tuple[str, str]] = []
+            for source_job_id, source_mimetype, source_count in image_sources:
+                images.extend(
+                    await get_job_images(redis, source_job_id, source_mimetype, source_count)
+                )
+            if images:
+                logger.info(f"[Job {job_id}] Retrieved {len(images)} image(s) for vision")
+            elif image_sources:
+                logger.warning(f"[Job {job_id}] Image flag set but no image data found in Redis")
 
             try:
                 async for token in get_ai_response(
                     ai_message,
                     message_history,
                     agent_deps=agent_deps,
-                    image_data=image_data,
-                    image_mimetype=image_mimetype,
+                    images=images,
                 ):
                     full_response += token
             except (*MODEL_ERRORS, UsageLimitExceeded) as model_error:
@@ -274,8 +284,7 @@ async def process_chat_job_direct(
                             exc_info=True,
                         )
 
-                if has_image:
-                    await delete_job_image(redis, job_id)
+                await _delete_images(redis, image_sources)
 
                 await save_job_chunk(redis, job_id, 0, MODEL_ERROR_FALLBACK_TEXT)
                 chunk_index = 1
@@ -329,8 +338,7 @@ async def process_chat_job_direct(
                 }
 
             # Clean up image data from Redis after processing
-            if has_image:
-                await delete_job_image(redis, job_id)
+            await _delete_images(redis, image_sources)
 
             # Models answer in Markdown despite the prompt. Convert before the
             # reply is delivered, embedded or saved — saved Markdown would be
@@ -464,9 +472,33 @@ async def process_chat_job_direct(
             raise
 
         finally:
+            # Close the burst's absorbed jobs only now: a worker dying mid-run
+            # leaves them pending too, so recovery re-runs the whole burst.
+            await _close_absorbed_jobs(redis, absorbed_job_ids or [], job_id)
             # Close HTTP client
             if http_client:
                 await http_client.aclose()
                 logger.info(f"[Job {job_id}] HTTP client closed")
             db.close()
             logger.info(f"[Job {job_id}] Database session closed")
+
+
+async def _delete_images(redis, image_sources: list[tuple[str, str | None, int]]) -> None:
+    for source_job_id, _mimetype, _count in image_sources:
+        await delete_job_image(redis, source_job_id)
+
+
+async def _close_absorbed_jobs(redis, absorbed_job_ids: list[str], carrier_job_id: str) -> None:
+    """Mark the jobs merged into this run as finished with nothing to send:
+    GET /chat/job answers them `silent`, so their clients stay quiet."""
+    for absorbed in absorbed_job_ids:
+        try:
+            await set_job_metadata(
+                redis,
+                absorbed,
+                {"status": "complete", "merged_into": carrier_job_id, "total_chunks": 0},
+            )
+        except Exception:
+            logger.error(
+                f"[Job {carrier_job_id}] Failed to close merged job {absorbed}", exc_info=True
+            )

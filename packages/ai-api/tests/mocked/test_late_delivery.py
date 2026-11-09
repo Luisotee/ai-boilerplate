@@ -131,6 +131,12 @@ class TestProcessorPushesLateReplies:
 
 
 class TestExpiredJobs:
+    @pytest.fixture(autouse=True)
+    def _no_burst_merging(self, monkeypatch):
+        from ai_api.config import settings
+
+        monkeypatch.setattr(settings, "chat_burst_quiet_ms", 0)
+
     async def test_expired_entry_is_not_run_and_gets_a_notice(self, redis):
         from ai_api.streams import consumer as consumer_module
 

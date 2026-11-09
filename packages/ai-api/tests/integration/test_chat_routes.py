@@ -1029,3 +1029,51 @@ class TestInboundDedup:
         assert first.json() == {"success": True}
         assert second.json() == {"success": True, "duplicate": True}
         assert mock_save.call_count == 1
+
+
+class TestEnqueueAlbum:
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_several_images_are_one_job(self, mock_cleanup, mock_redis, mock_init_db):
+        import fakeredis
+
+        fake = fakeredis.FakeAsyncRedis()
+        user = make_user(whatsapp_jid="tg:123")
+        saved = make_conversation_message(role="user", content="x")
+        with (
+            _patch_whitelist(),
+            patch("ai_api.routes.chat.get_redis_client", _fake_redis_client(fake)),
+            patch("ai_api.routes.chat.get_or_create_user", return_value=user),
+            patch("ai_api.routes.chat._record_client"),
+            patch("ai_api.routes.chat.create_embedding_service", return_value=None),
+            patch("ai_api.routes.chat.save_message", return_value=saved) as mock_save,
+            patch("ai_api.routes.chat.add_message_to_stream", new_callable=AsyncMock) as mock_xadd,
+        ):
+            app = _get_app_with_db_override(_make_mock_db())
+            try:
+                body = {
+                    "whatsapp_jid": "tg:123",
+                    "message": "our trip",
+                    "conversation_type": "private",
+                    "client_id": "telegram",
+                    "images": [
+                        {"data": "aGk=", "mimetype": "image/jpeg"},
+                        {"data": "aG8=", "mimetype": "image/jpeg"},
+                    ],
+                }
+                async with AsyncClient(
+                    transport=ASGITransport(app=app), base_url="http://test"
+                ) as client:
+                    response = await client.post("/chat/enqueue", json=body, headers=AUTH_HEADERS)
+            finally:
+                _cleanup_overrides()
+
+        assert response.status_code == 200
+        job_data = mock_xadd.await_args.kwargs["job_data"]
+        assert job_data["has_image"] == "true" and job_data["image_count"] == "2"
+        assert mock_save.call_args.args[3] == "[2 images: our trip]"
+        from ai_api.queue.utils import get_job_images
+
+        stored = await get_job_images(fake, job_data["job_id"], "image/jpeg", 2)
+        assert [data for data, _ in stored] == ["aGk=", "aG8="]

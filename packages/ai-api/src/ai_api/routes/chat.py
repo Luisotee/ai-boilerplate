@@ -27,7 +27,7 @@ from ..kb_models import KnowledgeBaseDocument
 from ..logger import logger
 from ..queue.connection import get_redis_client
 from ..queue.schemas import ChunkData, DuplicateResponse, EnqueueResponse, JobStatusResponse
-from ..queue.utils import get_job_chunks, get_job_metadata, save_job_image
+from ..queue.utils import get_job_chunks, get_job_metadata, save_job_image, save_job_images
 from ..runtime_config import runtime_config
 from ..schemas import (
     ChatRequest,
@@ -318,7 +318,11 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
     - Poll `/chat/job/{job_id}` for status and accumulated chunks
     - Or stream from `/chat/stream/{job_id}` via SSE
     """
-    has_image = chat_request.image_data is not None and chat_request.image_mimetype is not None
+    images: list[dict[str, str]] = []
+    if chat_request.image_data is not None and chat_request.image_mimetype is not None:
+        images.append({"data": chat_request.image_data, "mimetype": chat_request.image_mimetype})
+    images.extend({"data": i.data, "mimetype": i.mimetype} for i in chat_request.images or [])
+    has_image = bool(images)
     logger.info(
         f"Received request from {chat_request.whatsapp_jid}: {chat_request.message[:50]}... (has_image={has_image})"
     )
@@ -433,7 +437,8 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
         # For image messages, store with [Image] marker for history context
         if has_image:
             # Store as [Image: caption] or [Image] for database history
-            content = f"[Image: {chat_request.message}]" if chat_request.message else "[Image]"
+            label = "Image" if len(images) == 1 else f"{len(images)} images"
+            content = f"[{label}: {chat_request.message}]" if chat_request.message else f"[{label}]"
             if chat_request.sender_name:
                 content = f"{chat_request.sender_name}: {content}"
         elif has_document:
@@ -517,8 +522,12 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
             # Handle image data if present
             if has_image:
                 # Store image in Redis separately (to avoid large stream messages)
-                await save_job_image(redis_client, job_id, chat_request.image_data)
-                job_data["image_mimetype"] = chat_request.image_mimetype
+                if len(images) == 1:
+                    await save_job_image(redis_client, job_id, images[0]["data"])
+                else:
+                    await save_job_images(redis_client, job_id, images)
+                    job_data["image_count"] = str(len(images))
+                job_data["image_mimetype"] = images[0]["mimetype"]
                 job_data["has_image"] = "true"
 
             if has_document:
@@ -638,9 +647,13 @@ async def get_job_status(request: Request, job_id: str):
 
             # A finished job's reply is delivered once: by this poll, or by the
             # worker's push when the job outlived the clients' polling window
-            # (streams/delivery.py). If the push won, the client sends nothing.
+            # (streams/delivery.py). If the push won, or the job was merged into
+            # a later job's reply (a burst), the client sends nothing.
             if status in ("complete", "failed"):
-                if await claim_delivery(redis_client, job_id, "poll") == "push":
+                metadata = await get_job_metadata(redis_client, job_id)
+                if (metadata and metadata.get("merged_into")) or await claim_delivery(
+                    redis_client, job_id, "poll"
+                ) == "push":
                     return JobStatusResponse(
                         job_id=job_id, status="complete", complete=True, silent=True
                     )
