@@ -25,7 +25,7 @@ from ..formatting import markdown_to_whatsapp
 from ..kb_models import KnowledgeBaseDocument
 from ..logger import logger
 from ..queue.connection import get_redis_client
-from ..queue.schemas import ChunkData, EnqueueResponse, JobStatusResponse
+from ..queue.schemas import ChunkData, DuplicateResponse, EnqueueResponse, JobStatusResponse
 from ..queue.utils import get_job_chunks, get_job_metadata, save_job_image
 from ..runtime_config import runtime_config
 from ..schemas import (
@@ -36,6 +36,7 @@ from ..schemas import (
     SaveMessageRequest,
 )
 from ..services.autolink import try_autolink
+from ..services.dedup import claim_inbound, release_inbound
 from ..services.link import (
     consume_link_code,
     generate_link_code,
@@ -223,6 +224,10 @@ async def save_message_only(request: SaveMessageRequest, db: Session = Depends(g
         logger.warning(f"Blocked non-whitelisted JID: {request.whatsapp_jid}")
         raise HTTPException(status_code=403, detail="Not authorized")
 
+    async with get_redis_client() as redis_client:
+        if not await claim_inbound(redis_client, request.whatsapp_jid, request.whatsapp_message_id):
+            return {"success": True, "duplicate": True}
+
     try:
         # Format message with sender name if group message
         content = (
@@ -259,12 +264,14 @@ async def save_message_only(request: SaveMessageRequest, db: Session = Depends(g
 
     except Exception as e:
         logger.error(f"Error saving message: {str(e)}", exc_info=True)
+        async with get_redis_client() as redis_client:
+            await release_inbound(redis_client, request.whatsapp_jid, request.whatsapp_message_id)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post(
     "/chat/enqueue",
-    response_model=EnqueueResponse | CommandResponse,
+    response_model=EnqueueResponse | CommandResponse | DuplicateResponse,
     tags=["Chat"],
 )
 @limiter.limit(f"{settings.rate_limit_expensive}/minute")
@@ -317,6 +324,14 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
     if not _is_whitelisted(chat_request.whatsapp_jid, chat_request.phone):
         logger.warning(f"Blocked non-whitelisted JID: {chat_request.whatsapp_jid}")
         raise HTTPException(status_code=403, detail="Not authorized")
+
+    # Drop a platform redelivery of a message we already took (before commands,
+    # so a replayed `/clean all` or `/link CODE` doesn't run twice either).
+    async with get_redis_client() as redis_client:
+        if not await claim_inbound(
+            redis_client, chat_request.whatsapp_jid, chat_request.whatsapp_message_id
+        ):
+            return DuplicateResponse()
 
     # Check for commands first (e.g., /settings, /tts on, /help)
     if is_command(chat_request.message):
@@ -586,6 +601,11 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
 
     except Exception as e:
         logger.error(f"Error enqueueing chat: {str(e)}", exc_info=True)
+        # Nothing was queued: let the platform's retry of this message through.
+        async with get_redis_client() as redis_client:
+            await release_inbound(
+                redis_client, chat_request.whatsapp_jid, chat_request.whatsapp_message_id
+            )
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

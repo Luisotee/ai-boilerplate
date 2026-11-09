@@ -48,6 +48,8 @@ interface EnqueueResponse {
   // Command response
   is_command?: boolean;
   response?: string;
+  // Duplicate (a platform redelivery of a message already received): send nothing
+  duplicate?: boolean;
 }
 
 interface UserPreferences {
@@ -159,6 +161,13 @@ export async function sendMessageToAI(
   }
 
   const enqueueResult: EnqueueResponse = await enqueueResponse.json();
+
+  // A redelivered message (Baileys offline replay, a webhook retry): the first
+  // copy is already being answered, so this one sends nothing.
+  if (enqueueResult.duplicate) {
+    logger.info({ whatsappJid, messageId }, 'Duplicate message ignored');
+    return null;
+  }
 
   // Handle command response (e.g., /settings, /tts on, /help)
   if (enqueueResult.is_command) {

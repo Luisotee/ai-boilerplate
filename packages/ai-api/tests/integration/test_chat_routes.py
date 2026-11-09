@@ -903,3 +903,129 @@ class TestWhitelistEnforcement:
                 }
             )
         assert response.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Inbound dedup (platform redeliveries)
+# ---------------------------------------------------------------------------
+
+
+def _fake_redis_client(fake):
+    """Patchable stand-in for get_redis_client() yielding one fakeredis client."""
+
+    @asynccontextmanager
+    async def _client():
+        yield fake
+
+    return _client
+
+
+class TestInboundDedup:
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_redelivered_enqueue_is_dropped(self, mock_cleanup, mock_redis, mock_init_db):
+        import fakeredis
+
+        fake = fakeredis.FakeAsyncRedis()
+        mock_db = _make_mock_db()
+        user = make_user(whatsapp_jid=TEST_JID)
+        saved = make_conversation_message(role="user", content="hi")
+        with (
+            _patch_whitelist(),
+            patch("ai_api.routes.chat.get_redis_client", _fake_redis_client(fake)),
+            patch("ai_api.routes.chat.get_or_create_user", return_value=user),
+            patch("ai_api.routes.chat._record_client"),
+            patch("ai_api.routes.chat.create_embedding_service", return_value=None),
+            patch("ai_api.routes.chat.save_message", return_value=saved) as mock_save,
+            patch("ai_api.routes.chat.add_message_to_stream", new_callable=AsyncMock) as mock_xadd,
+        ):
+            app = _get_app_with_db_override(mock_db)
+            try:
+                body = {
+                    "whatsapp_jid": TEST_JID,
+                    "message": "hi",
+                    "conversation_type": "private",
+                    "whatsapp_message_id": "WAMID-1",
+                }
+                async with AsyncClient(
+                    transport=ASGITransport(app=app), base_url="http://test"
+                ) as client:
+                    first = await client.post("/chat/enqueue", json=body, headers=AUTH_HEADERS)
+                    second = await client.post("/chat/enqueue", json=body, headers=AUTH_HEADERS)
+            finally:
+                _cleanup_overrides()
+
+        assert first.status_code == 200 and "job_id" in first.json()
+        assert second.status_code == 200
+        assert second.json()["duplicate"] is True
+        assert mock_save.call_count == 1
+        assert mock_xadd.await_count == 1
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_failed_enqueue_releases_the_claim(self, mock_cleanup, mock_redis, mock_init_db):
+        import fakeredis
+
+        fake = fakeredis.FakeAsyncRedis()
+        mock_db = _make_mock_db()
+        with (
+            _patch_whitelist(),
+            patch("ai_api.routes.chat.get_redis_client", _fake_redis_client(fake)),
+            patch("ai_api.routes.chat.get_or_create_user", side_effect=RuntimeError("db down")),
+        ):
+            app = _get_app_with_db_override(mock_db)
+            try:
+                body = {
+                    "whatsapp_jid": TEST_JID,
+                    "message": "hi",
+                    "conversation_type": "private",
+                    "whatsapp_message_id": "WAMID-2",
+                }
+                async with AsyncClient(
+                    transport=ASGITransport(app=app), base_url="http://test"
+                ) as client:
+                    response = await client.post("/chat/enqueue", json=body, headers=AUTH_HEADERS)
+            finally:
+                _cleanup_overrides()
+
+        assert response.status_code == 500
+        from ai_api.services.dedup import dedup_key
+
+        assert await fake.exists(dedup_key(TEST_JID, "WAMID-2")) == 0
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_redelivered_save_is_dropped(self, mock_cleanup, mock_redis, mock_init_db):
+        import fakeredis
+
+        fake = fakeredis.FakeAsyncRedis()
+        mock_db = _make_mock_db()
+        saved = make_conversation_message(role="user", content="chatter")
+        with (
+            _patch_whitelist(),
+            patch("ai_api.routes.chat.get_redis_client", _fake_redis_client(fake)),
+            patch("ai_api.routes.chat.create_embedding_service", return_value=None),
+            patch("ai_api.routes.chat.save_message", return_value=saved) as mock_save,
+        ):
+            app = _get_app_with_db_override(mock_db)
+            try:
+                body = {
+                    "whatsapp_jid": "120363000000000000@g.us",
+                    "message": "chatter",
+                    "conversation_type": "group",
+                    "whatsapp_message_id": "WAMID-3",
+                }
+                async with AsyncClient(
+                    transport=ASGITransport(app=app), base_url="http://test"
+                ) as client:
+                    first = await client.post("/chat/save", json=body, headers=AUTH_HEADERS)
+                    second = await client.post("/chat/save", json=body, headers=AUTH_HEADERS)
+            finally:
+                _cleanup_overrides()
+
+        assert first.json() == {"success": True}
+        assert second.json() == {"success": True, "duplicate": True}
+        assert mock_save.call_count == 1

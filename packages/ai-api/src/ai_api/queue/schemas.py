@@ -27,6 +27,17 @@ class EnqueueResponse(BaseModel):
     message: str = Field(default="Job queued successfully", description="Human-readable message")
 
 
+class DuplicateResponse(BaseModel):
+    """
+    Response when the message was already received (a platform redelivery).
+
+    The client must send nothing: the first copy is (or was) answered.
+    """
+
+    duplicate: Literal[True] = Field(default=True, description="Always true")
+    is_command: bool = Field(default=False, description="Always false")
+
+
 class JobStatusResponse(BaseModel):
     """
     Response for job status polling.

@@ -85,6 +85,10 @@ class Settings(BaseSettings):
     redis_db: int = 0
     redis_password: str | None = None
 
+    # Instance name (the root .env's SERVICE_NAME, also used by Compose). It
+    # prefixes Redis keys that must not clash when several bots share a Redis.
+    service_name: str = "aiagent"
+
     # Queue
     # TTL (seconds) of job metadata in Redis. Keeps its legacy ARQ_KEEP_RESULT
     # env name from the retired arq worker so existing overrides still apply.

@@ -46,6 +46,8 @@ interface EnqueueResponse {
   message?: string;
   is_command?: boolean;
   response?: string;
+  // Duplicate (a platform redelivery of a message already received): send nothing
+  duplicate?: boolean;
 }
 
 interface UserPreferences {
@@ -154,6 +156,13 @@ export async function sendMessageToAI(
   }
 
   const enqueueResult: EnqueueResponse = await enqueueResponse.json();
+
+  // A redelivered message (Baileys offline replay, a webhook retry): the first
+  // copy is already being answered, so this one sends nothing.
+  if (enqueueResult.duplicate) {
+    logger.info({ jid, messageId }, 'Duplicate message ignored');
+    return null;
+  }
 
   if (enqueueResult.is_command) {
     logger.info({ jid }, 'Command executed');
