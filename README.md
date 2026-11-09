@@ -67,6 +67,7 @@ A production-ready AI agent system that brings conversational AI to WhatsApp wit
 | `/clean all` | Full reset (messages, documents, memories, preferences; bug reports keep only their metadata) |
 | `/memories` | Show saved core memories |
 | `/memories clear` | Delete all core memories |
+| `/memories undo` | Undo the last change to core memories (one level) |
 | `/link` | Get a code to link this account to your other platform (WhatsApp ↔ Telegram) |
 | `/link [code]` | Enter a code from the other platform to finish linking |
 | `/linkphone` | Telegram only: link by sharing your phone number (must match your WhatsApp number) |

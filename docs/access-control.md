@@ -14,7 +14,7 @@ In a group, `/clean`, `/tts`, `/stt`, `/settings`, `/memories` (and `/broadcast 
 - Telegram resolves it via `getChatMember` (`services/group-admin.ts`).
 - A lookup failure means not-admin. Cloud API webhooks carry no group context.
 
-Agent tools that change a whole group's state apply the same rule through `agent/tools/_group.py` `group_admin_refusal` (a group conversation JID needs `AgentDeps.is_group_admin is True`): `clean_user_data`, `update_tts_settings`, `update_stt_settings`, `set_broadcast_subscription`, and `update_core_memory` with empty content (a wipe; a normal rewrite stays open to every member). Without this, any member could ask the bot in plain words to do what the commands reserve for admins.
+Agent tools that change a whole group's state apply the same rule through `agent/tools/_group.py` `group_admin_refusal` (a group conversation JID needs `AgentDeps.is_group_admin is True`): `clean_user_data`, `update_tts_settings`, `update_stt_settings`, `set_broadcast_subscription`, and `update_core_memory` when the rewrite is destructive (`is_destructive_rewrite` in `agent/tools/memory.py`: empty, or less than half of the previous document's line characters survive verbatim). Additive and small edits stay open to every member, so a non-admin can't wipe a group's memory by rewriting it to `"x"`. `/memories undo` (admin-only in groups, like every `/memories` subcommand) restores the document before the last change. Without this, any member could ask the bot in plain words to do what the commands reserve for admins.
 
 ## User whitelist (`WHITELIST_PHONES`)
 

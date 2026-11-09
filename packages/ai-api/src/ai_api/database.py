@@ -145,6 +145,8 @@ class CoreMemory(Base):
         UUID(as_uuid=True), ForeignKey("users.id"), unique=True, nullable=False, index=True
     )
     content = Column(Text, nullable=False, default="")
+    # The document before the last change, for one level of `/memories undo`.
+    previous_content = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
