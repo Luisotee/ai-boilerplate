@@ -59,6 +59,12 @@ function parseNonNegativeInt(name: string, defaultValue: number): number {
   return n;
 }
 
+/** A positive integer from an env value, or the default (unset, 0, negative, junk). */
+export function positiveInt(raw: string | undefined, defaultValue: number): number {
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : defaultValue;
+}
+
 export const config = {
   whitelistPhones,
   groupGating: groupGating.mode,
@@ -93,7 +99,7 @@ export const config = {
   // CHAT_BURST_MAX_WAIT_MS).
   album: {
     quietMs: parseInt(process.env.CHAT_BURST_QUIET_MS || '2000', 10),
-    maxWaitMs: parseInt(process.env.CHAT_BURST_MAX_WAIT_MS || '8000', 10),
+    maxWaitMs: positiveInt(process.env.CHAT_BURST_MAX_WAIT_MS, 8000),
     maxItems: 10,
   },
   // Telegram Bot API

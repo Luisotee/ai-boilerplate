@@ -145,7 +145,7 @@ export function registerUpdateHandlers(): void {
 
   // ---------------- Voice / Audio ----------------
   bot.on(['message:voice', 'message:audio'], async (ctx) => {
-    const { skip, saveOnly } = resolveGate(ctx);
+    const { skip, isGroup, saveOnly } = resolveGate(ctx);
     if (skip) return;
 
     if (saveOnly) {
@@ -160,6 +160,7 @@ export function registerUpdateHandlers(): void {
     if (result.kind === 'ok') {
       await handleTextMessage(ctx, result.transcription, {
         senderJid: ctx.from ? chatIdToJid(ctx.from.id) : undefined,
+        isGroupAdmin: isGroup ? await isSenderGroupAdmin(ctx) : undefined,
       });
       return;
     }
@@ -251,7 +252,7 @@ export function registerUpdateHandlers(): void {
 
   // ---------------- Document ----------------
   bot.on('message:document', async (ctx) => {
-    const { skip, saveOnly } = resolveGate(ctx);
+    const { skip, isGroup, saveOnly } = resolveGate(ctx);
     if (skip) return;
 
     const caption = ctx.msg.caption ?? '';
@@ -269,13 +270,15 @@ export function registerUpdateHandlers(): void {
 
     ctx.chatAction = 'typing';
     const result = await extractDocumentData(ctx);
-    const text = caption || `Document: ${filename}`;
+    const text =
+      (isGroup ? stripBotMentionFromCtx(ctx, caption) : caption) || `Document: ${filename}`;
 
     switch (result.kind) {
       case 'ok':
         await handleTextMessage(ctx, text, {
           senderJid: ctx.from ? chatIdToJid(ctx.from.id) : undefined,
           document: { data: result.data, mimetype: result.mimetype, filename: result.filename },
+          isGroupAdmin: isGroup ? await isSenderGroupAdmin(ctx) : undefined,
         });
         break;
       case 'wrong-type':
