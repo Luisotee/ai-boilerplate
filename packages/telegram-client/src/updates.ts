@@ -14,11 +14,16 @@ import { handleSharedContact, offerPhoneLink } from './handlers/link-prompt.js';
 import { logger } from './logger.js';
 import * as telegramApi from './services/telegram-api.js';
 import { chatIdToJid, chatTypeToConversationType } from './utils/telegram-id.js';
-import { isAddressedToBot, stripBotMention } from './utils/mention.js';
+import { addressingOf, stripBotMention, type BotIdentity } from './utils/mention.js';
+import { createMentionWindow } from './utils/mention-window.js';
 import { documentMarker, imageMarker } from './utils/group-media-marker.js';
 import { isWhitelisted } from './utils/whitelist.js';
 import { decideGroupGating } from './utils/gating.js';
 import { isSenderGroupAdmin } from './services/group-admin.js';
+
+// "@bot, then the question": the sender's next group message after a mention
+// counts as addressed (utils/mention-window.ts). Keyed `<chat id>|<sender id>`.
+const mentionWindow = createMentionWindow(config.mentionWindowMs);
 
 export function registerUpdateHandlers(): void {
   // ---------------- Account linking (phone share) ----------------
@@ -244,7 +249,15 @@ interface GateResult {
  * client's decision is the only gate there is for Telegram groups in that
  * mode: the AI API admits every group JID then.
  */
-function resolveGate(ctx: TelegramContext): GateResult {
+interface GateOptions {
+  /**
+   * Use (and arm) the "@bot, then the question" window. True for new messages;
+   * false for events that must not open or consume it (edits).
+   */
+  mentionWindow?: boolean;
+}
+
+function resolveGate(ctx: TelegramContext, options: GateOptions = {}): GateResult {
   const conversationType = chatTypeToConversationType(ctx.chat?.type ?? 'private');
   const isGroup = conversationType === 'group';
   const whitelistEnabled = config.whitelistPhones.size > 0;
@@ -260,7 +273,7 @@ function resolveGate(ctx: TelegramContext): GateResult {
     senderWhitelisted,
     groupExplicit: chatListed,
     groupAllowed: membership ? true : chatListed,
-    respondInGroup: isGroup && isAddressed(ctx),
+    respondInGroup: isGroup && isAddressed(ctx, options),
   });
   if (decision.skip) {
     logger.debug(
@@ -282,21 +295,41 @@ export const _internals = { passesWhitelist, resolveGate };
  * bootstrap degrades to "does not answer in groups" instead of throwing on
  * every single update.
  */
-function botIdentity(): { id: number; username: string } | undefined {
+function botIdentity(): BotIdentity | undefined {
   if (!bot.isInited()) {
     logger.error(
       'bot.botInfo unavailable — bot.init() has not completed. Group @-mentions cannot be detected.'
     );
     return undefined;
   }
-  return { id: bot.botInfo.id, username: bot.botInfo.username };
+  return {
+    id: bot.botInfo.id,
+    username: bot.botInfo.username,
+    typedNames: [config.botName, bot.botInfo.first_name],
+  };
 }
 
-function isAddressed(ctx: TelegramContext): boolean {
+/**
+ * Whether this group message is for the bot: a mention, a reply to the bot, a
+ * command, or (with `options.mentionWindow`, the default) the sender's next
+ * message after a mention. Only decides `respondInGroup`; the whitelist gate in
+ * `resolveGate` still runs around it, so the window can never admit a sender
+ * the gate keeps save-only.
+ */
+function isAddressed(ctx: TelegramContext, options: GateOptions = {}): boolean {
   const message = ctx.msg as Message | undefined;
   const me = botIdentity();
   if (!message || !me) return false;
-  return isAddressedToBot(message, me);
+  const addressing = addressingOf(message, me);
+  if (options.mentionWindow === false) return addressing !== null;
+
+  const windowKey = `${ctx.chat?.id}|${ctx.from?.id}`;
+  if (addressing === 'mention') {
+    mentionWindow.arm(windowKey, Date.now());
+    return true;
+  }
+  if (addressing !== null) return true;
+  return ctx.from !== undefined && mentionWindow.consume(windowKey, Date.now());
 }
 
 function stripBotMentionFromCtx(ctx: TelegramContext, text: string): string {

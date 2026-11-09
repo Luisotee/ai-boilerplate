@@ -53,6 +53,13 @@ function parseNonNegativeInt(name: string, defaultValue: number): number {
 
 export const config = {
   whitelistPhones,
+  // The bot's name, shared with the AI API. Here it is one of the names a typed
+  // `@Name` group mention is matched against (utils/typed-mention.ts).
+  botName: (process.env.BOT_NAME || '').trim(),
+  // GROUP_MENTION_WINDOW_SECONDS: after a group message mentions the bot, the
+  // same sender's next message within this window counts as addressed (e.g. a
+  // voice note after "@bot"). 0 disables it.
+  mentionWindowMs: parseNonNegativeInt('GROUP_MENTION_WINDOW_SECONDS', 60) * 1000,
   groupGating: groupGating.mode,
   aiApiUrl: process.env.AI_API_URL || 'http://localhost:8000',
   logLevel: process.env.LOG_LEVEL || 'info',

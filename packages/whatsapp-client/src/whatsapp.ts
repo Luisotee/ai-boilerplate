@@ -44,12 +44,17 @@ import {
 } from './utils/jid.js';
 import { isWhitelisted } from './utils/whitelist.js';
 import { gateMessage, type Gate } from './utils/gating.js';
-import { shouldRespondInGroup } from './utils/message.js';
+import { isBotMentioned, isReplyToBotMessage } from './utils/message.js';
+import { createMentionWindow } from './utils/mention-window.js';
 
 const DEFAULT_IMAGE_PROMPT = 'Please describe and analyze this image';
 const DEFAULT_DOCUMENT_PROMPT = 'I have uploaded a document for you to analyze';
 
 const AUTH_DIR = 'auth_info_baileys';
+
+// "@bot, then the question": the sender's next group message after a mention
+// counts as addressed (utils/mention-window.ts). Keyed `<group>|<participant>`.
+const mentionWindow = createMentionWindow(config.mentionWindowMs);
 
 /**
  * The whitelist gate for one incoming message (see utils/gating.ts).
@@ -483,8 +488,20 @@ export async function initializeWhatsApp(): Promise<void> {
         const botLid = sock.user?.lid ? stripDeviceSuffix(sock.user.lid) : undefined;
         // A kept group message is save-only when it isn't addressed to the bot,
         // or (GROUP_GATING=membership) its sender may not trigger a reply.
-        const saveOnly =
-          isGroup && (gate.suppressResponse || !shouldRespondInGroup(msg, botJid, botLid));
+        // Addressed = a mention (pill, or a typed @Name when there is no pill),
+        // a reply to the bot, or the sender's next message after a mention.
+        let addressed = false;
+        if (isGroup) {
+          const typedNames = [config.botName, sock.user?.name, botJid.split('@')[0]];
+          const windowKey = `${whatsappJid}|${stripDeviceSuffix(msg.key.participant ?? '')}`;
+          const mentioned = isBotMentioned(msg, botJid, botLid, typedNames);
+          addressed =
+            mentioned ||
+            isReplyToBotMessage(msg, botJid, botLid) ||
+            mentionWindow.consume(windowKey, Date.now());
+          if (mentioned) mentionWindow.arm(windowKey, Date.now());
+        }
+        const saveOnly = isGroup && (gate.suppressResponse || !addressed);
 
         // Get text from normalized message or transcribe audio
         let text = normalizedMessage?.conversation || normalizedMessage?.extendedTextMessage?.text;

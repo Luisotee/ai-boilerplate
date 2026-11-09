@@ -48,3 +48,17 @@ describe('gating.ts copies', () => {
     ).toBe(reference);
   });
 });
+
+// The typed-mention matcher and the "@bot, then the question" window are shared
+// the same way by whatsapp-client and telegram-client.
+describe.each(['typed-mention.ts', 'mention-window.ts'])('%s copies', (file) => {
+  it(`packages/telegram-client/src/utils/${file} is byte-identical to the reference`, () => {
+    const reference = readFileSync(
+      resolve(REPO_ROOT, `packages/whatsapp-client/src/utils/${file}`),
+      'utf8'
+    );
+    expect(
+      readFileSync(resolve(REPO_ROOT, `packages/telegram-client/src/utils/${file}`), 'utf8')
+    ).toBe(reference);
+  });
+});

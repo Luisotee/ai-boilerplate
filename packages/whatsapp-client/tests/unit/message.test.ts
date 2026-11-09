@@ -638,3 +638,57 @@ describe('isSenderGroupAdmin', () => {
     expect(isSenderGroupAdmin(participants, {})).toBe(false);
   });
 });
+
+describe('isBotMentioned with typed names', () => {
+  const botJid = '5511000000000@s.whatsapp.net';
+  const names = ['Curupira', '5511000000000'];
+
+  it('matches a typed @Name in a plain text message', () => {
+    const msg = createMessage({ message: { conversation: '@Curupira bom dia' } });
+    expect(isBotMentioned(msg, botJid, undefined, names)).toBe(true);
+  });
+
+  it('matches a typed @Name in an image caption', () => {
+    const msg = createMessage({ message: { imageMessage: { caption: 'olha @curupira' } } });
+    expect(isBotMentioned(msg, botJid, undefined, names)).toBe(true);
+  });
+
+  it('matches a typed @Name inside an ephemeral wrapper', () => {
+    const msg = createMessage({
+      message: { ephemeralMessage: { message: { extendedTextMessage: { text: '@Curupira?' } } } },
+    });
+    expect(isBotMentioned(msg, botJid, undefined, names)).toBe(true);
+  });
+
+  it('matches the typed phone digits', () => {
+    const msg = createMessage({ message: { conversation: '@5511000000000 oi' } });
+    expect(isBotMentioned(msg, botJid, undefined, names)).toBe(true);
+  });
+
+  it('ignores the typed name when the message has any mention pill', () => {
+    const msg = createMessage({
+      message: {
+        extendedTextMessage: {
+          text: '@Curupira (a person) look',
+          contextInfo: { mentionedJid: ['5511999999999@s.whatsapp.net'] },
+        },
+      },
+    });
+    expect(isBotMentioned(msg, botJid, undefined, names)).toBe(false);
+  });
+
+  it('does not match an e-mail address', () => {
+    const msg = createMessage({ message: { conversation: 'fale com ana@curupira.org' } });
+    expect(isBotMentioned(msg, botJid, undefined, names)).toBe(false);
+  });
+
+  it('does not use typed names when none are given', () => {
+    const msg = createMessage({ message: { conversation: '@Curupira bom dia' } });
+    expect(isBotMentioned(msg, botJid)).toBe(false);
+  });
+
+  it('shouldRespondInGroup passes the typed names through', () => {
+    const msg = createMessage({ message: { conversation: '@Curupira bom dia' } });
+    expect(shouldRespondInGroup(msg, botJid, undefined, names)).toBe(true);
+  });
+});

@@ -130,3 +130,36 @@ describe('GROUP_GATING=membership', () => {
     expect(sendMessageToAI).toHaveBeenCalledOnce();
   });
 });
+
+describe('"@bot, then the question" window', () => {
+  const saveOnly = (fn: ReturnType<typeof vi.fn>, i: number) =>
+    fn.mock.calls[i][2].saveOnly === true;
+
+  it("answers the mentioning sender's next message once, and nobody else's", async () => {
+    const { bot, sendMessageToAI } = await boot('jid', `tg:${GROUP_ID}`);
+    await bot.handleUpdate(groupText(MEMBER, '@MyBot', true));
+    await bot.handleUpdate(groupText(STRANGER, 'unrelated', false));
+    await bot.handleUpdate(groupText(MEMBER, 'the question', false));
+    await bot.handleUpdate(groupText(MEMBER, 'thanks', false));
+
+    expect(saveOnly(sendMessageToAI, 0)).toBe(false);
+    expect(saveOnly(sendMessageToAI, 1)).toBe(true);
+    expect(saveOnly(sendMessageToAI, 2)).toBe(false);
+    expect(saveOnly(sendMessageToAI, 3)).toBe(true);
+  });
+
+  it('a typed @first_name with no other mention addresses the bot', async () => {
+    const { bot, sendMessageToAI } = await boot('jid', `tg:${GROUP_ID}`);
+    // (The entity-tagged form is covered in mention.test.ts.)
+    await bot.handleUpdate(groupText(MEMBER, '@Assistant oi', false));
+    expect(saveOnly(sendMessageToAI, 0)).toBe(false);
+  });
+
+  it('PRIVACY: a non-whitelisted sender stays save-only inside the window (membership)', async () => {
+    const { bot, sendMessageToAI } = await boot('membership', `tg:${MEMBER}`);
+    await bot.handleUpdate(groupText(STRANGER, '@MyBot', true));
+    await bot.handleUpdate(groupText(STRANGER, 'the question', false));
+    expect(saveOnly(sendMessageToAI, 0)).toBe(true);
+    expect(saveOnly(sendMessageToAI, 1)).toBe(true);
+  });
+});
