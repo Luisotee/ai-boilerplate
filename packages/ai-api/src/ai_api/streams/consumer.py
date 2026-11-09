@@ -10,8 +10,31 @@ import asyncio
 from redis.asyncio import Redis
 
 from ..logger import logger
-from .manager import GROUP_NAME, acknowledge_message, read_stream_messages
+from ..queue.utils import get_job_metadata
+from .manager import (
+    GROUP_NAME,
+    HEARTBEAT_INTERVAL_SECONDS,
+    acknowledge_message,
+    claim_orphaned_chat_entries,
+    read_stream_messages,
+    refresh_heartbeat,
+)
 from .processor import process_chat_job_direct
+
+#: Job metadata statuses that mean the job already ran to the end. A job with
+#: one of these is acked without running again (a worker that died between
+#: writing the result and acking). The success path writes no status at all.
+TERMINAL_STATUSES = frozenset({"complete", "failed"})
+
+
+def is_scheduled_entry(data: dict) -> bool:
+    """Stream entries added by the scheduler (``trigger=scheduled``).
+
+    They carry their own ``run_id``/``job_id`` semantics and no platform message
+    id, so the chat-specific steps here (the already-finished check, burst
+    merging) never touch them: each one goes to process_single_message alone.
+    """
+    return data.get(b"trigger") == b"scheduled"
 
 
 async def discover_active_streams(redis: Redis) -> set[str]:
@@ -68,7 +91,11 @@ async def discover_active_streams(redis: Redis) -> set[str]:
 
 async def process_user_stream(redis: Redis, user_id: str, running_flag: dict):
     """
-    Process messages for one user sequentially.
+    Process messages for one user sequentially, in stream order.
+
+    Each round first takes over entries a dead worker left pending (they are
+    older than anything new, so they run first), then reads new ones. When a
+    live worker holds this user's pending entries, the stream is left to it.
 
     Args:
         redis: Redis client instance
@@ -77,31 +104,62 @@ async def process_user_stream(redis: Redis, user_id: str, running_flag: dict):
     """
     while running_flag.get("running", True):
         try:
-            messages = await read_stream_messages(redis, user_id, count=1)
-
-            if not messages:
-                # No new messages, break
+            entries = await claim_orphaned_chat_entries(redis, user_id)
+            if entries is None:
+                break  # another live worker is processing this user
+            if not entries:
+                entries = await _read_new_entries(redis, user_id)
+            if not entries:
                 break
 
-            for stream_key, message_list in messages:
-                for message_id, data in message_list:
-                    try:
-                        await process_single_message(user_id, message_id.decode(), data)
-                        await acknowledge_message(redis, user_id, message_id.decode())
-                    except Exception as msg_error:
-                        logger.error(
-                            f"Error processing message {message_id} for user {user_id}: {msg_error}",
-                            exc_info=True,
-                        )
-                        # Still acknowledge to prevent infinite retries
-                        try:
-                            await acknowledge_message(redis, user_id, message_id.decode())
-                        except Exception as ack_error:
-                            logger.error(f"Failed to acknowledge failed message: {ack_error}")
+            for message_id, data in entries:
+                await _process_entry(redis, user_id, message_id, data)
 
         except Exception as e:
             logger.error(f"Error in stream processing for user {user_id}: {e}")
             await asyncio.sleep(1)
+
+
+async def _read_new_entries(
+    redis: Redis, user_id: str, count: int = 1, block: int = 5000
+) -> list[tuple[str, dict]]:
+    """New (never delivered) entries of the user's stream, oldest first."""
+    messages = await read_stream_messages(redis, user_id, count=count, block=block)
+    return [
+        (message_id.decode() if isinstance(message_id, bytes) else message_id, data)
+        for _stream_key, message_list in messages or []
+        for message_id, data in message_list
+    ]
+
+
+async def _already_finished(redis: Redis, data: dict) -> bool:
+    """True if this chat job already wrote terminal metadata (a worker died
+    after finishing it but before acking). Only terminal statuses count, so a
+    job that crashed mid-run still runs again."""
+    raw_job_id = data.get(b"job_id")
+    if not raw_job_id:
+        return False
+    metadata = await get_job_metadata(redis, raw_job_id.decode("utf-8", "replace"))
+    return metadata is not None and metadata.get("status", "complete") in TERMINAL_STATUSES
+
+
+async def _process_entry(redis: Redis, user_id: str, message_id: str, data: dict) -> None:
+    """Run one stream entry and ack it, whatever happens (no infinite retries)."""
+    try:
+        if not is_scheduled_entry(data) and await _already_finished(redis, data):
+            logger.info(f"Chat job in entry {message_id} already finished; acking only")
+        else:
+            await process_single_message(user_id, message_id, data)
+    except Exception as msg_error:
+        logger.error(
+            f"Error processing message {message_id} for user {user_id}: {msg_error}",
+            exc_info=True,
+        )
+    finally:
+        try:
+            await acknowledge_message(redis, user_id, message_id)
+        except Exception as ack_error:
+            logger.error(f"Failed to acknowledge message {message_id}: {ack_error}")
 
 
 async def process_single_message(user_id: str, message_id: str, data: dict):
@@ -210,6 +268,7 @@ async def run_stream_consumer(redis: Redis):
     """
     running_flag = {"running": True}
     logger.info("🚀 Starting Redis Streams consumer")
+    heartbeat = asyncio.create_task(_heartbeat_loop(redis), name="chat-consumer-heartbeat")
 
     try:
         while running_flag["running"]:
@@ -247,3 +306,16 @@ async def run_stream_consumer(redis: Redis):
     except KeyboardInterrupt:
         logger.info("Shutting down consumer...")
         running_flag["running"] = False
+    finally:
+        heartbeat.cancel()
+
+
+async def _heartbeat_loop(redis: Redis) -> None:
+    """Keep this worker's liveness key fresh, so other workers never take over
+    the jobs it is running (and do take them over once it is gone)."""
+    while True:
+        try:
+            await refresh_heartbeat(redis)
+        except Exception as e:
+            logger.warning(f"Failed to refresh the chat consumer heartbeat: {e}")
+        await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
