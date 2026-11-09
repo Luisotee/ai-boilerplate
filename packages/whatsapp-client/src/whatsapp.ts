@@ -639,6 +639,9 @@ export async function initializeWhatsApp(): Promise<void> {
         // Get text from normalized message or transcribe audio
         let text = normalizedMessage?.conversation || normalizedMessage?.extendedTextMessage?.text;
 
+        // Every group audio is transcribed, saved-only ones too, on purpose: the
+        // text keeps the voice note readable to get_chat_history and history
+        // search. The STT cost on unaddressed group chatter is accepted.
         if (!text && normalizedMessage?.audioMessage) {
           text = await transcribeAudioMessage(sock, msg);
           if (!text) {
