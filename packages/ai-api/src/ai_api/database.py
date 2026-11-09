@@ -2,7 +2,7 @@ import uuid
 from datetime import UTC, datetime
 from enum import Enum
 
-from pgvector.sqlalchemy import Vector
+from pgvector.sqlalchemy import HALFVEC, Vector
 from sqlalchemy import (
     Boolean,
     Column,
@@ -14,6 +14,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     create_engine,
+    func,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -109,6 +110,17 @@ class ConversationMessage(Base):
 
     # Relationship
     user = relationship("User", back_populates="messages")
+
+    # HNSW index on the halfvec cast (pgvector can't index vector(3072)); see
+    # rag/vector.py and docs/migrations/2026-11-09-vector-hnsw-indexes.sql.
+    __table_args__ = (
+        Index(
+            "idx_conversation_messages_embedding_hnsw",
+            func.cast(embedding, HALFVEC(3072)).label("embedding"),
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "halfvec_cosine_ops"},
+        ),
+    )
 
 
 class ConversationPreferences(Base):

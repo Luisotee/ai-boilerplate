@@ -187,7 +187,7 @@ Work is tracked in **Devflow**, project **`CHATBOTS`** (org Terra Krya), via the
 - **Runtime settings (`runtime_config.py`)**: Only mark a `REGISTRY` setting `hot=True` if its consumption site actually reads via `runtime_config.get("key")`.
 - **Markdown sanitisation (`formatting.markdown_to_whatsapp`)**: Converts model Markdown to WhatsApp markup across `streams/processor.py` (including `[Partial - Error]` rows), sync `/chat`, and `send_whatsapp_message`. Formatting rule is injected via `formatting_guidance` in `agent/core.py`; keep `**` out of `DEFAULT_SYSTEM_PROMPT` (pinned by `test_formatting_guidance.py`). Telegram composes on top (WhatsApp markup → `---` bursts + Telegram HTML), pinned by `packages/ai-api/tests/fixtures/markdown_pipeline.json`.
 - **Starlette middleware order**: Add `CORSMiddleware` **after** `APIKeyMiddleware` in `main.py` (LIFO execution).
-- **pgvector IVFFlat index**: Must be created manually on `knowledge_base_chunks` after data load.
+- **pgvector**: HNSW on `embedding::halfvec(3072)`; queries order by it (`rag/vector.py`).
 - **Embedding task types**: `RETRIEVAL_DOCUMENT` for storage, `RETRIEVAL_QUERY` for search.
 - **Redis Streams (`streams/`) is the only job pipeline**: `queue/connection.py` retains legacy `get_arq_redis` / `ARQ_KEEP_RESULT` names for compatibility.
 - **Non-root Docker images & `.dockerignore`**: TS clients run as `node` (uid 1000) via `node --import ./dist/instrument.js dist/main.js` (type errors fail the image build; never add `|| true`). `ai-api` runs as `appuser` (uid 1000). Each TS client uses `packages/<pkg>/Dockerfile.dockerignore` (allowlist); keep `.logfire/` excluded in all ignore files.

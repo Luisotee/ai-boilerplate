@@ -8,10 +8,11 @@ with vector embeddings for semantic search.
 import uuid
 from datetime import datetime
 
-from pgvector.sqlalchemy import Vector
+from pgvector.sqlalchemy import HALFVEC, Vector
 from sqlalchemy import JSON, Boolean, Column, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
+from sqlalchemy.sql import func
 
 from .database import Base
 
@@ -113,8 +114,16 @@ class KnowledgeBaseChunk(Base):
     __table_args__ = (
         Index("idx_kb_chunks_document", "document_id"),
         Index("idx_kb_chunks_page", "page_number"),
-        # IVFFlat index for vector similarity search - created manually after table creation
-        # CREATE INDEX idx_kb_chunks_embedding ON knowledge_base_chunks USING ivfflat (embedding vector_cosine_ops);
+        # HNSW index for vector search. pgvector can't index vector(3072) (its
+        # limit is 2,000 dims), so the index is on the halfvec cast (limit 4,000)
+        # and queries must order by the same expression (rag/vector.py).
+        # Existing DBs: docs/migrations/2026-11-09-vector-hnsw-indexes.sql.
+        Index(
+            "idx_kb_chunks_embedding_hnsw",
+            func.cast(embedding, HALFVEC(3072)).label("embedding"),
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "halfvec_cosine_ops"},
+        ),
     )
 
     def __repr__(self):

@@ -25,7 +25,7 @@ Stage 1:  Upload → routes/knowledge_base.py (file validation, disk write, DB r
 Stage 2:  Parsing → processing.py (Docling PDF conversion, 300s timeout)
 Stage 3:  Chunking → processing.py (HybridChunker, 512 tokens/chunk, tiktoken)
 Stage 4:  Embedding → processing.py + embeddings.py (gemini-embedding-001, 3072 dims)
-Stage 5:  Storage → kb_models.py (pgvector, nullable embeddings, IVFFlat index)
+Stage 5:  Storage → kb_models.py (pgvector, nullable embeddings, HNSW halfvec index)
 Stage 6:  Retrieval → rag/knowledge_base.py + agent/tools/search.py (cosine similarity)
 ```
 
@@ -92,12 +92,7 @@ When the user describes an issue, determine WHERE in the pipeline it occurs:
 - `knowledge_base_documents`: status, error_message, chunk_count, doc_metadata
 - `knowledge_base_chunks`: content, embedding (Vector(3072), **NULLABLE**), page_number, heading
 - Conversation-scoped docs: `is_conversation_scoped`, `whatsapp_jid`, `expires_at`
-- **CRITICAL**: IVFFlat index must be created manually:
-  ```sql
-  CREATE INDEX idx_kb_chunks_embedding ON knowledge_base_chunks
-  USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
-  ```
-  Without this, similarity search does full table scan.
+- HNSW index `idx_kb_chunks_embedding_hnsw` on `embedding::halfvec(3072)` (pgvector can't index a 3072-dim `vector`). `create_all()` makes it; existing DBs apply `packages/ai-api/docs/migrations/2026-11-09-vector-hnsw-indexes.sql`. Queries must order by the same cast (`rag/vector.py`).
 
 ### Retrieval issues (Stage 6)
 **Files:** `packages/ai-api/src/ai_api/rag/knowledge_base.py`, `packages/ai-api/src/ai_api/agent/tools/search.py`
@@ -121,7 +116,7 @@ When the user describes an issue, determine WHERE in the pipeline it occurs:
 | Status `failed` | No chunks embedded successfully | Check GEMINI_API_KEY, API logs |
 | Search returns empty | Threshold too high (0.7) | Try lowering `KB_SIMILARITY_THRESHOLD` |
 | Search returns wrong results | Task type mismatch | Verify RETRIEVAL_DOCUMENT vs RETRIEVAL_QUERY |
-| Search is very slow | Missing IVFFlat index | Check with `\di` in psql |
+| Search is very slow | Missing HNSW index (migration not applied) | `\di *hnsw*` in psql; `EXPLAIN` the query |
 | Conversation docs not found | JID mismatch or expired TTL | Check `whatsapp_jid` and `expires_at` |
 | "Search not available" | Missing embedding service | Check GEMINI_API_KEY is set |
 

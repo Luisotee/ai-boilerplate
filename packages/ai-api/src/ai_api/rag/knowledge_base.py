@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from ..logger import logger
 from ..runtime_config import runtime_config
+from .vector import halfvec_distance, prepare_hnsw_search
 
 
 async def search_knowledge_base(
@@ -52,43 +53,48 @@ async def search_knowledge_base(
     query_preview = query_text[:50] if query_text else "embedding"
     logger.info(f"Knowledge base search: '{query_preview}...' (limit: {limit})")
 
-    # Vector similarity query using cosine distance
-    # JOIN with documents to get metadata and filter by status
-    # pgvector uses <=> for cosine distance (lower = more similar)
-    # We convert to similarity score: 1 - distance
+    # Nearest neighbours by cosine distance (pgvector ``<=>``, lower = more
+    # similar), reported as similarity = 1 - distance. The inner query orders by
+    # the halfvec expression idx_kb_chunks_embedding_hnsw is built on; the outer
+    # query applies the threshold and re-sorts.
     #
     # Conversation scope filtering:
     # - Global documents (whatsapp_jid IS NULL) are always included
     # - If whatsapp_jid is provided, also include documents scoped to that conversation
     # - Exclude expired documents (expires_at < NOW())
-    query_sql = text("""
-        SELECT
-            c.id,
-            c.document_id,
-            c.chunk_index,
-            c.content,
-            c.content_type,
-            c.page_number,
-            c.heading,
-            c.token_count,
-            c.chunk_metadata,
-            d.filename,
-            d.original_filename,
-            d.upload_date,
-            d.doc_metadata as document_metadata,
-            d.is_conversation_scoped,
-            (1 - (c.embedding <=> CAST(:embedding AS vector))) AS similarity
-        FROM knowledge_base_chunks c
-        JOIN knowledge_base_documents d ON c.document_id = d.id
-        WHERE d.status = 'completed'
-          AND c.embedding IS NOT NULL
-          AND (1 - (c.embedding <=> CAST(:embedding AS vector))) >= :threshold
-          AND (d.whatsapp_jid IS NULL OR d.whatsapp_jid = :whatsapp_jid)
-          AND (d.expires_at IS NULL OR d.expires_at > NOW())
+    distance = halfvec_distance("c.embedding")
+    query_sql = text(f"""
+        SELECT * FROM (
+            SELECT
+                c.id,
+                c.document_id,
+                c.chunk_index,
+                c.content,
+                c.content_type,
+                c.page_number,
+                c.heading,
+                c.token_count,
+                c.chunk_metadata,
+                d.filename,
+                d.original_filename,
+                d.upload_date,
+                d.doc_metadata as document_metadata,
+                d.is_conversation_scoped,
+                (1 - {distance}) AS similarity
+            FROM knowledge_base_chunks c
+            JOIN knowledge_base_documents d ON c.document_id = d.id
+            WHERE d.status = 'completed'
+              AND c.embedding IS NOT NULL
+              AND (d.whatsapp_jid IS NULL OR d.whatsapp_jid = :whatsapp_jid)
+              AND (d.expires_at IS NULL OR d.expires_at > NOW())
+            ORDER BY {distance}
+            LIMIT :limit
+        ) nearest
+        WHERE similarity >= :threshold
         ORDER BY similarity DESC
-        LIMIT :limit
     """)
 
+    prepare_hnsw_search(db)
     result = db.execute(
         query_sql,
         {

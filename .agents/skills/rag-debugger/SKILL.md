@@ -15,7 +15,7 @@ Stage 1: Upload (routes/knowledge_base.py) → DB record 'queued' + Redis stream
 Stage 2: Parsing (streams/pdf_consumer.py, processing.py) → Docling conversion
 Stage 3: Chunking (processing.py) → HybridChunker (512 tokens max)
 Stage 4: Embedding (embeddings.py) → gemini-embedding-001 (3072 dims, RETRIEVAL_DOCUMENT)
-Stage 5: Storage (kb_models.py) → knowledge_base_chunks + IVFFlat index
+Stage 5: Storage (kb_models.py) → knowledge_base_chunks + HNSW halfvec index
 Stage 6: Retrieval (rag/knowledge_base.py, search.py) → RETRIEVAL_QUERY + cosine distance (<=>)
 ```
 
@@ -57,12 +57,7 @@ Stage 6: Retrieval (rag/knowledge_base.py, search.py) → RETRIEVAL_QUERY + cosi
 
 ### Stage 5: pgvector Storage
 - Chunks stored in `knowledge_base_chunks` with nullable `Vector(3072)` embeddings.
-- **IVFFlat Index**: Must be created manually once data is loaded (to avoid full table scan):
-  ```sql
-  CREATE INDEX IF NOT EXISTS idx_kb_chunks_embedding
-  ON knowledge_base_chunks
-  USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
-  ```
+- **HNSW index** `idx_kb_chunks_embedding_hnsw` on `embedding::halfvec(3072)` (pgvector can't index a 3072-dim `vector`; IVFFlat fails). `create_all()` makes it on a fresh DB; existing DBs apply `docs/migrations/2026-11-09-vector-hnsw-indexes.sql`. Queries must order by the same cast (`rag/vector.py`) or they full-scan.
 
 ### Stage 6: Retrieval
 - **Task Type for Query**: `RETRIEVAL_QUERY` (CRITICAL: must match search query type).

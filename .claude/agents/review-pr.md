@@ -142,7 +142,7 @@ Check against known pitfalls from CLAUDE.md:
 - `normalizeMessageContent()` before type checks
 - Both JID and LID formats for bot identity
 - `create_all()` only creates new tables (no migrations)
-- pgvector IVFFlat index must be created manually
+- Vector search must order by `embedding::halfvec(3072)` distance (`rag/vector.py`) to use the HNSW index
 - Middleware ordering: CORS after APIKeyMiddleware
 - Tool registration via `__init__.py` imports
 - Husky pre-commit hook runs `pnpm format` automatically

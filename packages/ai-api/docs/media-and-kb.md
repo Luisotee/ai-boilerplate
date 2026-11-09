@@ -8,6 +8,15 @@ Detail behind the database and media rules in the root `CLAUDE.md` / `AGENTS.md`
 
 Both upload routes are `@limiter.exempt` for bulk loads via `./upload-kb.sh <dir>`, which posts a folder of PDFs to the batch route with `AI_API_KEY` from the env or `.env`. They stay behind `X-API-Key`.
 
+## Vector indexes
+
+Both embedding columns (`knowledge_base_chunks.embedding`, `conversation_messages.embedding`) are `vector(3072)`. pgvector's IVFFlat and HNSW indexes stop at 2,000 dimensions for `vector`, so each column has an HNSW expression index on `embedding::halfvec(3072)` (`idx_kb_chunks_embedding_hnsw`, `idx_conversation_messages_embedding_hnsw`, `halfvec_cosine_ops`). No re-embedding was needed: half precision changes the ranking negligibly. HNSW, not IVFFlat, because `create_all()` builds the index on an empty table and IVFFlat computes its lists from the rows present at build time.
+
+- Queries use the index only when they order by the same expression, so the SQL in `rag/` builds its distance with `rag/vector.halfvec_distance()`. Ordering by a derived `similarity` column scans every row.
+- `prepare_hnsw_search()` runs right before each search, in the same transaction: `hnsw.ef_search = 100` and, on pgvector >= 0.8, `hnsw.iterative_scan = relaxed_order`, so filters (user, status, scope) don't leave a search short of its LIMIT. Both are `SET LOCAL`.
+- Conversation search filters by `user_id`: the planner uses the HNSW index only for a chat holding a large share of the table and the `user_id` btree plus an exact sort otherwise, which is what we want.
+- Existing deployments apply `docs/migrations/2026-11-09-vector-hnsw-indexes.sql` (needs pgvector >= 0.7 for `halfvec`; the file says how to upgrade). Check with `\di *hnsw*` and `EXPLAIN` the query: the plan should show `Index Scan using idx_..._hnsw`.
+
 ## PDF parsing
 
 LlamaParse (cloud, primary) via the `llama-cloud` SDK, with an **optional** Docling fallback behind the `[docling]` extra. `PDF_PARSER` is `auto` | `llamaparse` | `docling`. In `auto` mode LlamaParse runs when `LLAMA_CLOUD_API_KEY` is set and falls back to Docling on any parser error *if* the extra is installed.
