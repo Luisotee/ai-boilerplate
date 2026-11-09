@@ -18,11 +18,15 @@ from pydantic_ai.exceptions import (
 )
 from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
+from sqlalchemy import exc as sa_exc
+from sqlalchemy.orm import Session
 
 from ai_api.agent.model_chain import FALLBACK_ON, Cooldown, GuardedModel
 from ai_api.config import settings
+from ai_api.database import ConversationMessage
 from ai_api.rag import group_topics as gt
 from ai_api.rag.group_topics import (
+    BACKFILL,
     GAP,
     MAX_BLOCK,
     MIN_BLOCK,
@@ -31,6 +35,7 @@ from ai_api.rag.group_topics import (
     STALE_TAIL,
     Block,
     Msg,
+    RunFailures,
     Topic,
     format_topic_results,
     render_block,
@@ -237,13 +242,22 @@ def _genai(cls, code: int):
         (ModelHTTPError(429, "m"), True),
         (ModelHTTPError(503, "m"), True),
         (ModelHTTPError(400, "m"), False),
-        (ModelHTTPError(404, "m"), False),
+        (ModelHTTPError(422, "m"), False),
+        # model_chain's cooldown statuses: bad key, billing, wrong model name
+        (ModelHTTPError(401, "m"), True),
+        (ModelHTTPError(402, "m"), True),
+        (ModelHTTPError(403, "m"), True),
+        (ModelHTTPError(404, "m"), True),
         (ModelAPIError("m", "skipped: cooling down after a recent failure"), True),
         (httpx.ConnectError("down"), True),
         (openai.APIConnectionError(request=httpx.Request("POST", "https://x")), True),
         (_genai(genai_errors.ClientError, 429), True),
         (_genai(genai_errors.ServerError, 503), True),
         (_genai(genai_errors.ClientError, 400), False),
+        (_genai(genai_errors.ClientError, 403), True),
+        (gt.EmbeddingTimeoutError(), True),
+        (sa_exc.OperationalError("SELECT 1", {}, Exception("connection refused")), True),
+        (sa_exc.DataError("INSERT", {}, Exception("NUL character")), False),
         (UnexpectedModelBehavior("bad output"), False),
         (TimeoutError(), False),
         (ValueError("Expected 1 embeddings, got 0"), False),
@@ -256,6 +270,28 @@ def _genai(cls, code: int):
 )
 def test_is_unavailable(exc, unavailable):
     assert gt.is_unavailable(exc) is unavailable
+
+
+@pytest.mark.parametrize(
+    ("exc", "kind"),
+    [
+        (ModelHTTPError(400, "m"), "ModelHTTPError:400"),
+        (_genai(genai_errors.ClientError, 400), "ClientError:400"),
+        (TimeoutError(), "timeout"),
+        (UnexpectedModelBehavior("bad output"), None),
+        (ValueError("x"), None),
+        (
+            FallbackExceptionGroup("all", [ModelHTTPError(400, "a"), TimeoutError()]),
+            "ModelHTTPError:400|timeout",
+        ),
+        (
+            FallbackExceptionGroup("all", [ModelHTTPError(400, "a"), UnexpectedModelBehavior("b")]),
+            None,
+        ),
+    ],
+)
+def test_failure_kind(exc, kind):
+    assert gt.failure_kind(exc) == kind
 
 
 # ---------------------------------------------------------------------------
@@ -280,6 +316,7 @@ def _redis(failures: int = 1, cached: bytes | None = None) -> MagicMock:
     redis.delete = AsyncMock()
     redis.get = AsyncMock(return_value=cached)
     redis.set = AsyncMock()
+    redis.decr = AsyncMock()
     return redis
 
 
@@ -494,18 +531,148 @@ class TestIngestFailureKinds:
             patch(f"{MODULE}.store_block", MagicMock(return_value=True)),
         ):
             result = await gt.ingest_group(
-                _redis(), uuid.uuid4(), now, _embedder(), keep_lease=keep
+                _redis(), uuid.uuid4(), now, _embedder(), keep_going=keep
             )
-        assert result.lease_lost is True and result.blocks_done == 1
+        assert result.stopped is True and result.blocks_done == 1
         assert summarise.await_count == 1
 
+    async def test_a_store_failure_counts_against_the_block(self):
+        msgs, now = _blocks_of(1)
+        redis = _redis()
+        store = MagicMock(side_effect=sa_exc.DataError("INSERT", {}, Exception("NUL")))
+        with (
+            patch(f"{MODULE}.load_new_messages", return_value=(msgs, [])),
+            patch(f"{MODULE}.summarise_block", AsyncMock(return_value=[])),
+            patch(f"{MODULE}.store_block", store),
+        ):
+            result = await gt.ingest_group(redis, uuid.uuid4(), now, _embedder())
+        assert result.unavailable is False and result.blocks_done == 0
+        redis.incr.assert_awaited_once()
 
-def test_discovery_uses_the_same_tie_rule_as_the_read():
+    async def test_a_lost_database_is_an_outage(self):
+        msgs, now = _blocks_of(1)
+        redis = _redis()
+        down = sa_exc.OperationalError("SELECT 1", {}, Exception("connection refused"))
+        with (
+            patch(f"{MODULE}.load_new_messages", return_value=(msgs, [])),
+            patch(f"{MODULE}.summarise_block", AsyncMock(return_value=[])),
+            patch(f"{MODULE}.store_block", MagicMock(side_effect=down)),
+        ):
+            result = await gt.ingest_group(redis, uuid.uuid4(), now, _embedder())
+        assert result.unavailable is True
+        redis.incr.assert_not_called()
+
+    async def test_a_hanging_embedding_is_an_outage(self):
+        msgs, now = _blocks_of(1)
+        redis = _redis()
+        embedder = _embedder()
+
+        async def hang(_texts):
+            await asyncio.sleep(10)
+
+        embedder.embed_documents.side_effect = hang
+        with (
+            patch(f"{MODULE}.EMBED_TIMEOUT_SECONDS", 0.01),
+            patch(f"{MODULE}.load_new_messages", return_value=(msgs, [])),
+            patch(
+                f"{MODULE}.summarise_block",
+                AsyncMock(return_value=[Topic(subject="a", summary="b")]),
+            ),
+            patch(f"{MODULE}.store_block", MagicMock()) as store,
+        ):
+            result = await gt.ingest_group(redis, uuid.uuid4(), now, embedder)
+        assert result.unavailable is True
+        redis.incr.assert_not_called()
+        store.assert_not_called()
+
+
+class TestRunFailures:
+    """The same 4xx or timeout in two groups of one run is an outage, not two bad blocks."""
+
+    async def _ingest(self, redis, group, failures, error):
+        msgs, now = _blocks_of(1)
+        with (
+            patch(f"{MODULE}.load_new_messages", return_value=(msgs, [])),
+            patch(f"{MODULE}.summarise_block", AsyncMock(side_effect=error)),
+            patch(f"{MODULE}.store_block", MagicMock()) as store,
+        ):
+            result = await gt.ingest_group(redis, group, now, _embedder(), run_failures=failures)
+        store.assert_not_called()
+        return result, Block(tuple(msgs)).key
+
+    @pytest.mark.parametrize(
+        "error",
+        [lambda: _genai(genai_errors.ClientError, 400), TimeoutError],
+        ids=["gemini-400-invalid-key", "summary-timeout"],
+    )
+    async def test_second_group_stops_the_run_and_takes_the_first_count_back(self, error):
+        redis, failures = _redis(), RunFailures()
+        a, b = uuid.uuid4(), uuid.uuid4()
+
+        first, block_key = await self._ingest(redis, a, failures, error())
+        assert first.unavailable is False
+        redis.incr.assert_awaited_once()
+
+        second, _ = await self._ingest(redis, b, failures, error())
+        assert second.unavailable is True
+        redis.incr.assert_awaited_once()  # the second group counted nothing
+        redis.decr.assert_awaited_once_with(f"group_topics:fail:{a}:{block_key}")
+
+    async def test_different_failures_are_each_the_block_s_own(self):
+        redis, failures = _redis(), RunFailures()
+        await self._ingest(redis, uuid.uuid4(), failures, ModelHTTPError(400, "m"))
+        result, _ = await self._ingest(
+            redis, uuid.uuid4(), failures, UnexpectedModelBehavior("bad output")
+        )
+        assert result.unavailable is False
+        assert redis.incr.await_count == 2
+        redis.decr.assert_not_called()
+
+    async def test_a_skipped_block_is_not_taken_back(self):
+        redis, failures = _redis(failures=POISON_LIMIT), RunFailures()
+        msgs, now = _blocks_of(1)
+        with (
+            patch(f"{MODULE}.load_new_messages", return_value=(msgs, [])),
+            patch(f"{MODULE}.summarise_block", AsyncMock(side_effect=TimeoutError)),
+            patch(f"{MODULE}.store_block", MagicMock(return_value=True)),
+        ):
+            await gt.ingest_group(redis, uuid.uuid4(), now, _embedder(), run_failures=failures)
+        assert failures.first == {}
+
+
+def test_discovery_uses_the_same_rules_as_the_read():
     db = MagicMock()
     db.__enter__.return_value = db
     db.execute.return_value.fetchall.return_value = []
     with patch(f"{MODULE}.SessionLocal", return_value=db):
         gt.groups_with_new_messages(T0)
     sql = " ".join(str(db.execute.call_args.args[0]).split())
+    assert "AND m.timestamp >= :backfill_start AND ( c.user_id IS NULL OR" in sql
     assert "(m.timestamp, m.id) > (c.last_message_at, c.last_message_id)" in sql
-    assert "c.user_id IS NULL AND m.timestamp >= :backfill_start" in sql
+    assert db.execute.call_args.args[1] == {"backfill_start": T0 - BACKFILL}
+
+
+def test_read_skips_the_embedding_and_anything_older_than_backfill():
+    """A cursor months old (job re-enabled) still reads only the last BACKFILL."""
+    db = MagicMock()
+    db.__enter__.return_value = db
+    db.get.return_value = MagicMock(
+        last_message_at=T0 - timedelta(days=120), last_message_id=uuid.uuid4()
+    )
+    with patch(f"{MODULE}.SessionLocal", return_value=db):
+        gt.load_new_messages(uuid.uuid4(), T0)
+    filters = [str(arg) for c in db.mock_calls if c[0].endswith(".filter") for arg in c.args]
+    assert "conversation_messages.timestamp >= :timestamp_1" in filters
+    backfill = next(
+        arg.right.value
+        for c in db.mock_calls
+        if c[0].endswith(".filter")
+        for arg in c.args
+        if str(arg) == "conversation_messages.timestamp >= :timestamp_1"
+    )
+    assert backfill == T0 - BACKFILL
+    # Compile the read's column list (no database needed): no vector column.
+    option = next(c.args[0] for c in db.mock_calls if c[0].endswith(".options"))
+    sql = str(Session().query(ConversationMessage).options(option))
+    assert "conversation_messages.content" in sql
+    assert "embedding" not in sql

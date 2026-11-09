@@ -8,7 +8,7 @@ from ...rag.conversation import (
 from ...rag.conversation import (
     search_conversation_history as search_conversation_fn,
 )
-from ...rag.group_topics import format_topic_results, search_group_topics, topics_cover_until
+from ...rag.group_topics import format_topic_results, search_group_topics
 from ...rag.knowledge_base import (
     format_knowledge_base_results,
 )
@@ -63,32 +63,10 @@ async def search_conversation_history(ctx: RunContext[AgentDeps], search_query: 
 
         # In a group, its topic summaries (rag/group_topics.py) come first; they
         # are keyed by this group's own users.id, so a private chat never sees them.
-        # Messages newer than the topics are searched too, so an older topic
-        # can't hide a recent answer.
+        topics = []
         if is_group_jid(deps.whatsapp_jid) and runtime_config.get("group_topics_enabled"):
             topics = search_group_topics(deps.db, query_embedding, deps.user_id)
-            if topics:
-                logger.info(f"Group topic search returned {len(topics)} topics")
-                covered_until = topics_cover_until(deps.db, deps.user_id)
-                newer = (
-                    await search_conversation_fn(
-                        db=deps.db,
-                        query_embedding=query_embedding,
-                        user_id=deps.user_id,
-                        query_text=search_query,
-                        exclude_message_ids=deps.recent_message_ids,
-                        newer_than=covered_until,
-                    )
-                    if covered_until is not None
-                    else []
-                )
-                reply = format_topic_results(topics)
-                if newer:
-                    reply += (
-                        "\n\nNewer messages, not yet in the topics:\n"
-                        + format_conversation_results(newer)
-                    )
-                return reply
+            logger.info(f"Group topic search returned {len(topics)} topics")
 
         # Call pure function for semantic search (uses env defaults)
         messages = await search_conversation_fn(
@@ -99,6 +77,15 @@ async def search_conversation_history(ctx: RunContext[AgentDeps], search_query: 
             exclude_message_ids=deps.recent_message_ids,
             # Omit limit, similarity_threshold, context_window to use env defaults
         )
+
+        # Messages are searched even when topics match: a summary drops details
+        # (a number, a link), and no topic covers messages from before the job
+        # started, newer than its last run, or in a block it skipped.
+        if topics:
+            reply = format_topic_results(topics)
+            if messages:
+                reply += "\n\nMatching messages:\n" + format_conversation_results(messages)
+            return reply
 
         if not messages:
             logger.info("No relevant past messages found.")

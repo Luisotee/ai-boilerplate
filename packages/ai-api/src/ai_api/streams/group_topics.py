@@ -7,7 +7,9 @@ every :data:`DISABLED_POLL_SECONDS`, so turning it on applies within that.
 
 A Redis lease (``group_topics:lock``, ``streams/lease.py``) lets one worker
 process run at a time. It is renewed before every block, and a run that loses
-it stops, so two workers never summarise the same block. A run also stops
+it stops, so two workers never summarise the same block. The setting is also
+re-read before every block, so turning it off stops a run within one block
+(and no new block is sent to the model). A run also stops
 starting new groups after :data:`RUN_BUDGET_SECONDS`; groups that waited
 longest go first, so the rest are picked up by the next run.
 """
@@ -21,7 +23,7 @@ from redis.asyncio import Redis
 from ..config import settings
 from ..embeddings import create_embedding_service
 from ..logger import logger
-from ..rag.group_topics import groups_with_new_messages, ingest_group
+from ..rag.group_topics import RunFailures, groups_with_new_messages, ingest_group
 from ..runtime_config import runtime_config
 from .lease import acquire_lease, extend_lease, release_lease
 
@@ -76,8 +78,13 @@ async def run_group_topics_once(redis: Redis, token: str) -> None:
             logger.warning("Group topics: no embedding service (GEMINI_API_KEY unset), skipping")
             return
 
-        async def keep_lease() -> bool:
+        async def keep_going() -> bool:
+            if not runtime_config.get("group_topics_enabled"):
+                logger.info("Group topics: turned off, stopping this run")
+                return False
             return await extend_lease(redis, LOCK_KEY, token, LOCK_TTL_SECONDS)
+
+        run_failures = RunFailures()
 
         loop = asyncio.get_running_loop()
         started = loop.time()
@@ -92,7 +99,12 @@ async def run_group_topics_once(redis: Redis, token: str) -> None:
                 break
             try:
                 result = await ingest_group(
-                    redis, group_id, now, embedding_service, keep_lease=keep_lease
+                    redis,
+                    group_id,
+                    now,
+                    embedding_service,
+                    keep_going=keep_going,
+                    run_failures=run_failures,
                 )
             except asyncio.CancelledError:
                 raise
@@ -102,8 +114,8 @@ async def run_group_topics_once(redis: Redis, token: str) -> None:
             done += result.blocks_done
             topics += result.topics_stored
             skipped += result.blocks_skipped
-            if result.lease_lost:
-                logger.warning("Group topics: lease lost, stopping this run")
+            if result.stopped:
+                logger.warning("Group topics: lease lost or job turned off, stopping this run")
                 break
             if result.unavailable:
                 # Every group shares the providers: trying the rest now would

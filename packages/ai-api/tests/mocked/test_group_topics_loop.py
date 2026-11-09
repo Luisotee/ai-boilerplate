@@ -24,6 +24,14 @@ def _redis(lease: bool = True, deferred: set[str] | None = None) -> MagicMock:
     return redis
 
 
+@pytest.fixture
+def enabled():
+    values = {"group_topics_enabled": True}
+    with patch(f"{MODULE}.runtime_config") as rc:
+        rc.get.side_effect = values.get
+        yield values
+
+
 def _patched(groups, ingest):
     return (
         patch(f"{MODULE}.create_embedding_service", return_value=MagicMock()),
@@ -70,12 +78,12 @@ async def test_lease_held_elsewhere_skips_the_run():
     assert redis.eval.await_count == 1  # the extend attempt; no release
 
 
-async def test_lease_is_renewed_before_each_block():
+async def test_lease_is_renewed_before_each_block(enabled):
     redis = _redis()
 
-    async def ingest(_redis, _group, _now, _emb, keep_lease):
-        assert await keep_lease() is True
-        assert await keep_lease() is True
+    async def ingest(_redis, _group, _now, _emb, keep_going, run_failures):
+        assert await keep_going() is True
+        assert await keep_going() is True
         return IngestResult(blocks_done=2)
 
     with (
@@ -122,9 +130,34 @@ async def test_deferred_group_goes_last_and_is_cleared_on_success():
     redis.srem.assert_awaited_once_with(loop_mod.DEFERRED_KEY, str(a))
 
 
+async def test_turning_the_job_off_stops_before_the_next_block(enabled):
+    redis = _redis()
+    seen = []
+
+    async def ingest(_redis, _group, _now, _emb, keep_going, run_failures):
+        seen.append(await keep_going())
+        enabled["group_topics_enabled"] = False  # PATCH /admin/settings mid-run
+        seen.append(await keep_going())
+        return IngestResult(blocks_done=1, stopped=not seen[-1])
+
+    p1, p2, p3 = _patched([uuid.uuid4(), uuid.uuid4()], ingest)
+    with p1, p2, p3:
+        await loop_mod.run_group_topics_once(redis, "token")
+    assert seen == [True, False]  # the second group never starts
+
+
+async def test_one_run_failures_record_is_shared_by_every_group():
+    ingest = AsyncMock(return_value=IngestResult())
+    p1, p2, p3 = _patched([uuid.uuid4(), uuid.uuid4()], ingest)
+    with p1, p2, p3:
+        await loop_mod.run_group_topics_once(_redis(), "token")
+    first, second = (c.kwargs["run_failures"] for c in ingest.await_args_list)
+    assert first is second
+
+
 async def test_lost_lease_ends_the_run():
     redis = _redis()
-    ingest = AsyncMock(return_value=IngestResult(lease_lost=True))
+    ingest = AsyncMock(return_value=IngestResult(stopped=True))
     p1, p2, p3 = _patched([uuid.uuid4(), uuid.uuid4()], ingest)
     with p1, p2, p3:
         await loop_mod.run_group_topics_once(redis, "token")

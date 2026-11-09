@@ -4,8 +4,6 @@ Conversation history RAG implementation.
 Provides semantic search over user's conversation history using vector similarity.
 """
 
-from datetime import datetime
-
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -163,7 +161,6 @@ async def search_conversation_history(
     include_context: bool = True,
     similarity_threshold: float = None,
     context_window: int = None,
-    newer_than: datetime | None = None,
     **kwargs,
 ) -> list[dict]:
     """
@@ -179,8 +176,6 @@ async def search_conversation_history(
         include_context: Whether to include surrounding messages (default True)
         similarity_threshold: Minimum similarity score (default from SEMANTIC_SIMILARITY_THRESHOLD env)
         context_window: Number of messages before/after (default from SEMANTIC_CONTEXT_WINDOW env)
-        newer_than: Only messages after this naive-UTC time (e.g. those a group's
-            topics don't cover yet)
         **kwargs: Additional parameters
 
     Returns:
@@ -222,10 +217,6 @@ async def search_conversation_history(
         # Convert to tuple for SQL IN clause
         exclude_clause = "AND id NOT IN :exclude_ids"
         params["exclude_ids"] = tuple(str(id) for id in exclude_message_ids)
-
-    if newer_than is not None:
-        exclude_clause += " AND timestamp > :newer_than"
-        params["newer_than"] = newer_than
 
     # Nearest neighbours by cosine distance (pgvector ``<=>``, lower = more
     # similar), reported as similarity = 1 - distance. The inner query orders

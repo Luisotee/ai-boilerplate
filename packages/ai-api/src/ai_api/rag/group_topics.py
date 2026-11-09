@@ -24,7 +24,7 @@ import asyncio
 import hashlib
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 import httpx
@@ -35,9 +35,10 @@ from pydantic_ai import Agent, AgentRunResultEvent
 from pydantic_ai.exceptions import FallbackExceptionGroup, ModelAPIError, ModelHTTPError
 from pydantic_ai.usage import UsageLimits
 from redis.asyncio import Redis
+from sqlalchemy import exc as sa_exc
 from sqlalchemy import text, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from ..database import (
     ConversationMessage,
@@ -49,7 +50,7 @@ from ..embeddings import EmbeddingService
 from ..logger import logger
 from ..runtime_config import runtime_config
 from .conversation import format_transcript
-from .vector import HNSW_EF_SEARCH, halfvec_distance, prepare_hnsw_search
+from .vector import halfvec_distance, prepare_hnsw_search
 
 # --- Block shape --------------------------------------------------------------
 
@@ -63,7 +64,8 @@ MAX_BLOCK = 200
 OVERLAP = 5
 #: A finished conversation still under MIN_BLOCK goes alone once it is this old.
 STALE_TAIL = timedelta(hours=24)
-#: How far back a group's first run reads.
+#: How far back a run reads: a group's first run, and a group whose cursor is
+#: older (the job was off), so an old backlog is never sent to the model.
 BACKFILL = timedelta(days=7)
 #: Blocks summarised per group per run; a bigger backlog drains over later runs.
 MAX_BLOCKS_PER_RUN = 10
@@ -87,9 +89,8 @@ POISON_TTL_SECONDS = 7 * 24 * 3600
 #: pay the model again.
 SUMMARY_CACHE_KEY = "group_topics:summary:{block_key}"
 SUMMARY_CACHE_TTL_SECONDS = 24 * 3600
-#: HTTP statuses that mean "the provider is unavailable right now" (as
-#: agent/model_chain.py's cooldown rule): rate limits and server errors.
-_UNAVAILABLE_STATUSES = frozenset({429})
+#: Wall-clock bound on embedding one block's topics.
+EMBED_TIMEOUT_SECONDS = 60
 
 _TOPIC_ID_NAMESPACE = uuid.UUID("5b0c1f9e-6f43-4c39-9d3e-3f1c2b7a8d10")
 
@@ -131,39 +132,94 @@ topic_agent = Agent(
 _topics_adapter = TypeAdapter(list[Topic])
 
 
+class EmbeddingTimeoutError(Exception):
+    """Embedding a block's topics took over EMBED_TIMEOUT_SECONDS."""
+
+
 def _unavailable_status(code: int | None) -> bool:
-    return code is not None and (code >= 500 or code in _UNAVAILABLE_STATUSES)
+    """agent/model_chain.py's cooldown rule: 5xx, 429, and the 401/402/403/404 of
+    a bad key, lapsed billing or a mistyped model name, which no block can fix."""
+    # Lazy import: agent/__init__ imports this module (via agent/tools/search.py).
+    from ..agent.model_chain import _COOLDOWN_STATUSES
+
+    return code is not None and (code >= 500 or code in _COOLDOWN_STATUSES)
+
+
+def _status_code(exc: BaseException) -> int | None:
+    if isinstance(exc, ModelHTTPError | openai.APIStatusError):
+        return exc.status_code
+    if isinstance(exc, genai_errors.APIError):
+        return exc.code
+    return None
 
 
 def is_unavailable(exc: BaseException) -> bool:
     """True when ``exc`` means a provider is down or rate-limited right now.
 
     Those end the run without counting against the block: every group shares
-    the providers, so the next run retries. Everything else (a 4xx such as a
-    400 for this block's content, output validation, a run that keeps timing
-    out) is the block's own problem and goes through the poison count.
+    the providers, so the next run retries. Everything else (a 400 for this
+    block's content, output validation, a summary that hits its timeout) is
+    taken as the block's own problem and goes through the poison count, unless
+    the same failure hits a second group in the run (:class:`RunFailures`).
 
-    - ``ModelHTTPError`` (a ``ModelAPIError``): only 429 and 5xx.
+    - ``ModelHTTPError`` (a ``ModelAPIError``): 401/402/403/404/429 and 5xx.
     - Any other ``ModelAPIError``: no HTTP status, so a connection failure, a
       model skipped while its cooldown runs, or GuardedModel's first-chunk timeout.
     - ``FallbackExceptionGroup``: only when every model failed for such a reason.
-    - OpenAI SDK errors with a status: 429 and 5xx; without one (connection,
-      an SSE error event): unavailable. ``httpx.TransportError``: unavailable.
-    - Gemini (embedding) ``APIError``: 429 and 5xx.
+    - OpenAI SDK errors with a status: the same statuses; without one
+      (connection, an SSE error event): unavailable. ``httpx.TransportError``:
+      unavailable.
+    - Gemini (embedding) ``APIError``: the same statuses.
+      :class:`EmbeddingTimeoutError`: unavailable.
+    - A lost or refused database connection (SQLAlchemy ``OperationalError`` /
+      ``InterfaceError``): unavailable.
     """
     if isinstance(exc, FallbackExceptionGroup):
         return bool(exc.exceptions) and all(is_unavailable(e) for e in exc.exceptions)
-    if isinstance(exc, ModelHTTPError):
-        return _unavailable_status(exc.status_code)
-    if isinstance(exc, ModelAPIError):
-        return True
-    if isinstance(exc, openai.APIStatusError):
-        return _unavailable_status(exc.status_code)
-    if isinstance(exc, openai.APIError | httpx.TransportError):
-        return True
-    if isinstance(exc, genai_errors.APIError):
-        return _unavailable_status(exc.code)
-    return False
+    if isinstance(exc, ModelHTTPError | openai.APIStatusError | genai_errors.APIError):
+        return _unavailable_status(_status_code(exc))
+    return isinstance(
+        exc,
+        ModelAPIError
+        | openai.APIError
+        | httpx.TransportError
+        | EmbeddingTimeoutError
+        | sa_exc.OperationalError
+        | sa_exc.InterfaceError,
+    )
+
+
+def failure_kind(exc: BaseException) -> str | None:
+    """What a block failure looks like, when it could just as well be run-wide.
+
+    A 4xx (Gemini answers an invalid API key with a 400) or a summary timeout
+    can be the block's fault or every block's. :class:`RunFailures` tells them
+    apart by whether a second group fails the same way. None: block-specific.
+    """
+    if isinstance(exc, FallbackExceptionGroup):
+        kinds = [failure_kind(e) for e in exc.exceptions]
+        return "|".join(k for k in kinds if k) if kinds and all(kinds) else None
+    if isinstance(exc, TimeoutError):
+        return "timeout"
+    code = _status_code(exc)
+    if code is not None and 400 <= code < 500:
+        return f"{type(exc).__name__}:{code}"
+    return None
+
+
+@dataclass
+class RunFailures:
+    """Block failures of one run, by :func:`failure_kind`.
+
+    The same kind in a second group means an outage, not two bad blocks: the
+    run stops and the first group's failure is taken back, so a revoked key or
+    a provider that stalls every summary never drops blocks. (With a single
+    group the two can't be told apart, and its block is skipped after
+    POISON_LIMIT runs.)
+    """
+
+    #: kind -> (first group that failed that way, its poison key)
+    first: dict[str, tuple[uuid.UUID, str]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -200,8 +256,8 @@ class IngestResult:
     blocks_skipped: int = 0
     #: A provider was down: the caller should stop this run.
     unavailable: bool = False
-    #: The run's lease was lost: the caller should stop this run.
-    lease_lost: bool = False
+    #: The lease was lost or the job was turned off: the caller should stop this run.
+    stopped: bool = False
 
 
 def topic_id(block_key: str, index: int) -> uuid.UUID:
@@ -374,15 +430,28 @@ def _detach(row: ConversationMessage) -> Msg:
 
 
 def load_new_messages(group_id: uuid.UUID, now: datetime) -> tuple[list[Msg], list[Msg]]:
-    """Messages after the group's cursor (oldest first), plus the OVERLAP before them."""
+    """Messages after the group's cursor and within BACKFILL (oldest first), plus
+    the OVERLAP before them. The embedding column is never loaded."""
     with SessionLocal() as db:
         cursor = db.get(GroupTopicCursor, group_id)
         key = tuple_(ConversationMessage.timestamp, ConversationMessage.id)
-        query = db.query(ConversationMessage).filter(ConversationMessage.user_id == group_id)
+        columns = load_only(
+            ConversationMessage.id,
+            ConversationMessage.timestamp,
+            ConversationMessage.role,
+            ConversationMessage.content,
+            ConversationMessage.sender_name,
+        )
+        query = (
+            db.query(ConversationMessage)
+            .options(columns)
+            .filter(
+                ConversationMessage.user_id == group_id,
+                ConversationMessage.timestamp >= now - BACKFILL,
+            )
+        )
         if cursor is not None:
             query = query.filter(key > tuple_(cursor.last_message_at, cursor.last_message_id))
-        else:
-            query = query.filter(ConversationMessage.timestamp >= now - BACKFILL)
         rows = (
             query.order_by(ConversationMessage.timestamp, ConversationMessage.id)
             .limit(FETCH_LIMIT)
@@ -393,6 +462,7 @@ def load_new_messages(group_id: uuid.UUID, now: datetime) -> tuple[list[Msg], li
         first = rows[0]
         prior_rows = (
             db.query(ConversationMessage)
+            .options(columns)
             .filter(
                 ConversationMessage.user_id == group_id,
                 key < tuple_(first.timestamp, first.id),
@@ -474,8 +544,9 @@ def _advance_cursor(db: Session, group_id: uuid.UUID, last: Msg) -> None:
 def groups_with_new_messages(now: datetime) -> list[uuid.UUID]:
     """Group rows with messages after their cursor, least recently ingested first.
 
-    "After" is the same ``(timestamp, id)`` row comparison :func:`load_new_messages`
-    uses, so a message tying the cursor's timestamp is still found.
+    "After" is the same ``(timestamp, id)`` row comparison and BACKFILL window
+    :func:`load_new_messages` uses, so a message tying the cursor's timestamp is
+    still found, and a group whose new messages are all older is not.
     """
     with SessionLocal() as db:
         rows = db.execute(
@@ -487,8 +558,9 @@ def groups_with_new_messages(now: datetime) -> list[uuid.UUID]:
                   AND EXISTS (
                       SELECT 1 FROM conversation_messages m
                       WHERE m.user_id = u.id
+                        AND m.timestamp >= :backfill_start
                         AND (
-                            (c.user_id IS NULL AND m.timestamp >= :backfill_start)
+                            c.user_id IS NULL
                             OR (m.timestamp, m.id) > (c.last_message_at, c.last_message_id)
                         )
                   )
@@ -507,33 +579,34 @@ async def ingest_group(
     group_id: uuid.UUID,
     now: datetime,
     embedding_service: EmbeddingService,
-    keep_lease: Callable[[], Awaitable[bool]] | None = None,
+    keep_going: Callable[[], Awaitable[bool]] | None = None,
+    run_failures: RunFailures | None = None,
 ) -> IngestResult:
     """Summarise and store the group's finished blocks, oldest first.
 
-    ``keep_lease`` is awaited before each block; when it returns False (the
-    run's lease is lost) the group stops, so two workers never summarise the
-    same block at once.
+    ``keep_going`` is awaited before each block; when it returns False (the
+    run's lease is lost, or the job was turned off) the group stops, so two
+    workers never summarise the same block at once. ``run_failures`` is shared
+    by every group of one run (see :class:`RunFailures`).
     """
     result = IngestResult()
     messages, prior = await asyncio.to_thread(load_new_messages, group_id, now)
     blocks = split_into_blocks(messages, now, prior)[:MAX_BLOCKS_PER_RUN]
 
     for block in blocks:
-        if keep_lease is not None and not await keep_lease():
-            result.lease_lost = True
+        if keep_going is not None and not await keep_going():
+            result.stopped = True
             return result
         try:
             topics = await summarise_block_cached(redis, block)
-            embeddings = (
-                await embedding_service.embed_documents([topic_embedding_text(t) for t in topics])
-                if topics
-                else []
-            )
+            embeddings = await _embed(embedding_service, topics)
+            stored = await asyncio.to_thread(store_block, group_id, block, topics, embeddings)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            if is_unavailable(exc):
+            if is_unavailable(exc) or await _seen_in_another_group(
+                redis, run_failures, group_id, exc
+            ):
                 logger.warning(
                     f"Group topics: provider unavailable for group {group_id}, "
                     f"stopping this run: {type(exc).__name__}: {exc}"
@@ -548,9 +621,12 @@ async def ingest_group(
                     await _forget_summary(redis, block)
                     result.blocks_skipped += 1
                     continue
+            elif run_failures is not None and (kind := failure_kind(exc)) is not None:
+                key = POISON_KEY.format(group_id=group_id, block_key=block.key)
+                run_failures.first.setdefault(kind, (group_id, key))
             return result  # keep order: later blocks wait for this one
 
-        if not await asyncio.to_thread(store_block, group_id, block, topics, embeddings):
+        if not stored:
             logger.info(f"Group topics: group {group_id} was cleaned meanwhile, stopping")
             return result
         await _forget_summary(redis, block)
@@ -558,6 +634,36 @@ async def ingest_group(
         result.topics_stored += len(topics)
 
     return result
+
+
+async def _embed(embedding_service: EmbeddingService, topics: Sequence[Topic]) -> list[list[float]]:
+    if not topics:
+        return []
+    try:
+        async with asyncio.timeout(EMBED_TIMEOUT_SECONDS):
+            return await embedding_service.embed_documents(
+                [topic_embedding_text(t) for t in topics]
+            )
+    except TimeoutError as exc:
+        raise EmbeddingTimeoutError from exc
+
+
+async def _seen_in_another_group(
+    redis: Redis, run_failures: RunFailures | None, group_id: uuid.UUID, exc: Exception
+) -> bool:
+    """True when another group failed the same way this run (an outage, see
+    :class:`RunFailures`); that group's failure is then taken back."""
+    kind = failure_kind(exc)
+    if run_failures is None or kind is None:
+        return False
+    first = run_failures.first.get(kind)
+    if first is None or first[0] == group_id:
+        return False
+    try:
+        await redis.decr(first[1])
+    except Exception:
+        logger.warning("Group topics: could not take back a block failure", exc_info=True)
+    return True
 
 
 async def _forget_summary(redis: Redis, block: Block) -> None:
@@ -596,12 +702,6 @@ async def _count_failure(redis: Redis, group_id: uuid.UUID, block: Block, exc: E
 
 
 # --- Search -------------------------------------------------------------------
-
-
-def topics_cover_until(db: Session, user_id: str) -> datetime | None:
-    """Timestamp of the last message the group's topics cover (None: no cursor)."""
-    cursor = db.get(GroupTopicCursor, user_id)
-    return cursor.last_message_at if cursor is not None else None
 
 
 @dataclass(frozen=True)
@@ -648,7 +748,7 @@ def search_group_topics(
         WHERE similarity >= :threshold
         ORDER BY similarity DESC
     """)
-    prepare_hnsw_search(db, ef_search=max(HNSW_EF_SEARCH, limit))
+    prepare_hnsw_search(db, ef_search=limit)
     rows = db.execute(
         query_sql,
         {
