@@ -1,5 +1,6 @@
 import './instrument.js';
 import { Sentry } from './instrument.js';
+import { installLibsignalConsoleFilter } from './utils/console-filter.js';
 import { config } from './config.js';
 import { hasValidApiKey } from './utils/api-key.js';
 import { logger } from './logger.js';
@@ -22,6 +23,10 @@ import { registerMessagingRoutes } from './routes/messaging.js';
 import { registerMediaRoutes } from './routes/media.js';
 import { registerOperationsRoutes } from './routes/operations.js';
 import { registerGroupsRoutes } from './routes/groups.js';
+
+// libsignal dumps Signal session keys through console.info/warn; drop them before
+// any socket exists. Imports are hoisted, but libsignal only logs at runtime.
+installLibsignalConsoleFilter();
 
 /**
  * Transform function that handles both Zod and plain JSON Schema.
