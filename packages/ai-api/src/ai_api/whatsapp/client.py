@@ -7,6 +7,7 @@ Uses httpx.AsyncClient passed via constructor for connection pooling.
 
 import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 import httpx
 
@@ -32,6 +33,15 @@ class SuccessResponse:
     """Response from operations that only return success status."""
 
     success: bool
+
+
+@dataclass
+class ReachoutTimelock:
+    """WhatsApp's restriction on messaging new contacts (Baileys only)."""
+
+    active: bool
+    #: When the restriction ends, naive UTC; None when WhatsApp didn't say.
+    ends_at: datetime | None = None
 
 
 @dataclass
@@ -114,6 +124,21 @@ class WhatsAppClient:
             success=data.get("success", False),
             message_id=data.get("message_id"),
         )
+
+    async def get_reachout_timelock(self) -> ReachoutTimelock:
+        """WhatsApp's reach-out timelock for this account (Baileys client only)."""
+        response = await self._client.get(
+            f"{self._base_url}/whatsapp/reachout-timelock",
+            headers=self._get_headers(),
+        )
+        data = await self._handle_response(response)
+        ends_at = None
+        if data.get("ends_at"):
+            parsed = datetime.fromisoformat(data["ends_at"])
+            if parsed.tzinfo is not None:
+                parsed = parsed.astimezone(UTC).replace(tzinfo=None)
+            ends_at = parsed
+        return ReachoutTimelock(active=bool(data.get("active")), ends_at=ends_at)
 
     async def send_typing(self, phone_number: str, state: str = "composing") -> SuccessResponse:
         """

@@ -1,11 +1,13 @@
 """Tests for the WhatsApp HTTP client wrapper."""
 
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
 
 from ai_api.whatsapp.client import (
+    ReachoutTimelock,
     SendMessageResponse,
     SuccessResponse,
     WhatsAppClient,
@@ -563,3 +565,38 @@ class TestGetClientStatus:
         args, kwargs = mock_http_client.get.call_args
         assert args[0] == "http://localhost:3001/whatsapp/status"
         assert kwargs["headers"] == {"X-API-Key": "test-api-key-123"}
+
+
+# ---------------------------------------------------------------------------
+# get_reachout_timelock
+# ---------------------------------------------------------------------------
+
+
+def _json_response(status: int, body: dict) -> MagicMock:
+    response = MagicMock()
+    response.status_code = status
+    response.json.return_value = body
+    return response
+
+
+class TestGetReachoutTimelock:
+    async def test_active_with_end_time_as_naive_utc(self, whatsapp_client, mock_http_client):
+        mock_http_client.get.return_value = _json_response(
+            200,
+            {"active": True, "ends_at": "2026-11-10T03:00:00.000Z", "enforcement_type": "X"},
+        )
+        lock = await whatsapp_client.get_reachout_timelock()
+        assert lock == ReachoutTimelock(active=True, ends_at=datetime(2026, 11, 10, 3, 0))
+        url = mock_http_client.get.call_args.args[0]
+        assert url == "http://localhost:3001/whatsapp/reachout-timelock"
+
+    async def test_inactive(self, whatsapp_client, mock_http_client):
+        mock_http_client.get.return_value = _json_response(
+            200, {"active": False, "ends_at": None, "enforcement_type": None}
+        )
+        assert await whatsapp_client.get_reachout_timelock() == ReachoutTimelock(active=False)
+
+    async def test_not_connected_raises(self, whatsapp_client, mock_http_client):
+        mock_http_client.get.return_value = _json_response(503, {"error": "x"})
+        with pytest.raises(WhatsAppNotConnectedError):
+            await whatsapp_client.get_reachout_timelock()
