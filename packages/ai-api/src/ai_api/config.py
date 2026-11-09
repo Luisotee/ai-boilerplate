@@ -98,8 +98,10 @@ class Settings(BaseSettings):
     # The injected history starts at a fixed message and moves forward in
     # steps of this many messages (database.stepped_window_start), so its
     # prefix repeats across runs and the provider's prompt cache can serve it.
-    # 1 (or 0) = the old sliding window of exactly the limit.
-    history_window_step: int = 10
+    # 1 (or 0) = the plain sliding window of exactly the limit. Off by default:
+    # on Gemini (implicit cache) a 10-step window measured no cache gain and
+    # ~6% more input tokens; it targets DeepSeek's prefix cache.
+    history_window_step: int = 1
     # How the bot's own lines are labelled in transcripts the agent reads back
     # (get_chat_history). Overridable at runtime via /admin.
     bot_name: str = "Assistant"
