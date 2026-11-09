@@ -510,15 +510,33 @@ def get_conversation_history(db, whatsapp_jid: str, conversation_type: str, limi
 
         logger.info(f"Using history limit {limit} for {user.conversation_type} conversation")
 
-    messages = (
-        db.query(ConversationMessage)
-        .filter(ConversationMessage.user_id == user.id)
-        .order_by(ConversationMessage.timestamp.desc())
-        .limit(limit)
+    query = db.query(ConversationMessage).filter(ConversationMessage.user_id == user.id)
+
+    # Stepped window (see stepped_window_start): oldest first, from a start that
+    # only moves every `history_window_step` messages, so the history prefix is
+    # identical across runs and the provider's prompt cache can serve it.
+    start = stepped_window_start(query.count(), limit, settings.history_window_step)
+    return (
+        query.order_by(ConversationMessage.timestamp.asc(), ConversationMessage.id.asc())
+        .offset(start)
         .all()
     )
 
-    return list(reversed(messages))
+
+def stepped_window_start(total: int, limit: int, step: int) -> int:
+    """Index of the first history message to send, out of ``total``.
+
+    A plain last-``limit`` window starts one message later on every turn, so
+    the history the model sees never repeats and the provider's prompt cache
+    can only reuse the instructions. Here the start moves in jumps of ``step``:
+    the window holds ``limit`` to ``limit + step - 1`` messages and keeps the
+    same first message for ``step`` new messages (about step/2 private turns).
+    Never fewer messages than ``limit``. ``step`` <= 1 is the plain window.
+    """
+    if total <= limit:
+        return 0
+    step = max(step, 1)
+    return ((total - limit) // step) * step
 
 
 # Hard cap on get_conversation_messages, whatever the caller asks for: the result
