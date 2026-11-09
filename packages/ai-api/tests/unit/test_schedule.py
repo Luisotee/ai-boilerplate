@@ -167,6 +167,22 @@ class TestRecurring:
         first = slots[0]
         assert next_fire(tz=ny, after=first, cron_expr=s.cron_expr, previous=first) == slots[1]
 
+    @pytest.mark.parametrize(
+        "cron,expected_utc",
+        [
+            # Hourly: 01:00 EST is a real hour after 01:00 EDT, so it fires.
+            ("0 * * * *", ["04:00", "05:00", "06:00", "07:00", "08:00"]),
+            # Every 15 min keeps firing through the repeated hour.
+            ("*/15 * * * *", ["04:45", "05:00", "05:15", "05:30", "05:45", "06:00", "06:15"]),
+        ],
+    )
+    def test_dst_fall_back_keeps_sub_daily_slots(self, cron, expected_utc):
+        ny = ZoneInfo("America/New_York")
+        start = datetime(2026, 11, 1, 4, 30) if "*/15" in cron else datetime(2026, 11, 1, 3, 30)
+        s = parse_schedule(cron, ny, start)
+        slots = upcoming(s, ny, start, timedelta(hours=5))
+        assert [x.strftime("%H:%M") for x in slots[: len(expected_utc)]] == expected_utc
+
     def test_cron_follows_dst(self):
         before = datetime(2026, 3, 28, 12, 0)
         nxt = next_fire(tz=BERLIN, after=before, cron_expr="0 9 * * *")

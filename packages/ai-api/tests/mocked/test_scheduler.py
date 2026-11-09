@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from redis.exceptions import ResponseError
 from sqlalchemy.exc import IntegrityError
 
 from ai_api.database import ScheduledTask, TaskRun
@@ -187,11 +188,20 @@ class TestSweep:
         self._sweep(task, run, 2)
         assert (run.status, run.error_code) == ("failed", "abandoned")
 
+    def test_stale_dispatched_run_expires_as_a_skip(self):
+        task = _task(kind="agent", interval_seconds=6 * 3600, consecutive_failures=2)
+        run = TaskRun(id=uuid.uuid4(), task_id=task.id, status="dispatched")
+        self._sweep(task, run, 0)
+        assert (run.status, run.error_code) == ("skipped", "expired")
+        assert task.status == "active" and task.consecutive_failures == 2
+
     def test_stale_ready_run_expires(self):
         task = _task(interval_seconds=3600)
         run = TaskRun(id=uuid.uuid4(), task_id=task.id, status="ready")
         self._sweep(task, run, 1)
-        assert (run.status, run.error_code) == ("failed", "expired")
+        # The bot's own backlog: a skip, which never counts toward auto-disable.
+        assert (run.status, run.error_code) == ("skipped", "expired")
+        assert task.consecutive_failures == 0 and task.status == "active"
 
 
 def _redis():
@@ -226,7 +236,22 @@ class TestTick:
         }
         pipe.execute.assert_awaited_once()
 
-    async def test_failed_enqueue_is_recorded_at_once(self):
+    async def test_only_the_xadds_redis_refused_are_failed(self):
+        fired = [scheduler.Fired(uuid.uuid4(), uuid.uuid4()) for _ in range(3)]
+        redis, pipe = _redis()
+        pipe.execute.return_value = [b"1-0", ResponseError("OOM"), b"1-1"]
+        with (
+            patch.object(scheduler, "sweep_orphans"),
+            patch.object(scheduler, "claim_due", return_value=(fired, 3)),
+            patch.object(scheduler, "fail_dispatched") as fail,
+            patch.object(scheduler.runtime_config, "get", return_value=True),
+        ):
+            assert await scheduler.tick(redis) == 2
+        pipe.execute.assert_awaited_once_with(raise_on_error=False)
+        fail.assert_called_once_with([fired[1].run_id], "enqueue_failed")
+
+    async def test_lost_connection_leaves_the_runs_to_the_sweep(self):
+        # Some entries may already be in Redis: failing them would lose them.
         fired = [scheduler.Fired(uuid.uuid4(), uuid.uuid4())]
         redis, pipe = _redis()
         pipe.execute.side_effect = ConnectionError
@@ -237,7 +262,7 @@ class TestTick:
             patch.object(scheduler.runtime_config, "get", return_value=True),
         ):
             assert await scheduler.tick(redis) == 0
-        fail.assert_called_once_with([fired[0].run_id], "enqueue_failed")
+        fail.assert_not_called()
 
     async def test_a_full_batch_claims_again_at_once(self):
         batches = iter([([], scheduler.BATCH_SIZE), ([], scheduler.BATCH_SIZE), ([], 3)])

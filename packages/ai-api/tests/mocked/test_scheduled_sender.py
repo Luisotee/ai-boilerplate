@@ -1,5 +1,6 @@
 """streams/scheduled_sender.py: send-time checks, delivery outcomes and the lanes."""
 
+import asyncio
 import uuid
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -35,14 +36,24 @@ def _task(**kw) -> ScheduledTask:
 
 
 def _settings(**overrides):
-    values = {"whitelist_phones": "", "scheduled_tasks_max_runs_per_day": 24}
+    values = {
+        "whitelist_phones": "",
+        "scheduled_tasks_max_runs_per_day": 24,
+        "scheduled_tasks_enabled": True,
+    }
     values.update(overrides)
     return patch.object(runner.runtime_config, "get", side_effect=lambda k: values[k])
 
 
 class TestPrepare:
     def _go(self, task, user, run_status="sending", message="⏰ drink water", **settings):
-        run = TaskRun(id=uuid.uuid4(), task_id=task.id, status=run_status, message=message)
+        run = TaskRun(
+            id=uuid.uuid4(),
+            task_id=task.id,
+            status=run_status,
+            message=message,
+            created_at=NOW,
+        )
         db = MagicMock()
         db.get.side_effect = lambda model, _id: {TaskRun: run, ScheduledTask: task, User: user}[
             model
@@ -50,6 +61,7 @@ class TestPrepare:
         db.query.return_value.filter.return_value.scalar.return_value = settings.pop(
             "sent_today", 0
         )
+        db.query.return_value.filter.return_value.filter.return_value.scalar.return_value = 0
         with (
             _settings(**settings),
             patch.object(sender, "SessionLocal", return_value=db),
@@ -183,21 +195,44 @@ class TestLanes:
 
     async def test_fast_lane_sends_concurrently(self):
         ids = [uuid.uuid4() for _ in range(3)]
+        inflight = set()
         with (
             patch.object(sender, "claim_ready", return_value=ids) as claim,
             patch.object(sender, "send_run", new_callable=AsyncMock) as send,
         ):
-            assert await sender.fast_lane_step()
+            assert await sender.fast_lane_step(inflight)
+            assert len(inflight) == 3
+            await asyncio.gather(*inflight)
         claim.assert_called_once_with(("telegram", "cloud"), sender.FAST_CONCURRENCY)
-        assert [c.args[0] for c in send.await_args_list] == ids
+        assert sorted(c.args[0] for c in send.await_args_list) == sorted(ids)
+
+    async def test_fast_lane_claims_only_for_free_slots(self):
+        # One slow send doesn't hold the lane: the other slots keep claiming.
+        loop = asyncio.get_running_loop()
+        slow = {loop.create_future()}
+        with patch.object(sender, "claim_ready", return_value=[]) as claim:
+            await sender.fast_lane_step(slow)
+        claim.assert_called_once_with(("telegram", "cloud"), sender.FAST_CONCURRENCY - 1)
+        full = {loop.create_future() for _ in range(sender.FAST_CONCURRENCY)}
+        with patch.object(sender, "claim_ready") as claim:
+            assert not await sender.fast_lane_step(full)
+        claim.assert_not_called()
+
+
+def _claim_db(runs):
+    db = MagicMock()
+    chain = db.query.return_value.join.return_value.filter.return_value.order_by.return_value
+    chain.limit.return_value.with_for_update.return_value.all.return_value = runs
+    return db, chain
 
 
 @pytest.mark.parametrize("platforms", [("baileys",), ("telegram", "cloud")])
 def test_claim_ready_moves_runs_to_sending(platforms):
-    runs = [TaskRun(id=uuid.uuid4(), status="ready"), TaskRun(id=uuid.uuid4(), status="ready")]
-    db = MagicMock()
-    chain = db.query.return_value.join.return_value.filter.return_value.order_by.return_value
-    chain.limit.return_value.with_for_update.return_value.all.return_value = runs
+    runs = [
+        TaskRun(id=uuid.uuid4(), user_id=uuid.uuid4(), status="ready"),
+        TaskRun(id=uuid.uuid4(), user_id=uuid.uuid4(), status="ready"),
+    ]
+    db, chain = _claim_db(runs)
     with (
         patch.object(sender, "SessionLocal", return_value=db),
         patch.object(sender, "utcnow", return_value=NOW),
@@ -205,5 +240,24 @@ def test_claim_ready_moves_runs_to_sending(platforms):
         ids = sender.claim_ready(platforms, 5)
     assert ids == [r.id for r in runs]
     assert all(r.status == "sending" and r.started_at == NOW for r in runs)
+    chain.limit.assert_called_once_with(5 * sender.CLAIM_SCAN_FACTOR)
     chain.limit.return_value.with_for_update.assert_called_once_with(skip_locked=True, of=TaskRun)
+    # Chats with a run already 'sending' are excluded in SQL (NOT EXISTS).
+    assert "NOT (EXISTS" in str(db.query.return_value.join.return_value.filter.call_args.args[2])
     db.commit.assert_called_once()
+
+
+def test_claim_ready_takes_one_run_per_chat():
+    chat_a, chat_b = uuid.uuid4(), uuid.uuid4()
+    a1, a2, b1 = (
+        TaskRun(id=uuid.uuid4(), user_id=chat_a, status="ready"),
+        TaskRun(id=uuid.uuid4(), user_id=chat_a, status="ready"),
+        TaskRun(id=uuid.uuid4(), user_id=chat_b, status="ready"),
+    )
+    db, _ = _claim_db([a1, a2, b1])
+    with (
+        patch.object(sender, "SessionLocal", return_value=db),
+        patch.object(sender, "utcnow", return_value=NOW),
+    ):
+        assert sender.claim_ready(("telegram", "cloud"), 10) == [a1.id, b1.id]
+    assert a2.status == "ready"  # waits for a later claim, after a1 is settled

@@ -21,6 +21,7 @@ SETTINGS = {
     "scheduled_tasks_max_per_chat": 10,
     "scheduled_tasks_min_interval_minutes": 60,
     "scheduled_tasks_enabled": True,
+    "whitelist_phones": "",
 }
 
 
@@ -124,6 +125,22 @@ class TestCreateTask:
     def test_creator_is_recorded(self):
         task = _create(created_by_jid="5511888@s.whatsapp.net", created_by_name="Ana")
         assert (task.created_by_jid, task.created_by_name) == ("5511888@s.whatsapp.net", "Ana")
+
+    def test_gated_group_refuses_a_creator_it_cannot_verify(self, settings_values):
+        # Membership gating: e.g. a creator whitelisted only by a raw @lid entry,
+        # which the AI API never sees. Refused now, not skipped silently later.
+        settings_values["whitelist_phones"] = "123456789@lid"
+        with (
+            patch.object(svc.settings, "group_gating", "membership"),
+            pytest.raises(svc.TaskError, match="whitelist"),
+        ):
+            _create(address=GROUP, created_by_jid="5511888@s.whatsapp.net")
+
+    def test_gated_group_accepts_a_whitelisted_creator(self, settings_values):
+        settings_values["whitelist_phones"] = "5511888"
+        with patch.object(svc.settings, "group_gating", "membership"):
+            task = _create(address=GROUP, created_by_jid="5511888@s.whatsapp.net")
+        assert task.created_by_jid == "5511888@s.whatsapp.net"
 
     def test_text_limits(self):
         with pytest.raises(svc.TaskError):

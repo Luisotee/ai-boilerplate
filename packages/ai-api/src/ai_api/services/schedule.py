@@ -312,16 +312,24 @@ def next_fire(
 
     An interval is anchored at ``previous`` (the last slot) so it doesn't drift;
     without one it starts ``interval_seconds`` after ``after``. A cron that
-    never fires again (``0 9 30 2 *``) gives None. On a DST fall-back day a
-    cron slot inside the repeated hour fires once: the second pass (same wall
-    time as ``previous``) is skipped.
+    never fires again (``0 9 30 2 *``) gives None. On a DST fall-back day the
+    second pass of a wall time (same wall time as ``previous``) is skipped when
+    it comes sooner than the cron's normal gap, so a daily 01:30 fires once
+    while an hourly cron keeps firing every real hour.
     """
     if cron_expr:
         it = croniter(cron_expr, to_local(after, tz))
         try:
             nxt = it.get_next(datetime)
             if previous is not None and _wall(nxt) == _wall(to_local(previous, tz)):
-                nxt = it.get_next(datetime)
+                # The repeated hour of a DST fall-back: the same wall time again.
+                # Skip it only for a cron whose slots are normally further apart
+                # than that (a daily 01:30); an hourly cron's 01:00 EST is a real
+                # hour after 01:00 EDT and fires.
+                following = croniter(cron_expr, nxt).get_next(datetime)
+                elapsed = to_utc_naive(nxt) - previous
+                if elapsed < to_utc_naive(following) - to_utc_naive(nxt):
+                    nxt = it.get_next(datetime)
         except CroniterBadDateError:
             return None
         return to_utc_naive(nxt)

@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 import httpx
-from sqlalchemy import func
+from sqlalchemy import and_, func, or_
 
 from ..config import settings
 from ..database import (
@@ -48,8 +48,8 @@ from ..logger import logger
 from ..runtime_config import runtime_config
 from ..services.broadcast import in_cloud_window
 from ..services.schedule import format_local
-from ..services.scheduled_tasks import utcnow, zone
-from ..whitelist import chat_in_scope, is_whitelisted, parse_whitelist
+from ..services.scheduled_tasks import group_creator_allowed, utcnow, zone
+from ..whitelist import chat_in_scope, parse_whitelist
 
 #: Consecutive failed runs after which a task is disabled (shown in /admin).
 MAX_CONSECUTIVE_FAILURES = 3
@@ -73,6 +73,8 @@ SKIP_USER_DELETED = "user_deleted"
 SKIP_NOT_WHITELISTED = "not_whitelisted"
 SKIP_CLOUD_WINDOW = "cloud_window"
 SKIP_DAILY_LIMIT = "daily_limit"
+#: SCHEDULED_TASKS_ENABLED was turned off after the run fired (the kill switch).
+SKIP_DISABLED = "disabled"
 MODEL_ERROR = "model_error"
 RUN_ERROR = "run_error"
 
@@ -108,13 +110,19 @@ def run_allowed(user: User, task: ScheduledTask) -> bool:
         wl, task.address, user.phone, is_group=is_group, group_gating=settings.group_gating
     ):
         return False
-    if is_group and settings.group_gating == "membership":
-        return bool(task.created_by_jid) and is_whitelisted(wl, task.created_by_jid)
-    return True
+    return group_creator_allowed(task.address, task.created_by_jid)
 
 
-def _sent_today(db, user_id, now: datetime) -> int:
-    return (
+def _counted_today(db, user_id, now: datetime, run: TaskRun | None) -> int:
+    """Scheduled messages this chat got in 24h, plus the ones already on their way.
+
+    ``sent`` in the last 24h, plus ``sending`` runs and the ``ready`` runs
+    queued ahead of ``run`` (older; the lanes send oldest first). So the cap
+    holds when several runs of one chat are due together, and the agent phase
+    (``run`` is ``running``, so every ``ready`` one is ahead of it) skips
+    before paying for an LLM call the sender would drop.
+    """
+    sent = (
         db.query(func.count(TaskRun.id))
         .filter(
             TaskRun.user_id == user_id,
@@ -124,10 +132,23 @@ def _sent_today(db, user_id, now: datetime) -> int:
         .scalar()
         or 0
     )
+    if run is not None and run.status == SENDING and run.created_at is not None:
+        ready_ahead = and_(TaskRun.status == READY, TaskRun.created_at < run.created_at)
+    else:
+        ready_ahead = TaskRun.status == READY
+    ahead = or_(TaskRun.status == SENDING, ready_ahead)
+    query = db.query(func.count(TaskRun.id)).filter(TaskRun.user_id == user_id, ahead)
+    if run is not None:
+        query = query.filter(TaskRun.id != run.id)
+    return sent + (query.scalar() or 0)
 
 
-def skip_reason(db, task: ScheduledTask, user: User | None, now: datetime) -> str | None:
-    """Why this run can't go now (a skip code), or None. Checked before the LLM and before a send."""
+def skip_reason(
+    db, task: ScheduledTask, user: User | None, now: datetime, run: TaskRun | None = None
+) -> str | None:
+    """Why ``run`` can't go now (a skip code), or None. Checked before the LLM and before a send."""
+    if not runtime_config.get("scheduled_tasks_enabled"):
+        return SKIP_DISABLED
     if task.status != "active":
         return SKIP_CANCELLED
     if user is None:
@@ -138,7 +159,9 @@ def skip_reason(db, task: ScheduledTask, user: User | None, now: datetime) -> st
         user.cloud_last_inbound_at, now
     ):
         return SKIP_CLOUD_WINDOW
-    if _sent_today(db, task.user_id, now) >= runtime_config.get("scheduled_tasks_max_runs_per_day"):
+    if _counted_today(db, task.user_id, now, run) >= runtime_config.get(
+        "scheduled_tasks_max_runs_per_day"
+    ):
         return SKIP_DAILY_LIMIT
     return None
 
@@ -284,7 +307,7 @@ def _prepare(run_id: uuid.UUID, now: datetime) -> _Job | None:
         if run is None or task is None:
             return None
         user = db.get(User, task.user_id)
-        reason = skip_reason(db, task, user, now)
+        reason = skip_reason(db, task, user, now, run)
         if reason is not None:
             if run.status == RUNNING:
                 settle(db, run, task, SKIPPED, reason, now)

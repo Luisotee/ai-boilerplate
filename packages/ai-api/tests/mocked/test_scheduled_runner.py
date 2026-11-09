@@ -35,6 +35,7 @@ def _settings(**overrides):
     values = {
         "whitelist_phones": "",
         "scheduled_tasks_max_runs_per_day": 24,
+        "scheduled_tasks_enabled": True,
     }
     values.update(overrides)
     return patch.object(runner.runtime_config, "get", side_effect=lambda k: values[k])
@@ -133,6 +134,10 @@ class TestRunAllowed:
         task = _task(address="120363@g.us", created_by_jid=None)
         assert not self._allowed(task, gating="membership", whitelist_phones="4915755945319")
 
+    def test_group_creator_left_the_whitelist(self):
+        task = _task(address="120363@g.us", created_by_jid="5511888@s.whatsapp.net")
+        assert not self._allowed(task, gating="membership", whitelist_phones="4915755945319")
+
     def test_telegram_group_creator(self):
         task = _task(address="tg:-1001", created_by_jid="tg:42")
         assert self._allowed(task, gating="membership", whitelist_phones="tg:42")
@@ -142,6 +147,7 @@ def _prepare_db(run, task, user, sent_today=0):
     db = MagicMock()
     db.get.side_effect = lambda model, _id: {TaskRun: run, ScheduledTask: task, User: user}[model]
     db.query.return_value.filter.return_value.scalar.return_value = sent_today
+    db.query.return_value.filter.return_value.filter.return_value.scalar.return_value = 0
     return db
 
 
@@ -211,6 +217,63 @@ class TestPrepare:
         )
         assert job is None
         assert run.error_code == "daily_limit"
+
+
+class TestKillSwitchAndCap:
+    def test_turning_scheduling_off_stops_runs_already_fired(self):
+        task = _task()
+        db = _prepare_db(None, task, None)
+        with _settings(scheduled_tasks_enabled=False):
+            assert runner.skip_reason(db, task, User(), NOW) == "disabled"
+
+    def test_disabled_skip_never_calls_the_model_or_counts(self):
+        task = _task(kind="agent", consecutive_failures=2)
+        run = TaskRun(id=uuid.uuid4(), task_id=task.id, status="running")
+        db = _prepare_db(run, task, User(whatsapp_jid=task.address))
+        with (
+            _settings(scheduled_tasks_enabled=False),
+            patch.object(runner, "SessionLocal", return_value=db),
+        ):
+            assert runner._prepare(run.id, NOW) is None
+        assert (run.status, run.error_code) == ("skipped", "disabled")
+        assert task.status == "active" and task.consecutive_failures == 2
+
+    def test_agent_phase_counts_runs_already_on_their_way(self):
+        # Cap 1, nothing sent yet, but one reminder is 'ready': no LLM call.
+        task = _task(kind="agent")
+        run = TaskRun(id=uuid.uuid4(), task_id=task.id, status="running")
+        db = _prepare_db(run, task, User(whatsapp_jid=task.address))
+        db.query.return_value.filter.return_value.filter.return_value.scalar.return_value = 1
+        with (
+            _settings(scheduled_tasks_max_runs_per_day=1),
+            patch.object(runner, "SessionLocal", return_value=db),
+        ):
+            assert runner._prepare(run.id, NOW) is None
+        assert run.error_code == "daily_limit"
+
+    def test_in_flight_filter_shape(self):
+        """Agent phase: every ready/sending run counts; send phase: only older ready ones."""
+        task = _task()
+        captured = []
+
+        def fake_query(*_a):
+            q = MagicMock()
+            q.filter.side_effect = lambda *c: captured.append(c) or q
+            q.scalar.return_value = 0
+            return q
+
+        db = MagicMock()
+        db.query.side_effect = fake_query
+        running = TaskRun(id=uuid.uuid4(), status="running", created_at=NOW)
+        runner._counted_today(db, task.user_id, NOW, running)
+        agent_sql = str(captured[1][1])
+        captured.clear()
+        sending = TaskRun(id=uuid.uuid4(), status="sending", created_at=NOW)
+        runner._counted_today(db, task.user_id, NOW, sending)
+        send_sql = str(captured[1][1])
+        assert "created_at <" not in agent_sql
+        assert "created_at <" in send_sql
+        assert "task_runs.id !=" in str(captured[2][0])
 
 
 class TestText:

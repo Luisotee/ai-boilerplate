@@ -10,7 +10,12 @@ text on the run as ``ready``, and this module sends it:
   tasks due at 09:00 don't go out in one burst from the one WhatsApp account.
   Pacing is per worker process and independent of the broadcast lane's (the
   two don't share one spacing).
-- **Fast lane** (Telegram, Cloud API): up to ``FAST_CONCURRENCY`` at once.
+- **Fast lane** (Telegram, Cloud API): up to ``FAST_CONCURRENCY`` at once,
+  claimed continuously as slots free up, so one slow send doesn't hold the rest.
+
+A claim takes at most one run per chat, and none for a chat with a run still
+``sending``: one chat's messages go out one at a time and in order, and the
+daily cap (``scheduled_runner._counted_today``) sees every message before it.
 
 Each lane claims runs ``ready → sending`` (``FOR UPDATE OF task_runs SKIP
 LOCKED``, committed, ``started_at`` = now, which starts the orphan clock),
@@ -29,7 +34,8 @@ import uuid
 from dataclasses import dataclass
 
 import httpx
-from sqlalchemy import func
+from sqlalchemy import exists, func
+from sqlalchemy.orm import aliased
 
 from ..config import get_whatsapp_api_key, get_whatsapp_client_url, settings
 from ..database import ScheduledTask, SessionLocal, TaskRun, User
@@ -59,6 +65,9 @@ from .scheduled_runner import (
 #: Gap between two scheduled Baileys sends from this process.
 BAILEYS_GAP_SECONDS = (3.0, 8.0)
 FAST_CONCURRENCY = 10
+#: A claim reads this many times its limit, so a chat with many ready runs
+#: doesn't crowd the other chats out of one claim.
+CLAIM_SCAN_FACTOR = 5
 #: How long an idle lane waits before looking for ready runs again.
 IDLE_SECONDS = 2.0
 #: Attempts at recording a message that WAS sent.
@@ -81,22 +90,36 @@ class _Send:
 
 
 def claim_ready(platforms: tuple[str, ...], limit: int) -> list[uuid.UUID]:
-    """Oldest ``ready`` runs of these platforms → ``sending`` (committed)."""
+    """Oldest ``ready`` runs of these platforms → ``sending`` (committed).
+
+    At most one per chat, and none for a chat that already has a run
+    ``sending``, so one chat never gets two scheduled messages at once.
+    """
     now = utcnow()
+    busy = aliased(TaskRun)
     db = SessionLocal()
     try:
-        runs = (
+        candidates = (
             db.query(TaskRun)
             .join(ScheduledTask, ScheduledTask.id == TaskRun.task_id)
             .filter(
                 TaskRun.status == READY,
                 func.coalesce(ScheduledTask.client_id, "baileys").in_(platforms),
+                ~exists().where(busy.user_id == TaskRun.user_id, busy.status == SENDING),
             )
             .order_by(TaskRun.created_at)
-            .limit(limit)
+            .limit(limit * CLAIM_SCAN_FACTOR)
             .with_for_update(skip_locked=True, of=TaskRun)
             .all()
         )
+        runs, chats = [], set()
+        for run in candidates:
+            if run.user_id in chats:
+                continue  # this chat's next run waits for a later claim
+            chats.add(run.user_id)
+            runs.append(run)
+            if len(runs) == limit:
+                break
         for run in runs:
             run.status = SENDING
             run.started_at = now
@@ -121,7 +144,7 @@ def _prepare(run_id: uuid.UUID) -> _Send | None:
         if task is None:
             return None
         user = db.get(User, task.user_id)
-        reason = skip_reason(db, task, user, now)
+        reason = skip_reason(db, task, user, now, run)
         if reason is None and not run.message:
             reason = "no_text"  # can't happen: ready runs carry their text
         if reason is not None:
@@ -223,11 +246,16 @@ async def baileys_lane_step(last_send: float | None) -> tuple[bool, float | None
     return True, last_send
 
 
-async def fast_lane_step() -> bool:
-    """Claim and send up to ``FAST_CONCURRENCY`` Telegram / Cloud runs at once."""
-    ids = await asyncio.to_thread(claim_ready, FAST, FAST_CONCURRENCY)
-    if ids:
-        await asyncio.gather(*(send_run(i) for i in ids))
+async def fast_lane_step(inflight: set[asyncio.Task]) -> bool:
+    """Claim Telegram / Cloud runs for the free send slots and start them; True if any."""
+    free = FAST_CONCURRENCY - len(inflight)
+    if free <= 0:
+        return False
+    ids = await asyncio.to_thread(claim_ready, FAST, free)
+    for run_id in ids:
+        task = asyncio.create_task(send_run(run_id))
+        inflight.add(task)
+        task.add_done_callback(inflight.discard)
     return bool(ids)
 
 
@@ -246,16 +274,28 @@ async def _baileys_lane() -> None:
 
 
 async def _fast_lane() -> None:
-    while True:
-        try:
-            found = await fast_lane_step()
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.error("Scheduled sender (fast) failed", exc_info=True)
-            found = False
-        if not found:
-            await asyncio.sleep(IDLE_SECONDS)
+    inflight: set[asyncio.Task] = set()
+    try:
+        while True:
+            try:
+                found = await fast_lane_step(inflight)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.error("Scheduled sender (fast) failed", exc_info=True)
+                found = False
+            if found:
+                continue
+            if inflight:
+                # Wake when a send finishes (a slot frees, a chat stops being busy).
+                await asyncio.wait(
+                    set(inflight), timeout=IDLE_SECONDS, return_when=asyncio.FIRST_COMPLETED
+                )
+            else:
+                await asyncio.sleep(IDLE_SECONDS)
+    finally:
+        for task in inflight:
+            task.cancel()
 
 
 async def run_scheduled_sender() -> None:

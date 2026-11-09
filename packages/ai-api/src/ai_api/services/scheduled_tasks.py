@@ -16,11 +16,13 @@ from sqlalchemy import String, cast, func
 from sqlalchemy.orm import Session
 
 from ..broadcast_pacing import parse_timezone
-from ..database import ScheduledTask
+from ..config import settings
+from ..database import ScheduledTask, is_group_jid
 from ..formatting import markdown_to_whatsapp
 from ..logger import logger
 from ..runtime_config import runtime_config
 from ..schemas import ScheduledTaskKind, ScheduledTaskStatus
+from ..whitelist import is_whitelisted, parse_whitelist
 from .schedule import (
     ScheduleError,
     format_local,
@@ -96,6 +98,27 @@ def describe_task(task: ScheduledTask, tz: ZoneInfo | None = None) -> str:
     return " | ".join(parts) + f': "{text}"'
 
 
+def group_creator_allowed(address: str, created_by_jid: str | None) -> bool:
+    """Under ``GROUP_GATING=membership``, a group task needs its creator whitelisted.
+
+    The chat rule admits every group in that mode (the client gates by
+    sender), so this is what stops a group task once the member who asked for
+    it leaves the whitelist. Checked at creation and before every run; no
+    recorded creator fails closed.
+
+    Matched on ``created_by_jid`` (the sender's phone JID on Baileys,
+    ``tg:<id>`` on Telegram) only: the AI API never receives the raw ``@lid``
+    participant, so a creator whitelisted only by a raw ``…@lid`` entry is
+    refused at creation (with a reason) rather than skipped silently later.
+    """
+    if not (is_group_jid(address) and settings.group_gating == "membership"):
+        return True
+    wl = parse_whitelist(runtime_config.get("whitelist_phones") or "")
+    if wl.size == 0:
+        return True
+    return bool(created_by_jid) and is_whitelisted(wl, created_by_jid)
+
+
 def active_count(db: Session, user_id) -> int:
     return (
         db.query(ScheduledTask)
@@ -130,6 +153,13 @@ def create_task(
     if kind == "reminder":
         # The text is model output and is sent as is: same Markdown rule as replies.
         text = markdown_to_whatsapp(text).strip() or text
+
+    if not group_creator_allowed(address, created_by_jid):
+        raise TaskError(
+            "I can't confirm you're on this bot's whitelist by phone number, so a scheduled "
+            "message in this group would never be sent. Ask the bot's operator to add your "
+            "phone number to the whitelist."
+        )
 
     tz = bot_timezone()
     try:

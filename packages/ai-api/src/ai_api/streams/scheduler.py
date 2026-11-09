@@ -20,12 +20,15 @@ Every ``TICK_SECONDS``:
 4. **Hand over.** A reminder's run is created ``ready`` with its text, for
    ``scheduled_sender.py``. An agent task's run is created ``dispatched`` and a
    ``trigger=scheduled`` entry goes on the chat's own stream (one Redis
-   pipeline per tick), where ``scheduled_runner.py`` runs the agent. If the
-   XADDs fail, those runs are recorded ``failed/enqueue_failed`` at once.
-5. **Orphan sweep**: ``dispatched`` > 1 h (stuck behind a dead stream) and
-   ``ready`` > 1 h (no sender) → failed, not sent hours late; ``running`` >
-   15 min (crashed in the agent run, nothing sent) → failed; ``sending`` >
-   15 min (crashed mid-send) → ``unknown``, never re-sent.
+   pipeline per batch), where ``scheduled_runner.py`` runs the agent. An XADD
+   that Redis answered with an error is recorded ``failed/enqueue_failed`` at
+   once; if the pipeline itself fails (connection lost part-way, so some
+   entries may be in), the runs stay ``dispatched`` for the sweep.
+5. **Orphan sweep**: ``dispatched`` > 1 h (stuck behind a busy or dead
+   stream) and ``ready`` > 1 h (a backlog, or no sender) → ``skipped/expired``,
+   not sent hours late and not counted as a failure; ``running`` > 15 min
+   (crashed in the agent run, nothing sent) → failed; ``sending`` > 15 min
+   (crashed mid-send) → ``unknown``, never re-sent.
 
 A failing tick is logged and the loop goes on; it never takes the worker down.
 """
@@ -218,8 +221,10 @@ def fail_dispatched(run_ids: list[uuid.UUID], code: str) -> None:
 def sweep_orphans(now: datetime) -> int:
     """Settle runs that will never finish on their own; returns how many."""
     rules = (
-        (DISPATCHED, DISPATCHED_EXPIRE_AFTER, TaskRun.created_at, FAILED, EXPIRED),
-        (READY, READY_EXPIRE_AFTER, TaskRun.created_at, FAILED, EXPIRED),
+        # A backlog (a busy chat stream, the paced Baileys lane) is the bot's
+        # own lateness, not a broken task: a skip, which never counts.
+        (DISPATCHED, DISPATCHED_EXPIRE_AFTER, TaskRun.created_at, SKIPPED, EXPIRED),
+        (READY, READY_EXPIRE_AFTER, TaskRun.created_at, SKIPPED, EXPIRED),
         (RUNNING, RUNNING_ORPHAN_AFTER, TaskRun.started_at, FAILED, ABANDONED),
         (SENDING, SENDING_ORPHAN_AFTER, TaskRun.started_at, UNKNOWN, UNKNOWN),
     )
@@ -247,7 +252,14 @@ def sweep_orphans(now: datetime) -> int:
 
 
 async def dispatch(redis: Redis, fired: list[Fired]) -> int:
-    """Put agent runs on their chats' streams in one pipeline; returns how many."""
+    """Put agent runs on their chats' streams in one pipeline; returns how many went in.
+
+    Only a command Redis answered with an error is known not to be enqueued:
+    that run is failed at once. When the pipeline itself fails (e.g. the
+    connection drops part-way), some entries may be in Redis, so nothing is
+    failed: the runs stay ``dispatched``, the consumer claims the ones that
+    arrived, and the sweep expires the rest (a skip, not a failure).
+    """
     if not fired:
         return 0
     try:
@@ -262,16 +274,25 @@ async def dispatch(redis: Redis, fired: list[Fired]) -> int:
                     },
                     maxlen=STREAM_MAXLEN,
                 )
-            await pipe.execute()
+            results = await pipe.execute(raise_on_error=False)
     except Exception:
-        logger.error("Scheduled runs: could not enqueue %d agent runs", len(fired), exc_info=True)
+        logger.error(
+            "Scheduled runs: pipeline of %d agent runs failed; left for the sweep",
+            len(fired),
+            exc_info=True,
+        )
+        return 0
+    failed = [
+        item.run_id for item, res in zip(fired, results, strict=False) if isinstance(res, Exception)
+    ]
+    if failed:
+        logger.error("Scheduled runs: %d of %d XADDs failed", len(failed), len(fired))
         try:
-            await asyncio.to_thread(fail_dispatched, [f.run_id for f in fired], ENQUEUE_FAILED)
+            await asyncio.to_thread(fail_dispatched, failed, ENQUEUE_FAILED)
         except Exception:
             # Left 'dispatched': the sweep expires them after an hour.
             logger.error("Scheduled runs: could not record the enqueue failure", exc_info=True)
-        return 0
-    return len(fired)
+    return len(fired) - len(failed)
 
 
 async def tick(redis: Redis) -> int:

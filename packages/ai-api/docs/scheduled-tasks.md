@@ -51,7 +51,7 @@ The model passes the user's words in this grammar and never computes a date.
 - Named forms compile to cron, so weekdays use cron numbering only (Sunday = 0).
 - A cron that never fires (`0 9 30 2 *`) is refused.
 - A one-shot must be in the future and within a year.
-- `next_fire` skips the second pass of a DST fall-back hour, so a daily `30 1 * * *` in New York fires once on that day.
+- On a DST fall-back day, `next_fire` skips the second pass of a wall time only when it comes sooner than the cron's normal gap. A daily `30 1 * * *` in New York fires once on that day, while `0 * * * *` still fires at 01:00 EDT and again at 01:00 EST, a real hour apart.
 
 **Frequency limits** are measured over 8 days starting from the task's first slot, not from now. Otherwise `* * 1 * *`, which fires every minute on the 1st, would pass every check while it is more than 8 days away.
 
@@ -83,18 +83,20 @@ any state before sending ─► skipped
 4. **Hand over.**
    - A reminder's run is created `ready`, with `message = "⏰ " + text`. It never goes through the chat stream: it has no LLM call and needs no ordering against the chat's messages.
    - An agent task's run is created `dispatched`. Then `XADD stream:user:{chat id} {trigger: scheduled, run_id, user_id}` runs, one Redis pipeline per batch, so the agent run is serialised with that chat's messages.
-   - If the pipeline fails, those runs are recorded `failed/enqueue_failed` at once. If that update also fails, the 1 h expiry below settles them.
+   - The pipeline runs with `execute(raise_on_error=False)`. Only an XADD that Redis answered with an error is recorded `failed/enqueue_failed`.
+   - If the pipeline itself fails (for example, the connection drops part-way), some entries may already be in Redis, so nothing is failed. The runs stay `dispatched`: the consumer claims the ones that arrived, and the 1 h expiry below settles the rest as a skip.
    - **Pipeline note:** such an entry must never be merged into a message burst or deduplicated against a user message. A redelivered entry is harmless, because the claim makes it a no-op.
 5. **Orphan sweep:**
 
    | Run state | Settled after | Becomes | Why |
    |---|---|---|---|
-   | `dispatched` | 1 h | `failed/expired` | Stuck behind a dead stream; not sent hours late. |
-   | `ready` | 1 h | `failed/expired` | No sender picked it up. |
+   | `dispatched` | 1 h | `skipped/expired` | Stuck behind a busy or dead stream; not sent hours late. |
+   | `ready` | 1 h | `skipped/expired` | A backlog (the paced Baileys lane sends about 225-720 an hour) or no sender. |
    | `running` | 15 min | `failed/abandoned` | Crashed during the agent run; nothing was sent. |
    | `sending` | 15 min from the send claim | `unknown` | Crashed mid-send; never re-sent. |
 
-6. **Turning it off.** `SCHEDULED_TASKS_ENABLED=false` stops firing, but the sweep still runs. When it is turned back on, a slot that fell due meanwhile fires only within its catch-up window. Older slots are recorded `missed`, and a missed one-shot is disabled.
+   Expiry is a skip, not a failure: the lateness is the bot's own (its pacing or a busy chat), not a broken task.
+6. **Turning it off.** `SCHEDULED_TASKS_ENABLED=false` stops firing, but the sweep still runs. Runs that already fired are stopped too: the send-time checks skip them as `disabled`, before any LLM call. When it is turned back on, a slot that fell due meanwhile fires only within its catch-up window. Older slots are recorded `missed`, and a missed one-shot is disabled.
 
 ## Agent phase (`streams/scheduled_runner.py`, in the chat consumer)
 
@@ -108,7 +110,9 @@ The runner never sends and never waits on pacing. A paced send inside the chat c
 
 The sender has two lanes:
 - **Baileys:** one send at a time, 3-8 s apart, so many tasks due at 09:00 don't burst from one WhatsApp account.
-- **Telegram and Cloud:** up to 10 sends at once.
+- **Telegram and Cloud:** up to 10 sends at once, claimed continuously as slots free up, so one slow send doesn't hold the others back.
+
+A claim takes at most one run per chat, and none for a chat that already has a run `sending`. So one chat's scheduled messages go out one at a time and in order, and the daily cap sees every message before it.
 
 Each lane works in this order:
 1. **Claim.** It claims the oldest `ready` runs for its platforms with `FOR UPDATE OF task_runs SKIP LOCKED` and moves them to `sending`. `started_at` is set to now, which starts the orphan clock, and the change is committed.
@@ -117,7 +121,8 @@ Each lane works in this order:
    - the chat row is gone (`user_deleted`);
    - the whitelist (`not_whitelisted`, see Rules);
    - a Cloud chat is outside the 23 h window (`cloud_window`; templates are not implemented, and the tool warns about this at creation);
-   - the chat has been sent more than `SCHEDULED_TASKS_MAX_RUNS_PER_DAY` scheduled messages in 24 h (`daily_limit`).
+   - scheduling was turned off after the run fired (`disabled`);
+   - the chat is at `SCHEDULED_TASKS_MAX_RUNS_PER_DAY` (`daily_limit`). The count is the runs `sent` in the last 24 h, plus the runs already on their way: `sending` ones, and `ready` ones queued ahead (at send time, the older ones; in the agent phase, all of them, so an LLM call the sender would drop is never paid for).
 3. **Deliver.** It uses the broadcast sender's `_deliver` (typing first on Baileys) on the task's own client (`client_id`). Telegram gets the 120 s timeout. There is no daytime window, because the user chose the time.
 4. **Record the outcome** via `classify_outcome`:
 
@@ -133,7 +138,7 @@ Each lane works in this order:
 ## Auto-disable
 
 - **What counts:** only real failures (`failed`, `unknown`) count toward `consecutive_failures`. At 3 the task is `disabled` with `disabled_reason=consecutive_failures`.
-- **What doesn't:** skips (`cloud_window`, `daily_limit`, `not_whitelisted`, `user_deleted`, `missed`) only set `last_status` / `last_error`. A Cloud user who is quiet for three days keeps their reminder, and it resumes once they write again.
+- **What doesn't:** skips (`cloud_window`, `daily_limit`, `not_whitelisted`, `user_deleted`, `missed`, `expired`, `disabled`) only set `last_status` / `last_error`. A Cloud user who is quiet for three days keeps their reminder, and it resumes once they write again.
 - **One-shots:** a one-shot ends `completed` when it is delivered (or silent), and `disabled` with the reason otherwise, skips included.
 
 ## Rules
@@ -144,6 +149,7 @@ Each lane works in this order:
   - Under `GROUP_GATING=membership` that rule admits every group. So a group task also needs its creator, `created_by_jid`, to still be whitelisted.
   - `created_by_jid` is the message's `sender_jid`, read through `AgentDeps.user_message_id`. On Baileys it is the participant's phone JID, the value the client's sender check uses; on Telegram it is `tg:<id>`.
   - A group task with no recorded creator fails closed.
+  - The Baileys client also admits a sender whitelisted only by the raw `…@lid` participant, but the AI API never receives that identity. So such a creator is refused when creating the task, with a reason ("ask the operator to add your phone number"), rather than having every run skipped silently. The same check (`services/scheduled_tasks.group_creator_allowed`) runs at creation and before every run. Storing the raw participant would need it sent by the client and carried through the chat route and the stream.
 - **Limits** (all hot):
   - `SCHEDULED_TASKS_MAX_PER_CHAT`: active tasks per chat (10). An admin re-enable is also refused at the limit.
   - `SCHEDULED_TASKS_MIN_INTERVAL_MINUTES`: the shortest time between two runs of a recurring task (60).
