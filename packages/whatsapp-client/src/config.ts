@@ -85,6 +85,12 @@ export const config = {
     maxDelayMs: parseInt(process.env.RECONNECT_MAX_DELAY_MS || '30000', 10),
     maxAttempts: parseInt(process.env.RECONNECT_MAX_ATTEMPTS || '10', 10),
     jitterMs: parseInt(process.env.RECONNECT_JITTER_MS || '500', 10),
+    // After maxAttempts failures in a row, retry at this long interval instead
+    longDelayMs: parseNonNegativeInt('RECONNECT_LONG_DELAY_MS', 300000),
+    // A connection counts as healthy (attempt counter reset) after staying open this long
+    stableMs: parseNonNegativeInt('RECONNECT_STABLE_MS', 60000),
+    // Wait after a 440 session conflict (another client took over this session)
+    conflictDelayMs: parseNonNegativeInt('RECONNECT_CONFLICT_DELAY_MS', 900000),
   },
   // Baileys sends: per-attempt timeout (a send on a dead socket can hang forever)
   sendTimeoutMs: parseNonNegativeInt('SEND_TIMEOUT_MS', 60000),

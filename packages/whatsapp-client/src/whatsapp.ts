@@ -9,6 +9,7 @@ import { Boom } from '@hapi/boom';
 import qrcode from 'qrcode-terminal';
 import { readdir, rm } from 'node:fs/promises';
 import { logger } from './logger.js';
+import { Sentry } from './instrument.js';
 import { config } from './config.js';
 import {
   setBaileysSocket,
@@ -204,31 +205,44 @@ let socketEpoch = 0;
 let reconnectionAttempts = 0;
 let reconnectionTimer: NodeJS.Timeout | null = null;
 let isReconnecting = false;
+// Armed on 'open'; resets the attempt counter only once the link has stayed up
+// for `config.reconnection.stableMs`, so an open→close flap keeps backing off.
+let stableTimer: NodeJS.Timeout | null = null;
 
 /**
- * Calculate exponential backoff delay with jitter
+ * Calculate exponential backoff delay with jitter. Once `maxAttempts` failures
+ * in a row are reached, retry at the long interval instead of `maxDelayMs`:
+ * ~120 connects/hour on a persistent failure is how accounts get restricted.
  */
 function calculateBackoffDelay(attempt: number): number {
-  const { initialDelayMs, maxDelayMs, jitterMs } = config.reconnection;
+  const { initialDelayMs, maxDelayMs, jitterMs, maxAttempts, longDelayMs } = config.reconnection;
 
-  // Exponential backoff: initial * 2^attempt
-  const exponentialDelay = initialDelayMs * Math.pow(2, attempt);
-
-  // Cap at maximum delay
-  const cappedDelay = Math.min(exponentialDelay, maxDelayMs);
+  // Exponential backoff: initial * 2^attempt, capped; long interval past maxAttempts
+  const baseDelay =
+    attempt >= maxAttempts
+      ? longDelayMs
+      : Math.min(initialDelayMs * Math.pow(2, attempt), maxDelayMs);
 
   // Add random jitter to prevent thundering herd
   const jitter = Math.random() * jitterMs;
 
-  return cappedDelay + jitter;
+  return baseDelay + jitter;
+}
+
+function clearStableTimer(): void {
+  if (stableTimer) {
+    clearTimeout(stableTimer);
+    stableTimer = null;
+  }
 }
 
 /**
- * Reset reconnection state after successful connection
+ * Reset reconnection state (logout / re-pair paths)
  */
 function resetReconnectionState(): void {
   reconnectionAttempts = 0;
   isReconnecting = false;
+  clearStableTimer();
   if (reconnectionTimer) {
     clearTimeout(reconnectionTimer);
     reconnectionTimer = null;
@@ -246,19 +260,20 @@ function resetReconnectionState(): void {
  * a socket exists (which would otherwise emit no 'close' to re-arm anything) still
  * self-heals instead of stalling at disconnected/qr=null.
  */
-function scheduleReconnect(): void {
+function scheduleReconnect(delayOverrideMs?: number): void {
   // Check if max attempts exceeded
   if (reconnectionAttempts >= config.reconnection.maxAttempts) {
-    // Don't give up — keep retrying at the capped backoff so a prolonged outage
-    // self-heals when connectivity returns. Clamp the counter so the delay stays
-    // pinned at maxDelayMs instead of overflowing or growing unbounded.
+    // Don't give up — keep retrying at the long interval so a prolonged outage
+    // self-heals when connectivity returns. Clamp the counter so it doesn't grow
+    // unbounded.
     reconnectionAttempts = config.reconnection.maxAttempts;
     logger.warn(
       {
         attempts: reconnectionAttempts,
         maxAttempts: config.reconnection.maxAttempts,
+        longDelayMs: config.reconnection.longDelayMs,
       },
-      'Max reconnection attempts reached — continuing to retry at the capped interval.'
+      'Max reconnection attempts reached — continuing to retry at the long interval.'
     );
   }
 
@@ -271,8 +286,8 @@ function scheduleReconnect(): void {
   isReconnecting = true;
   reconnectionAttempts++;
 
-  // Calculate backoff delay
-  const delayMs = calculateBackoffDelay(reconnectionAttempts - 1);
+  // Calculate backoff delay (a 440 conflict passes its own, longer one)
+  const delayMs = delayOverrideMs ?? calculateBackoffDelay(reconnectionAttempts - 1);
 
   logger.info(
     {
@@ -334,8 +349,10 @@ export async function initializeWhatsApp(): Promise<void> {
       setConnectionStatus('disconnected');
       setLatestQr(null); // the socket that issued the QR is gone — don't serve a stale code
       clearBaileysSocket(); // the socket is dead — stop reporting "ready" until re-open
+      clearStableTimer(); // it didn't stay up long enough to count as healthy
       const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+      const isConflict = statusCode === DisconnectReason.connectionReplaced;
 
       if (statusCode === 405) {
         logger.error(
@@ -347,7 +364,20 @@ export async function initializeWhatsApp(): Promise<void> {
 
       logger.info({ shouldReconnect, reconnectionAttempts, statusCode }, 'Connection closed');
 
-      if (shouldReconnect) {
+      if (isConflict) {
+        // 440: another client opened this session. Reconnecting at once just
+        // kicks it (or us) again, in a loop WhatsApp may punish; stopping for
+        // good needs a manual restart. Wait a long cooldown instead. The status
+        // stays 'disconnected' (a closed enum for the dashboard); /health shows
+        // the 440 in lastDisconnect.
+        logger.error(
+          { statusCode, delayMs: config.reconnection.conflictDelayMs },
+          'WhatsApp session conflict (440): another client took over this session — ' +
+            'waiting before reconnecting.'
+        );
+        Sentry.captureMessage('WhatsApp session conflict (440)', 'warning');
+        scheduleReconnect(config.reconnection.conflictDelayMs);
+      } else if (shouldReconnect) {
         scheduleReconnect();
       } else {
         // Logged out (e.g. the linked phone unlinked this device). The on-disk creds are
@@ -377,8 +407,20 @@ export async function initializeWhatsApp(): Promise<void> {
         setPairedPhoneNumber(phone);
       }
 
-      // Reset reconnection state on successful connection
-      resetReconnectionState();
+      // Don't reset the attempt counter yet: only once the link has stayed up
+      // for stableMs, so a socket that opens and drops again keeps backing off.
+      isReconnecting = false;
+      if (reconnectionTimer) {
+        clearTimeout(reconnectionTimer);
+        reconnectionTimer = null;
+      }
+      clearStableTimer();
+      stableTimer = setTimeout(() => {
+        stableTimer = null;
+        if (myEpoch !== socketEpoch) return;
+        reconnectionAttempts = 0;
+        logger.debug('WhatsApp connection stable — reconnection backoff reset');
+      }, config.reconnection.stableMs);
     }
   });
 
