@@ -122,3 +122,13 @@ def test_malformed_or_unknown_ids_are_ignored(db):
         exclude_ids=["also-bad", "00000000-0000-0000-0000-000000000000"],
     )
     assert [m.content for m in history] == ["u:hi", "a:hello"]
+
+
+def test_reply_to_the_previous_message_saved_after_the_anchor_is_kept(db):
+    # The user sent B while job A still ran: R_A was saved after B.
+    rows = _seed(db, ["u:hi", "a:hello", "u:A", "u:B", "a:R_A"])
+    current = str(rows[3].id)
+    history = get_conversation_history(
+        db, JID, "private", limit=10, before_message_id=current, exclude_ids=[current]
+    )
+    assert [m.content for m in history] == ["u:hi", "a:hello", "u:A", "a:R_A"]

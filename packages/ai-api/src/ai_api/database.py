@@ -14,6 +14,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     create_engine,
+    or_,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -471,8 +472,9 @@ def get_conversation_history(
     """Retrieve recent conversation history for a user by WhatsApp JID.
 
     A chat job passes the message(s) it is answering: ``before_message_id``
-    (the earliest of them) drops every row saved after it, such as later
-    messages of the same burst, and ``exclude_ids`` drops the messages
+    (the earliest of them) drops every user row saved after it, such as later
+    messages of the same burst (assistant rows stay: a reply to an earlier
+    message may be saved after this one), and ``exclude_ids`` drops the messages
     themselves, which the job sends as the prompt instead.
     """
     user = get_or_create_user(db, whatsapp_jid, conversation_type)
@@ -500,7 +502,15 @@ def get_conversation_history(
             .scalar()
         )
         if anchor is not None:
-            query = query.filter(ConversationMessage.timestamp <= anchor)
+            # User rows only: the bot's reply to an earlier message is often
+            # saved after this one arrived (the user wrote again while that
+            # job still ran), and the model must still see it.
+            query = query.filter(
+                or_(
+                    ConversationMessage.timestamp <= anchor,
+                    ConversationMessage.role == "assistant",
+                )
+            )
     excluded = [u for u in (_as_uuid(i) for i in exclude_ids or []) if u is not None]
     if excluded:
         query = query.filter(ConversationMessage.id.notin_(excluded))
