@@ -40,7 +40,7 @@ Claude Code loads a folder's `CLAUDE.md` when it works there. **These subsystems
 
 | File | Covers |
 |------|--------|
-| `packages/ai-api/src/ai_api/services/CLAUDE.md` | Broadcasts (`/admin/broadcasts`), bug reports (`/admin/bug-reports`), cross-platform identity (`/link`, `/linkphone`) |
+| `packages/ai-api/src/ai_api/services/CLAUDE.md` | Broadcasts (`/admin/broadcasts`), bug reports (`/admin/bug-reports`), scheduled tasks and reminders, cross-platform identity (`/link`, `/linkphone`) |
 | `packages/ai-api/src/ai_api/agent/CLAUDE.md` | DeepSeek → Gemini model chain, `GuardedModel`, fallback reply, chat-history and shared-group tools |
 | `packages/ai-api/src/ai_api/streams/CLAUDE.md` | PDF processing queue (concurrency, retry, dead letter, crash recovery) |
 | `packages/whatsapp-client/CLAUDE.md` | Baileys gotchas (WA version, LID vs phone, whitelist placement), handler + multipart route workflows |

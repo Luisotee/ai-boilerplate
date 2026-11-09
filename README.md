@@ -269,6 +269,16 @@ Broadcasts go to every chat the bot has talked to that hasn't opted out (users s
 | PATCH | `/admin/bug-reports/{id}` | Set `status` (`open`/`resolved`/`ignored`) and a `resolution_note` |
 | DELETE | `/admin/bug-reports/{id}` | Delete a report |
 
+### Scheduled tasks (admin)
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/admin/scheduled-tasks` | List reminders and scheduled agent runs (`status`, `kind`, paging) with counts per status |
+| GET | `/admin/scheduled-tasks/{id}` | One task with its latest runs |
+| PATCH | `/admin/scheduled-tasks/{id}` | `status`: `active` re-enables a disabled task, `cancelled` stops it |
+| DELETE | `/admin/scheduled-tasks/{id}` | Delete a task and its runs |
+
+Users create, list and cancel their own reminders by asking the bot ("remind me tomorrow at 9 to call Ana"); details in [packages/ai-api/docs/scheduled-tasks.md](packages/ai-api/docs/scheduled-tasks.md).
+
 ### Speech
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -321,6 +331,8 @@ pnpm format          # Format all code
 | `GROUP_GATING` | How a group gets in scope when the whitelist is set: `jid` (default — the group's own id must be listed) or `membership` (Baileys: any group with a whitelisted member; Telegram: any group; the bot saves all messages there but replies only to whitelisted senders). Read by the AI API and the Baileys/Telegram clients |
 | `BUG_REPORTS_ENABLED` | `true` (default). The `report_bug` agent tool plus automatic reports of model errors, crashed jobs and failed PDFs. Hot via `PATCH /admin/settings` |
 | `BUG_REPORTS_PER_USER_PER_HOUR` | Cap on reports the agent files per chat per hour (default `5`) |
+| `BOT_TIMEZONE` | IANA time zone for scheduled tasks ("every day at 9:00"), e.g. `America/Rio_Branco`. Empty = `BROADCAST_TIMEZONE`. Hot via `PATCH /admin/settings` |
+| `SCHEDULED_TASKS_*` | Reminders and scheduled agent runs: on/off (`_ENABLED`, default `true`), active tasks per chat (`_MAX_PER_CHAT`, 10), shortest repeat (`_MIN_INTERVAL_MINUTES`, 60), messages per chat per 24h (`_MAX_RUNS_PER_DAY`, 24). Hot via `PATCH /admin/settings` |
 | `BROADCAST_*` | Broadcast footer and Baileys anti-ban pacing (delays, batch pause, daily cap, send window, time zone). Hot via `PATCH /admin/settings` |
 | `LOGFIRE_TOKEN` | Pydantic Logfire write token for LLM token/cost tracking (optional; empty disables it) |
 | `LOGFIRE_ENVIRONMENT` | Environment label shown in the Logfire UI (default `development`) |

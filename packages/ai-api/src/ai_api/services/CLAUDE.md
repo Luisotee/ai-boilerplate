@@ -29,6 +29,15 @@ Reports land in the `bug_reports` table (`services/bug_reports.py`) and are tria
 - **FleetView contract**: `BugReportSource` (`user|agent|model_error|job_crash|pdf_failure`) and `BugReportStatus` (`open|resolved|ignored`) in `schemas.py` are closed enums; `category` and `error_type` are open strings. The FleetView page is not built yet (planned: a per-bot tab like Broadcasts, the open count on the Fleet card, a 404 = "unsupported")
 - New table only, so `create_all()` creates it and its partial index; no migration SQL
 
+## Scheduled tasks and reminders (`/admin/scheduled-tasks`)
+
+Full detail: `packages/ai-api/docs/scheduled-tasks.md`. The `manage_scheduled_tasks` tool (`agent/tools/scheduled_tasks.py`, create/list/cancel) stores rows in `scheduled_tasks` through `services/scheduled_tasks.py`; `services/schedule.py` parses the schedule string (the model never computes dates) in `BOT_TIMEZONE` (empty = `BROADCAST_TIMEZONE`, snapshotted per task). The stream worker's fourth task, `streams/scheduler.py`, fires due rows and `streams/scheduled_runner.py` delivers them. Rules that must hold:
+- **At most once**: due rows are taken with `FOR UPDATE SKIP LOCKED`; `next_run_at` advances in the same commit as the slot's `task_runs` row (`UNIQUE(task_id, scheduled_for)`), before the `trigger=scheduled` entry goes onto `stream:user:{chat id}`; the runner claims the run (conditional UPDATE) before sending, and a run that may have been delivered is never retried (`classify_outcome`, orphans swept to `unknown`)
+- **No burst after downtime**: a recurring slot later than its catch-up window (half the period, 2 min - 2 h) is skipped and the next slot is the first after now; a one-shot fires up to 2 h late, else it is disabled as `missed`
+- **Scope**: a task delivers only to the chat it was created in (identity from `AgentDeps`); in a group, create/cancel need `is_group_admin is True`. Whitelist, Cloud 23 h window and the per-chat daily cap are re-checked at send time
+- **Agent tasks** run in a fresh session with only `SCHEDULED_RUN_TOOLS` (`agent/core.py` `prepare_tools`: no sending, no settings, no new tasks) and send nothing on `[SILENT]`
+- **Failures**: 3 in a row disable the task (`disabled_reason`), visible in `/admin/scheduled-tasks` and `/admin/overview` `disabled_scheduled_tasks`. New tables only (`create_all()`), no migration SQL
+
 ## Cross-platform identity (`/link`, phone auto-link)
 
 One human on WhatsApp and Telegram can share one `users` row (history, core memory, preferences). Two ways, both in `services/`, both with the **discard-orphan** policy (the Telegram orphan row is deleted; `cascade="all, delete-orphan"` drops its messages, preferences and core memory; the WhatsApp row is kept and gains `telegram_jid`):

@@ -47,7 +47,7 @@ Deep detail lives in `AGENTS.md` (symlinked to `CLAUDE.md`) next to the code. **
 
 | File | Covers |
 |------|--------|
-| `packages/ai-api/src/ai_api/services/AGENTS.md` | Broadcasts (`/admin/broadcasts`: audience, routing, opt-out, claims, lease, Baileys pacing, FleetView enums), bug reports (`/admin/bug-reports`: dedup, privacy scrub), cross-platform identity (`/link`, `/linkphone`) |
+| `packages/ai-api/src/ai_api/services/AGENTS.md` | Broadcasts (`/admin/broadcasts`: audience, routing, opt-out, claims, lease, Baileys pacing, FleetView enums), bug reports (`/admin/bug-reports`: dedup, privacy scrub), scheduled tasks and reminders (`/admin/scheduled-tasks`: at-most-once firing, group rules), cross-platform identity (`/link`, `/linkphone`) |
 | `packages/ai-api/src/ai_api/agent/AGENTS.md` | DeepSeek → Gemini model chain, `GuardedModel`, fallback rules, model-error fallback reply, shared-group tools |
 | `packages/ai-api/src/ai_api/streams/AGENTS.md` | PDF processing queue (concurrency, retry, dead letter, crash recovery) |
 | `packages/whatsapp-client/AGENTS.md` | Baileys gotchas (WA version, LID vs phone, whitelist placement), handler + multipart route workflows |
