@@ -207,6 +207,23 @@ describe('edited_message', () => {
     expect(editMessage.mock.calls[0][1]).toBe('what is Y');
   });
 
+  it('an edit down to just the bot mention keeps the raw text (an empty edit is refused)', async () => {
+    const { bot, editMessage } = await boot('jid', `tg:${GROUP_ID}`);
+    const update = groupEdit(MEMBER, '@MyBot');
+    update.edited_message!.entities = [{ type: 'mention', offset: 0, length: 6 }];
+    await bot.handleUpdate(update);
+    expect(editMessage.mock.calls[0][1]).toBe('@MyBot');
+  });
+
+  it('strips the bot mention from a save-only sender too, so the stored form is stable', async () => {
+    // membership: STRANGER is saved but never answered, so the edit is not addressed.
+    const { bot, editMessage } = await boot('membership', `tg:${MEMBER}`);
+    const update = groupEdit(STRANGER, '@MyBot hello all');
+    update.edited_message!.entities = [{ type: 'mention', offset: 0, length: 6 }];
+    await bot.handleUpdate(update);
+    expect(editMessage.mock.calls[0][1]).toBe('hello all');
+  });
+
   it('drops an edit in a chat outside the whitelist', async () => {
     const { bot, editMessage } = await boot('jid', `tg:${MEMBER}`);
     await bot.handleUpdate(groupEdit(MEMBER, 'fixed'));

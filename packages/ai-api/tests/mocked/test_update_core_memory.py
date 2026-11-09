@@ -12,6 +12,7 @@ from ai_api.agent.tools.memory import (
     is_destructive_rewrite,
     update_core_memory,
 )
+from ai_api.commands import _handle_memories_command
 
 MODULE = "ai_api.agent.tools.memory"
 
@@ -173,20 +174,66 @@ async def test_an_admin_save_moves_the_backup():
     assert mem.previous_content == GROUP_DOC + "\n- a"
 
 
+def _mem(content, backup=None, trusted=True):
+    return MagicMock(content=content, previous_content=backup, content_trusted=trusted)
+
+
+def _undo(mem):
+    # What /memories undo does (commands.py): swap, and an admin chose it.
+    with patch("ai_api.commands.get_or_create_core_memory", return_value=mem):
+        _handle_memories_command(MagicMock(), "user-123", ["/memories", "undo"])
+
+
+async def test_undo_after_erosion_restores_the_admins_latest_save_not_an_older_one():
+    # Admin X -> G, members add a fact, a member erodes: undo must give G.
+    admin, member = _group_ctx(True), _group_ctx(None)
+    g = GROUP_DOC + "\n- admin note"
+    mem = _mem("## Group\n- old")
+    await _save(admin, mem, g)
+    assert mem.content_trusted is True
+    await _save(member, mem, g + "\n- member fact")
+    assert mem.content_trusted is False
+    filler = "\n".join(f"- filler line {i:03d} padding padding" for i in range(30))
+    await _save(member, mem, g + "\n- member fact\n" + filler)
+    await _save(member, mem, filler)
+    _undo(mem)
+    assert mem.content == g
+    assert mem.content_trusted is True
+
+
+async def test_a_second_erosion_after_an_undo_still_restores_the_admin_state():
+    # Member erodes G -> E, admin undoes (backup becomes E), a member adds and
+    # erodes again: the next undo must give G, not the rejected E.
+    member = _group_ctx(None)
+    mem = _mem(GROUP_DOC)
+    filler = "\n".join(f"- filler line {i:03d} padding padding" for i in range(30))
+    await _save(member, mem, GROUP_DOC + "\n" + filler)
+    await _save(member, mem, filler)
+    _undo(mem)
+    assert mem.content == GROUP_DOC
+    await _save(member, mem, GROUP_DOC + "\n- new fact")
+    await _save(member, mem, GROUP_DOC + "\n- new fact\n" + filler)
+    await _save(member, mem, filler)
+    _undo(mem)
+    assert mem.content == GROUP_DOC
+
+
 @pytest.mark.parametrize(
-    ("previous", "backup", "trusted", "expected"),
+    ("previous", "backup", "trusted", "previous_trusted", "expected"),
     [
-        ("A", None, False, "A"),  # untrusted, no backup yet: take it
-        ("A", "", False, "A"),
-        ("B", "A", False, "A"),  # untrusted never moves a real backup
-        ("B", "A", True, "B"),  # trusted keeps the replaced document
-        ("", "A", True, "A"),  # an empty document never replaces a backup
-        ("  ", "A", False, "A"),
-        ("", None, True, None),
+        ("A", None, False, False, ("A", False)),  # no backup yet: take it
+        ("A", "", False, False, ("A", False)),
+        ("B", "A", False, False, ("A", False)),  # untrusted B is never backed up
+        ("B", "A", False, True, ("B", False)),  # trusted B is, even by a member
+        ("B", "A", True, False, ("B", True)),  # a trusted save backs up what it replaces
+        ("", "A", True, True, ("A", True)),  # an empty document never replaces it
+        ("  ", "A", False, True, ("A", False)),
+        ("", None, True, True, (None, True)),
     ],
 )
-def test_backup_after_save(previous, backup, trusted, expected):
-    assert backup_after_save(previous, backup, trusted=trusted) == expected
+def test_backup_after_save(previous, backup, trusted, previous_trusted, expected):
+    result = backup_after_save(previous, backup, trusted=trusted, previous_trusted=previous_trusted)
+    assert result == expected
 
 
 async def test_a_group_admin_can_shrink_the_memory():

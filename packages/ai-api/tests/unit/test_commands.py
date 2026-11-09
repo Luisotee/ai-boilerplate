@@ -498,6 +498,7 @@ class TestHandleMemoriesUndo:
         assert mock_mem.previous_content == "x"
         assert "likes tea" in result
         db.commit.assert_called_once()
+        assert mock_mem.content_trusted is True
 
     @patch("ai_api.commands.get_or_create_core_memory")
     def test_undo_twice_redoes(self, mock_get_mem):

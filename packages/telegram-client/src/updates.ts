@@ -78,12 +78,14 @@ export function registerUpdateHandlers(): void {
   // no reaction, and the mention window is neither opened nor consumed.
   // Caption edits are skipped (the row holds an `[Image: …]` marker).
   bot.on('edited_message:text', async (ctx) => {
-    const { skip, isGroup, saveOnly } = await resolveGate(ctx, { mentionWindow: false });
+    const { skip, isGroup } = await resolveGate(ctx, { mentionWindow: false });
     if (skip || !ctx.chat) return;
-    // Same text the save path stored: an addressed group message is saved
-    // with the bot mention stripped, chatter verbatim.
+    // In a group, always strip a leading bot mention (the save path strips it
+    // from addressed messages), so the stored form doesn't depend on whether
+    // the edit added or removed it. An edit down to just "@bot" keeps the raw
+    // text: an empty edit is refused (422) and the old text would stay.
     const text = ctx.editedMessage.text;
-    const cleanText = isGroup && !saveOnly ? stripBotMentionFromCtx(ctx, text) : text;
+    const cleanText = (isGroup && stripBotMentionFromCtx(ctx, text)) || text;
     const changed = await editMessage(
       {
         whatsappJid: chatIdToJid(ctx.chat.id),

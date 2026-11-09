@@ -150,8 +150,12 @@ class CoreMemory(Base):
         UUID(as_uuid=True), ForeignKey("users.id"), unique=True, nullable=False, index=True
     )
     content = Column(Text, nullable=False, default="")
-    # The document before the last change, for one level of `/memories undo`.
+    # The backup `/memories undo` restores (agent/tools/memory.py backup_after_save).
     previous_content = Column(Text, nullable=True)
+    # Whether `content` was last written by a trusted source (a private chat, a
+    # confirmed group admin, /memories clear or undo). An untrusted group save
+    # backs up only trusted content, so undo returns the last admin-era state.
+    content_trusted = Column(Boolean, default=True, server_default=text("true"), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
