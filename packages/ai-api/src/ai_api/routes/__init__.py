@@ -11,6 +11,7 @@ from .contact import router as contact_router
 from .health import router as health_router
 from .knowledge_base import router as knowledge_base_router
 from .preferences import router as preferences_router
+from .scheduled_tasks import router as scheduled_tasks_router
 from .speech import router as speech_router
 
 __all__ = [
@@ -22,5 +23,6 @@ __all__ = [
     "health_router",
     "knowledge_base_router",
     "preferences_router",
+    "scheduled_tasks_router",
     "speech_router",
 ]

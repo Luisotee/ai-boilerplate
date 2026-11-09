@@ -22,6 +22,7 @@ from ..config import get_whatsapp_api_key, get_whatsapp_client_url, settings
 from ..database import (
     BugReport,
     ConversationMessage,
+    ScheduledTask,
     User,
     clear_active_prompt,
     delete_setting_override,
@@ -486,6 +487,9 @@ async def overview(db: Session = Depends(get_db)):
         messages=db.query(ConversationMessage).count(),
         knowledge_base_documents=db.query(KnowledgeBaseDocument).count(),
         open_bug_reports=db.query(BugReport).filter(BugReport.status == "open").count(),
+        disabled_scheduled_tasks=db.query(ScheduledTask)
+        .filter(ScheduledTask.status == "disabled")
+        .count(),
     )
 
 
