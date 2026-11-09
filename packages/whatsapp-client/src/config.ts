@@ -86,6 +86,12 @@ export const config = {
     maxAttempts: parseInt(process.env.RECONNECT_MAX_ATTEMPTS || '10', 10),
     jitterMs: parseInt(process.env.RECONNECT_JITTER_MS || '500', 10),
   },
+  // Baileys sends: per-attempt timeout (a send on a dead socket can hang forever)
+  sendTimeoutMs: parseNonNegativeInt('SEND_TIMEOUT_MS', 60000),
+  // Reply sent when processing a message fails (forks set their own language)
+  errorReplyText:
+    process.env.ERROR_REPLY_TEXT ||
+    'Sorry, I encountered an error processing your message. Please try again.',
   messageSplit: {
     enabled: process.env.MESSAGE_SPLIT_ENABLED !== 'false',
     baseDelayMs: parseNonNegativeInt('MESSAGE_SPLIT_BASE_DELAY_MS', 600),

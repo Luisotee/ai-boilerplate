@@ -1,5 +1,26 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { makeTextMsg, makeGroupTextMsg, makeMockSocket } from '../helpers/fixtures.js';
+import {
+  makeTextMsg,
+  makeGroupTextMsg,
+  makeMockSocket as baseMakeMockSocket,
+} from '../helpers/fixtures.js';
+
+// The handler sends through sendSerialized (live socket at send time); route it
+// to the socket the test built so assertions on sock.sendMessage still hold.
+const liveSock = vi.hoisted(() => ({
+  current: null as null | { sendMessage: (...args: unknown[]) => unknown },
+}));
+
+vi.mock('../../src/services/baileys.js', () => ({
+  getLiveSocket: vi.fn(() => null),
+  sendSerialized: vi.fn((...args: unknown[]) => liveSock.current!.sendMessage(...args)),
+}));
+
+function makeMockSocket(...args: Parameters<typeof baseMakeMockSocket>) {
+  const sock = baseMakeMockSocket(...args);
+  liveSock.current = sock;
+  return sock;
+}
 
 const mockSplitConfig = vi.hoisted(() => ({
   enabled: true,

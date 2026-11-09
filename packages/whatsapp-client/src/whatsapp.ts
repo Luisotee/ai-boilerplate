@@ -19,6 +19,7 @@ import {
   setSocketOpen,
   isBaileysReady,
   clearBaileysSocket,
+  sendSerialized,
 } from './services/baileys.js';
 import { getWaVersionConfig } from './services/wa-version.js';
 import {
@@ -492,7 +493,7 @@ export async function initializeWhatsApp(): Promise<void> {
         if (!text && normalizedMessage?.audioMessage) {
           text = await transcribeAudioMessage(sock, msg);
           if (!text) {
-            if (!saveOnly) await sendFailureReaction(sock, msg);
+            if (!saveOnly) await sendFailureReaction(msg);
             continue;
           }
         }
@@ -511,7 +512,7 @@ export async function initializeWhatsApp(): Promise<void> {
           } else {
             const imageData = await extractImageData(sock, msg);
             if (!imageData) {
-              await sendFailureReaction(sock, msg);
+              await sendFailureReaction(msg);
               continue;
             }
 
@@ -550,7 +551,7 @@ export async function initializeWhatsApp(): Promise<void> {
           } else {
             const documentData = await extractDocumentData(sock, msg);
             if (!documentData) {
-              await sendFailureReaction(sock, msg);
+              await sendFailureReaction(msg);
               continue;
             }
 
@@ -560,7 +561,7 @@ export async function initializeWhatsApp(): Promise<void> {
                 { mimetype: documentData.mimetype },
                 'Unsupported document type, only PDFs are supported'
               );
-              await sock.sendMessage(msg.key.remoteJid!, {
+              await sendSerialized(msg.key.remoteJid!, {
                 text: 'Sorry, I can only process PDF documents at the moment.',
               });
               continue;
@@ -616,7 +617,7 @@ export async function initializeWhatsApp(): Promise<void> {
 
         // Attempt to send failure reaction
         try {
-          await sendFailureReaction(sock, msg);
+          await sendFailureReaction(msg);
         } catch (reactionError) {
           logger.debug({ reactionError }, 'Failed to send error reaction');
         }

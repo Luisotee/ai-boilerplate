@@ -15,11 +15,17 @@ import type { FastifyInstance } from 'fastify';
 // ---------------------------------------------------------------------------
 
 // Mock the Baileys state service
-vi.mock('../../src/services/baileys.js', () => ({
-  getBaileysSocket: vi.fn(),
-  isBaileysReady: vi.fn(),
-  setBaileysSocket: vi.fn(),
-}));
+// sendSerialized forwards to the mocked socket, so the routes' sendMessage
+// payloads can still be asserted on mockSocket.sendMessage.
+vi.mock('../../src/services/baileys.js', () => {
+  const getBaileysSocket = vi.fn();
+  return {
+    getBaileysSocket,
+    isBaileysReady: vi.fn(),
+    setBaileysSocket: vi.fn(),
+    sendSerialized: vi.fn((...args: unknown[]) => getBaileysSocket().sendMessage(...args)),
+  };
+});
 
 // Mock the JID normalizer — in production it calls sock.onWhatsApp() for
 // phone numbers. In tests we just append the WhatsApp suffix.
@@ -118,10 +124,9 @@ describe('Messaging routes — /whatsapp/*', () => {
       expect(body.success).toBe(true);
       expect(body.message_id).toBeDefined();
       expect(mockSocket.sendMessage).toHaveBeenCalledOnce();
-      expect(mockSocket.sendMessage).toHaveBeenCalledWith(
-        '5511999999999@s.whatsapp.net',
-        { text: 'Hello' }
-      );
+      expect(mockSocket.sendMessage).toHaveBeenCalledWith('5511999999999@s.whatsapp.net', {
+        text: 'Hello',
+      });
     });
 
     it('accepts a JID directly as phoneNumber', async () => {
@@ -136,10 +141,9 @@ describe('Messaging routes — /whatsapp/*', () => {
       });
 
       expect(res.statusCode).toBe(200);
-      expect(mockSocket.sendMessage).toHaveBeenCalledWith(
-        '5511999999999@s.whatsapp.net',
-        { text: 'Hey' }
-      );
+      expect(mockSocket.sendMessage).toHaveBeenCalledWith('5511999999999@s.whatsapp.net', {
+        text: 'Hey',
+      });
     });
 
     it('returns 500 when sendMessage throws a generic error', async () => {
@@ -210,19 +214,16 @@ describe('Messaging routes — /whatsapp/*', () => {
       expect(res.statusCode).toBe(200);
       expect(res.json()).toEqual({ success: true });
       expect(mockSocket.sendMessage).toHaveBeenCalledOnce();
-      expect(mockSocket.sendMessage).toHaveBeenCalledWith(
-        '5511999999999@s.whatsapp.net',
-        {
-          react: {
-            text: '\uD83D\uDC4D',
-            key: {
-              remoteJid: '5511999999999@s.whatsapp.net',
-              id: 'MSG_123',
-              fromMe: false,
-            },
+      expect(mockSocket.sendMessage).toHaveBeenCalledWith('5511999999999@s.whatsapp.net', {
+        react: {
+          text: '\uD83D\uDC4D',
+          key: {
+            remoteJid: '5511999999999@s.whatsapp.net',
+            id: 'MSG_123',
+            fromMe: false,
           },
-        }
-      );
+        },
+      });
     });
 
     it('returns 500 when sendMessage throws', async () => {

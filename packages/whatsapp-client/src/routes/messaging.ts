@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
-import { getBaileysSocket, isBaileysReady } from '../services/baileys.js';
+import { getBaileysSocket, isBaileysReady, sendSerialized } from '../services/baileys.js';
 import { normalizeJid } from '../utils/jid.js';
 import {
   SendTextSchema,
@@ -37,9 +37,8 @@ export async function registerMessagingRoutes(app: FastifyInstance) {
       try {
         const normalizedJid = await normalizeJid(request.body.phoneNumber);
         const { text } = request.body;
-        const sock = getBaileysSocket();
 
-        const result = await sock.sendMessage(normalizedJid, { text });
+        const result = await sendSerialized(normalizedJid, { text });
         return { success: true, message_id: result?.key.id ?? undefined };
       } catch (err) {
         const error = err as Error;
@@ -78,9 +77,8 @@ export async function registerMessagingRoutes(app: FastifyInstance) {
       try {
         const normalizedJid = await normalizeJid(request.body.phoneNumber);
         const { message_id, emoji } = request.body;
-        const sock = getBaileysSocket();
 
-        await sock.sendMessage(normalizedJid, {
+        await sendSerialized(normalizedJid, {
           react: {
             text: emoji,
             key: { remoteJid: normalizedJid, id: message_id, fromMe: false },

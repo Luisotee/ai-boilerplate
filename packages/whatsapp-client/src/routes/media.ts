@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import type { MultipartFile } from '@fastify/multipart';
-import { getBaileysSocket, isBaileysReady } from '../services/baileys.js';
+import { isBaileysReady, sendSerialized } from '../services/baileys.js';
 import { normalizeJid } from '../utils/jid.js';
 import { validateMediaFile } from '../utils/file-validation.js';
 import { buildVCard, validateContactInfo } from '../utils/vcard-builder.js';
@@ -133,10 +133,9 @@ export async function registerMediaRoutes(app: FastifyInstance) {
         }
 
         const normalizedJid = await normalizeJid(phoneNumber.value);
-        const sock = getBaileysSocket();
 
         app.log.debug({ normalizedJid }, 'Sending message via Baileys');
-        const result = await sock.sendMessage(normalizedJid, {
+        const result = await sendSerialized(normalizedJid, {
           image: fileBuffer,
           caption: caption?.value,
           mimetype: mimetype,
@@ -318,10 +317,9 @@ export async function registerMediaRoutes(app: FastifyInstance) {
         }
 
         const normalizedJid = await normalizeJid(phoneNumber.value);
-        const sock = getBaileysSocket();
 
         app.log.debug({ normalizedJid }, 'Sending message via Baileys');
-        const result = await sock.sendMessage(normalizedJid, {
+        const result = await sendSerialized(normalizedJid, {
           document: fileBuffer,
           mimetype: mimetype,
           fileName: fileName?.value || file.filename,
@@ -500,10 +498,9 @@ export async function registerMediaRoutes(app: FastifyInstance) {
         }
 
         const normalizedJid = await normalizeJid(phoneNumber.value);
-        const sock = getBaileysSocket();
 
         app.log.debug({ normalizedJid, ptt }, 'Sending message via Baileys');
-        const result = await sock.sendMessage(normalizedJid, {
+        const result = await sendSerialized(normalizedJid, {
           audio: fileBuffer,
           mimetype: mimetype,
           ptt, // Push-to-talk (voice note)
@@ -683,10 +680,9 @@ export async function registerMediaRoutes(app: FastifyInstance) {
         }
 
         const normalizedJid = await normalizeJid(phoneNumber.value);
-        const sock = getBaileysSocket();
 
         app.log.debug({ normalizedJid, gifPlayback }, 'Sending message via Baileys');
-        const result = await sock.sendMessage(normalizedJid, {
+        const result = await sendSerialized(normalizedJid, {
           video: fileBuffer,
           caption: caption?.value,
           mimetype: mimetype,
@@ -768,9 +764,8 @@ export async function registerMediaRoutes(app: FastifyInstance) {
       try {
         const { phoneNumber, latitude, longitude, name, address } = request.body;
         const normalizedJid = await normalizeJid(phoneNumber);
-        const sock = getBaileysSocket();
 
-        const result = await sock.sendMessage(normalizedJid, {
+        const result = await sendSerialized(normalizedJid, {
           location: {
             degreesLatitude: latitude,
             degreesLongitude: longitude,
@@ -837,9 +832,8 @@ export async function registerMediaRoutes(app: FastifyInstance) {
         });
 
         const normalizedJid = await normalizeJid(phoneNumber);
-        const sock = getBaileysSocket();
 
-        const result = await sock.sendMessage(normalizedJid, {
+        const result = await sendSerialized(normalizedJid, {
           contacts: {
             displayName: contactName,
             contacts: [{ vcard }],

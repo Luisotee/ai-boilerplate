@@ -12,11 +12,17 @@ import type { FastifyInstance } from 'fastify';
 // Mocks
 // ---------------------------------------------------------------------------
 
-vi.mock('../../src/services/baileys.js', () => ({
-  getBaileysSocket: vi.fn(),
-  isBaileysReady: vi.fn(),
-  setBaileysSocket: vi.fn(),
-}));
+// sendSerialized forwards to the mocked socket, so the routes' sendMessage
+// payloads can still be asserted on mockSocket.sendMessage.
+vi.mock('../../src/services/baileys.js', () => {
+  const getBaileysSocket = vi.fn();
+  return {
+    getBaileysSocket,
+    isBaileysReady: vi.fn(),
+    setBaileysSocket: vi.fn(),
+    sendSerialized: vi.fn((...args: unknown[]) => getBaileysSocket().sendMessage(...args)),
+  };
+});
 
 vi.mock('../../src/utils/jid.js', async (importOriginal) => {
   const original = await importOriginal<typeof import('../../src/utils/jid.js')>();
@@ -122,17 +128,14 @@ describe('Operations routes — /whatsapp/*', () => {
       expect(res.statusCode).toBe(200);
       expect(res.json()).toEqual({ success: true });
       expect(mockSocket.sendMessage).toHaveBeenCalledOnce();
-      expect(mockSocket.sendMessage).toHaveBeenCalledWith(
-        '5511999999999@s.whatsapp.net',
-        {
-          text: 'Corrected text',
-          edit: {
-            remoteJid: '5511999999999@s.whatsapp.net',
-            id: 'MSG_001',
-            fromMe: true,
-          },
-        }
-      );
+      expect(mockSocket.sendMessage).toHaveBeenCalledWith('5511999999999@s.whatsapp.net', {
+        text: 'Corrected text',
+        edit: {
+          remoteJid: '5511999999999@s.whatsapp.net',
+          id: 'MSG_001',
+          fromMe: true,
+        },
+      });
     });
 
     it('returns 500 when sendMessage throws a generic error', async () => {
@@ -227,16 +230,13 @@ describe('Operations routes — /whatsapp/*', () => {
       expect(res.statusCode).toBe(200);
       expect(res.json()).toEqual({ success: true });
       expect(mockSocket.sendMessage).toHaveBeenCalledOnce();
-      expect(mockSocket.sendMessage).toHaveBeenCalledWith(
-        '5511999999999@s.whatsapp.net',
-        {
-          delete: {
-            remoteJid: '5511999999999@s.whatsapp.net',
-            id: 'MSG_001',
-            fromMe: true,
-          },
-        }
-      );
+      expect(mockSocket.sendMessage).toHaveBeenCalledWith('5511999999999@s.whatsapp.net', {
+        delete: {
+          remoteJid: '5511999999999@s.whatsapp.net',
+          id: 'MSG_001',
+          fromMe: true,
+        },
+      });
     });
 
     it('returns 500 when sendMessage throws a generic error', async () => {

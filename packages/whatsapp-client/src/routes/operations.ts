@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
-import { getBaileysSocket, isBaileysReady } from '../services/baileys.js';
+import { isBaileysReady, sendSerialized } from '../services/baileys.js';
 import { normalizeJid } from '../utils/jid.js';
 import {
   EditMessageSchema,
@@ -35,7 +35,6 @@ export async function registerOperationsRoutes(app: FastifyInstance) {
       try {
         const normalizedJid = await normalizeJid(request.body.phoneNumber);
         const { message_id, new_text } = request.body;
-        const sock = getBaileysSocket();
 
         // Create message key for the message to edit
         const messageKey = {
@@ -45,7 +44,7 @@ export async function registerOperationsRoutes(app: FastifyInstance) {
         };
 
         // Send edit message
-        await sock.sendMessage(normalizedJid, {
+        await sendSerialized(normalizedJid, {
           text: new_text,
           edit: messageKey,
         });
@@ -96,7 +95,6 @@ export async function registerOperationsRoutes(app: FastifyInstance) {
       try {
         const normalizedJid = await normalizeJid(request.body.phoneNumber);
         const { message_id } = request.body;
-        const sock = getBaileysSocket();
 
         // Create message key for the message to delete
         const messageKey = {
@@ -106,7 +104,7 @@ export async function registerOperationsRoutes(app: FastifyInstance) {
         };
 
         // Send delete message
-        await sock.sendMessage(normalizedJid, {
+        await sendSerialized(normalizedJid, {
           delete: messageKey,
         });
 

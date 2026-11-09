@@ -6,6 +6,7 @@ import { stripDeviceSuffix, isGroupChat, resolveParticipantJid } from '../utils/
 import { getPushName, getSenderName } from '../utils/message.js';
 import { getGroupSubject } from '../services/group-cache.js';
 import { sendFailureReaction } from '../utils/reactions.js';
+import { getLiveSocket, sendSerialized } from '../services/baileys.js';
 import { splitResponseIntoBursts, stripSplitDelimiters, sleep } from '../utils/message-split.js';
 
 interface ImageData {
@@ -85,8 +86,12 @@ export async function handleTextMessage(
     'Received message'
   );
 
+  // Presence updates go to the socket that is live now: this handler can run
+  // for minutes (AI polling), and a reconnect leaves `sock` dead.
+  const liveSocket = () => getLiveSocket() ?? sock;
+
   // Send typing indicator
-  await sock.sendPresenceUpdate('composing', whatsappJid);
+  await liveSocket().sendPresenceUpdate('composing', whatsappJid);
 
   try {
     const response = await sendMessageToAI(whatsappJid, text, {
@@ -125,7 +130,7 @@ export async function handleTextMessage(
       for (let i = 0; i < chunks.length; i++) {
         if (i > 0) {
           try {
-            await sock.sendPresenceUpdate('composing', whatsappJid);
+            await liveSocket().sendPresenceUpdate('composing', whatsappJid);
           } catch (presenceErr) {
             logger.warn(
               { error: presenceErr, whatsappJid },
@@ -138,7 +143,7 @@ export async function handleTextMessage(
           );
           await sleep(delay);
         }
-        await sock.sendMessage(whatsappJid, { text: chunks[i] });
+        await sendSerialized(whatsappJid, { text: chunks[i] });
         sentCount++;
       }
     } catch (burstErr) {
@@ -160,10 +165,10 @@ export async function handleTextMessage(
       const prefs = await getUserPreferences(whatsappJid);
       if (prefs?.tts_enabled) {
         logger.info({ whatsappJid }, 'TTS enabled, generating voice message');
-        await sock.sendPresenceUpdate('recording', whatsappJid);
+        await liveSocket().sendPresenceUpdate('recording', whatsappJid);
         const audioBuffer = await textToSpeech(stripSplitDelimiters(response), whatsappJid);
         if (audioBuffer) {
-          await sock.sendMessage(whatsappJid, {
+          await sendSerialized(whatsappJid, {
             audio: audioBuffer,
             mimetype: 'audio/ogg; codecs=opus',
             ptt: true, // Voice note
@@ -176,11 +181,11 @@ export async function handleTextMessage(
     }
   } catch (error) {
     logger.error({ error, whatsappJid }, 'Error processing message');
-    await sendFailureReaction(sock, msg);
-    await sock.sendMessage(whatsappJid, {
-      text: 'Sorry, I encountered an error processing your message. Please try again.',
-    });
+    await sendFailureReaction(msg);
+    await sendSerialized(whatsappJid, { text: config.errorReplyText });
   } finally {
-    await sock.sendPresenceUpdate('paused', whatsappJid);
+    await liveSocket()
+      .sendPresenceUpdate('paused', whatsappJid)
+      .catch((err: unknown) => logger.debug({ err, whatsappJid }, 'Failed to clear presence'));
   }
 }
