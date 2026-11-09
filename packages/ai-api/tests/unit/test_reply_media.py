@@ -55,6 +55,11 @@ def test_ignores_code_fence_and_inline_code():
     assert urls(text) == ["https://x.example.com/real.png"]
 
 
+def test_caption_markdown_converted():
+    (d,) = extract_image_directives("![**Fire** map](https://x.example.com/a.png)")
+    assert d.image.caption == "*Fire* map"
+
+
 def test_caption_whitespace_collapsed_and_truncated():
     long = "word " * 400
     (d,) = extract_image_directives(f"![{long}](https://x.example.com/a.png)")

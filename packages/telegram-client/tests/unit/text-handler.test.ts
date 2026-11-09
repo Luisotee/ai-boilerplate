@@ -14,12 +14,15 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('../../src/api-client.js', () => ({
   sendMessageToAI: vi.fn(),
+  fetchJobMedia: vi.fn(),
   getUserPreferences: vi.fn(),
   textToSpeech: vi.fn(),
 }));
 
 vi.mock('../../src/services/telegram-api.js', () => ({
   sendReaction: vi.fn().mockResolvedValue(undefined),
+  sendImage: vi.fn().mockResolvedValue(77),
+  sendText: vi.fn().mockResolvedValue(78),
   isParseEntitiesError: (err: unknown) =>
     err instanceof Error && /can't parse entities/i.test(err.message),
 }));
@@ -251,5 +254,72 @@ describe('handleTextMessage', () => {
     expect(ctx.replyWithVoice).not.toHaveBeenCalled();
     // Text reply still happens
     expect(ctx.reply).toHaveBeenCalledWith('Text only', expect.anything());
+  });
+});
+
+describe('handleTextMessage — reply images', () => {
+  const media = [
+    { index: 0, caption: 'Fire map', mimetype: 'image/png', url: 'https://m.example.com/a.png' },
+  ];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetUserPreferences.mockResolvedValue({ tts_enabled: false });
+  });
+
+  function setup(response: string) {
+    (apiClient.fetchJobMedia as ReturnType<typeof vi.fn>).mockResolvedValue(
+      Buffer.from('png-bytes')
+    );
+    mockSendMessageToAI.mockImplementationOnce(
+      async (_jid: string, _text: string, options: { onMedia?: (...a: unknown[]) => void }) => {
+        options.onMedia?.('job-9', media);
+        return response;
+      }
+    );
+  }
+
+  it('replies with the text, then sends the photo with its caption', async () => {
+    setup('Here is the map.');
+    const ctx = makeCtx();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await handleTextMessage(ctx as any, 'map?');
+
+    expect(ctx.reply).toHaveBeenCalledTimes(1);
+    expect(telegramApi.sendImage).toHaveBeenCalledWith(
+      123,
+      Buffer.from('png-bytes'),
+      'image.png',
+      'Fire map'
+    );
+  });
+
+  it('sends no empty text and no TTS for an images-only reply', async () => {
+    setup('');
+    mockGetUserPreferences.mockResolvedValue({ tts_enabled: true });
+    const ctx = makeCtx();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await handleTextMessage(ctx as any, 'map?');
+
+    expect(ctx.reply).not.toHaveBeenCalled();
+    expect(mockTextToSpeech).not.toHaveBeenCalled();
+    expect(telegramApi.sendImage).toHaveBeenCalledTimes(1);
+    expect(mockSendReaction).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the link as text when sendPhoto fails', async () => {
+    setup('Map:');
+    (telegramApi.sendImage as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error('Bad Request: IMAGE_PROCESS_FAILED')
+    );
+    const ctx = makeCtx();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await handleTextMessage(ctx as any, 'map?');
+
+    expect(telegramApi.sendText).toHaveBeenCalledWith(123, 'Fire map: https://m.example.com/a.png');
+    expect(mockSendReaction).not.toHaveBeenCalled();
   });
 });

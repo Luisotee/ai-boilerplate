@@ -26,7 +26,7 @@ from dataclasses import dataclass
 
 from redis.asyncio import Redis
 
-from .formatting import _CODE_FENCE_RE, _INLINE_CODE_RE
+from .formatting import _CODE_FENCE_RE, _INLINE_CODE_RE, markdown_to_whatsapp
 from .logger import logger
 from .queue.utils import MAX_JOB_MEDIA, save_job_media
 from .safe_fetch import FetchedImage, ImageFetchError, fetch_public_image
@@ -65,7 +65,8 @@ class ReplyMedia:
 
 
 def _clean_caption(caption: str) -> str:
-    caption = " ".join(caption.split())
+    # Captions are delivered like reply text, so they get the same conversion.
+    caption = markdown_to_whatsapp(" ".join(caption.split()))
     return caption[:MAX_CAPTION_CHARS]
 
 

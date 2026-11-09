@@ -1,6 +1,7 @@
 import type { WASocket, WAMessage } from '@whiskeysockets/baileys';
 import { logger } from '../logger.js';
-import { getUserPreferences, sendMessageToAI, textToSpeech } from '../api-client.js';
+import { getUserPreferences, sendMessageToAI, textToSpeech, type JobMedia } from '../api-client.js';
+import { sendReplyMedia } from '../utils/reply-media.js';
 import { config } from '../config.js';
 import { stripDeviceSuffix, isGroupChat, resolveParticipantJid } from '../utils/jid.js';
 import { getPushName, getSenderName } from '../utils/message.js';
@@ -106,7 +107,11 @@ export async function handleTextMessage(
   await setPresence('composing');
 
   try {
+    let replyMedia: { jobId: string; media: JobMedia[] } | undefined;
     const response = await sendMessageToAI(whatsappJid, text, {
+      onMedia: (jobId, media) => {
+        replyMedia = { jobId, media };
+      },
       conversationType,
       senderJid,
       senderName: getSenderName(msg),
@@ -132,10 +137,14 @@ export async function handleTextMessage(
 
     if (response === null) return; // Silently blocked by API whitelist
 
-    const chunks = splitResponseIntoBursts(response, {
-      disabled: !config.messageSplit.enabled || conversationType === 'group',
-      maxChunks: config.messageSplit.maxChunks,
-    });
+    // An images-only reply has no text: send no empty message.
+    const chunks =
+      replyMedia && !response.trim()
+        ? []
+        : splitResponseIntoBursts(response, {
+            disabled: !config.messageSplit.enabled || conversationType === 'group',
+            maxChunks: config.messageSplit.maxChunks,
+          });
 
     let sentCount = 0;
     try {
@@ -190,6 +199,15 @@ export async function handleTextMessage(
           logger.warn({ whatsappJid }, 'TTS failed, text-only sent');
         }
       }
+    }
+
+    // Images last, through the per-chat send queue. Never throws.
+    if (replyMedia) {
+      await sendReplyMedia(replyMedia.jobId, replyMedia.media, {
+        image: (buffer, item) =>
+          sendSerialized(whatsappJid, { image: buffer, caption: item.caption || undefined }),
+        text: (fallback) => sendSerialized(whatsappJid, { text: fallback }),
+      });
     }
   } catch (error) {
     logger.error({ error, whatsappJid }, 'Error processing message');
