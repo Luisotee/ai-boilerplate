@@ -299,6 +299,30 @@ class BugReport(Base):
     resolution_note = Column(Text, nullable=True)
 
 
+class ApiKey(Base):
+    """A per-user key for the OpenAI-compatible ``/v1`` API (``services/api_keys.py``).
+
+    Only the sha256 of the key is stored. The key belongs to a ``users`` row: a
+    ``web:<id>`` row of its own, or a WhatsApp/Telegram row it was attached to
+    (``--jid``) or linked to with ``/link``. Never the internal ``AI_API_KEY``.
+    """
+
+    __tablename__ = "api_keys"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    # CASCADE: a deleted user row takes its keys with it. /link merges move the
+    # keys to the kept row first (services/api_keys.move_api_keys).
+    user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name = Column(String(100), nullable=False)
+    key_prefix = Column(String(16), nullable=False)  # shown in listings, never enough to use
+    key_hash = Column(String(64), nullable=False, unique=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_used_at = Column(DateTime, nullable=True)
+    revoked_at = Column(DateTime, nullable=True)
+
+
 def init_db():
     """Initialize database tables"""
     logger.info("Initializing database...")

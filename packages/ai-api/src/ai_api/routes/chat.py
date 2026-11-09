@@ -1,5 +1,6 @@
 import base64
 import functools
+import ipaddress
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -36,14 +37,9 @@ from ..schemas import (
     SaveMessageRequest,
 )
 from ..services.autolink import try_autolink
-from ..services.link import (
-    consume_link_code,
-    generate_link_code,
-    is_already_linked,
-    platform_for_jid,
-    unlink,
-)
+from ..services.link import link_command_reply
 from ..streams.manager import add_message_to_stream
+from ..surfaces import is_app_jid, is_cli_jid
 from ..whatsapp import create_whatsapp_client
 from ..whitelist import Whitelist, is_whitelisted, parse_whitelist
 
@@ -89,6 +85,9 @@ def _record_client(db: Session, user, client_id: str | None) -> None:
     Only changed columns are written. Best-effort: a failure here must never
     cost the user their reply.
     """
+    if is_app_jid(user.whatsapp_jid):
+        # Web/terminal rows have no chat client; these columns stay baileys|cloud|telegram.
+        return
     client = client_id or "baileys"
     changes: dict[str, object] = {}
     if user.last_client_id != client:
@@ -136,6 +135,27 @@ def _is_whitelisted(whatsapp_jid: str, phone: str | None = None) -> bool:
     if settings.group_gating == "membership" and is_group_jid(whatsapp_jid):
         return True
     return is_whitelisted(_parse_whitelist(raw), whatsapp_jid, phone)
+
+
+def _is_allowed(request: Request, whatsapp_jid: str, phone: str | None = None) -> bool:
+    """`_is_whitelisted`, except for terminal-chat (`cli:`) JIDs.
+
+    A `cli:<name>` chat (``python -m ai_api.scripts.chat``) is allowed only from a
+    loopback peer, or when that exact `cli:<name>` is a whitelist entry. An empty
+    whitelist does NOT admit it from elsewhere. Behind a same-host reverse proxy
+    that sends no X-Forwarded-For every request looks local; AI_API_KEY is still
+    required either way.
+    """
+    if not is_cli_jid(whatsapp_jid):
+        return _is_whitelisted(whatsapp_jid, phone)
+    host = request.client.host if request.client else None
+    try:
+        if host and ipaddress.ip_address(host).is_loopback:
+            return True
+    except ValueError:
+        pass
+    raw = runtime_config.get("whitelist_phones")
+    return bool(raw) and whatsapp_jid in _parse_whitelist(raw).ids
 
 
 @router.post("/chat/link-phone", response_model=CommandResponse, tags=["Chat"])
@@ -202,7 +222,9 @@ async def get_stream_job_status(redis, job_id: str) -> str:
 
 
 @router.post("/chat/save", tags=["Chat"])
-async def save_message_only(request: SaveMessageRequest, db: Session = Depends(get_db)):
+async def save_message_only(
+    request: SaveMessageRequest, http_request: Request, db: Session = Depends(get_db)
+):
     """
     Save a message without generating AI response
 
@@ -219,7 +241,7 @@ async def save_message_only(request: SaveMessageRequest, db: Session = Depends(g
     """
     logger.info(f"Saving message from {request.whatsapp_jid} (no response)")
 
-    if not _is_whitelisted(request.whatsapp_jid, request.phone):
+    if not _is_allowed(http_request, request.whatsapp_jid, request.phone):
         logger.warning(f"Blocked non-whitelisted JID: {request.whatsapp_jid}")
         raise HTTPException(status_code=403, detail="Not authorized")
 
@@ -314,7 +336,7 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
         f"Received request from {chat_request.whatsapp_jid}: {chat_request.message[:50]}... (has_image={has_image})"
     )
 
-    if not _is_whitelisted(chat_request.whatsapp_jid, chat_request.phone):
+    if not _is_allowed(request, chat_request.whatsapp_jid, chat_request.phone):
         logger.warning(f"Blocked non-whitelisted JID: {chat_request.whatsapp_jid}")
         raise HTTPException(status_code=403, detail="Not authorized")
 
@@ -337,59 +359,14 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
         link_command = link_parts[0].lower() if link_parts else ""
 
         if link_command in ("/link", "/unlink"):
-            if chat_request.conversation_type == "group":
-                return CommandResponse(
-                    is_command=True,
-                    response="Linking is only available in private chats.",
-                )
-
-            if link_command == "/unlink":
-                unlink_result = unlink(db, str(user.id))
-                if unlink_result.db_error:
-                    response_text = (
-                        "Sorry, unlinking failed due to a database error. Please try again."
-                    )
-                elif unlink_result.cleared:
-                    response_text = (
-                        "Unlinked. Future messages on the other platform "
-                        "will start a fresh conversation."
-                    )
-                else:
-                    response_text = "No active link to remove."
-                logger.info(f"Command executed for {chat_request.whatsapp_jid}: /unlink")
-                return CommandResponse(is_command=True, response=response_text)
-
-            # /link [code]
-            platform = platform_for_jid(chat_request.whatsapp_jid)
-            async with get_redis_client() as redis:
-                if len(link_parts) >= 2:
-                    code = link_parts[1].strip()
-                    result_link = await consume_link_code(db, redis, code, str(user.id), platform)
-                    response_text = result_link.message or (
-                        "Linked successfully." if result_link.success else "Link failed."
-                    )
-                elif is_already_linked(user):
-                    # Short-circuit: a fully-linked user generating a fresh code
-                    # produces a code that can't be redeemed (both JIDs resolve
-                    # to the same row, so consume_link_code hits ERROR_SAME_USER
-                    # with a misleading message). Tell them directly instead.
-                    response_text = (
-                        "Your accounts are already linked. "
-                        "Run `/unlink` first if you want to re-link."
-                    )
-                else:
-                    code = await generate_link_code(redis, str(user.id), platform)
-                    other = "Telegram" if platform == "whatsapp" else "WhatsApp"
-                    response_text = (
-                        f"Your link code is `{code}`.\n\n"
-                        f"On {other}, send `/link {code}` within 10 minutes.\n\n"
-                        "Note: any prior conversation history on the other platform will be discarded."
-                    )
-                    if platform == "telegram":
-                        response_text += (
-                            "\n\nTip: on Telegram you can also send `/linkphone` and share "
-                            "your number instead of using a code."
-                        )
+            response_text = await link_command_reply(
+                db,
+                get_redis_client,
+                user,
+                chat_request.whatsapp_jid,
+                chat_request.conversation_type,
+                link_parts,
+            )
             logger.info(f"Command executed for {chat_request.whatsapp_jid}: {link_command}")
             return CommandResponse(is_command=True, response=response_text)
 
@@ -663,7 +640,7 @@ async def chat(request: Request, chat_request: ChatRequest, db: Session = Depend
     """
     logger.info(f"Received chat request from {chat_request.whatsapp_jid}")
 
-    if not _is_whitelisted(chat_request.whatsapp_jid, chat_request.phone):
+    if not _is_allowed(request, chat_request.whatsapp_jid, chat_request.phone):
         logger.warning(f"Blocked non-whitelisted JID: {chat_request.whatsapp_jid}")
         raise HTTPException(status_code=403, detail="Not authorized")
 
