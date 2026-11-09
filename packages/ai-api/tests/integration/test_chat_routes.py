@@ -998,6 +998,40 @@ class TestInboundDedup:
     @patch("ai_api.main.init_db")
     @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
     @patch("ai_api.main.cleanup_expired_documents")
+    async def test_failed_command_releases_the_claim(self, mock_cleanup, mock_redis, mock_init_db):
+        import fakeredis
+
+        fake = fakeredis.FakeAsyncRedis()
+        mock_db = _make_mock_db()
+        with (
+            _patch_whitelist(),
+            patch("ai_api.routes.chat.get_redis_client", _fake_redis_client(fake)),
+            patch("ai_api.routes.chat.get_or_create_user", side_effect=RuntimeError("db down")),
+        ):
+            app = _get_app_with_db_override(mock_db)
+            try:
+                body = {
+                    "whatsapp_jid": TEST_JID,
+                    "message": "/help",
+                    "conversation_type": "private",
+                    "whatsapp_message_id": "WAMID-CMD",
+                }
+                async with AsyncClient(
+                    transport=ASGITransport(app=app, raise_app_exceptions=False),
+                    base_url="http://test",
+                ) as client:
+                    response = await client.post("/chat/enqueue", json=body, headers=AUTH_HEADERS)
+            finally:
+                _cleanup_overrides()
+
+        assert response.status_code == 500
+        from ai_api.services.dedup import dedup_key
+
+        assert await fake.exists(dedup_key(TEST_JID, "WAMID-CMD")) == 0
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
     async def test_redelivered_save_is_dropped(self, mock_cleanup, mock_redis, mock_init_db):
         import fakeredis
 
