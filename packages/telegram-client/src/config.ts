@@ -87,6 +87,14 @@ export const config = {
     maxIterations: parseInt(process.env.POLL_MAX_ITERATIONS || '240', 10),
     maxDurationMs: parseInt(process.env.POLL_MAX_DURATION_MS || '120000', 10),
   },
+  // Album grouping: photos sharing a media_group_id are sent to the AI API
+  // together once none arrived for quietMs (the AI API's CHAT_BURST_QUIET_MS;
+  // 0 = every photo on its own), waiting at most maxWaitMs in total.
+  album: {
+    quietMs: parseInt(process.env.CHAT_BURST_QUIET_MS || '2000', 10),
+    maxWaitMs: 10_000,
+    maxItems: 10,
+  },
   // Telegram Bot API
   telegram: {
     botToken: process.env.TELEGRAM_BOT_TOKEN || '',

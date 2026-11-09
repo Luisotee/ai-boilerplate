@@ -8,7 +8,8 @@ import { bot, type TelegramContext } from './bot.js';
 import { config } from './config.js';
 import { handleTextMessage } from './handlers/text.js';
 import { extractAndTranscribeVoice } from './handlers/voice.js';
-import { extractPhotoData } from './handlers/photo.js';
+import { extractPhotoData, type PhotoExtraction } from './handlers/photo.js';
+import { collectAlbumItem } from './utils/album-buffer.js';
 import { extractDocumentData } from './handlers/document.js';
 import { handleSharedContact, offerPhoneLink } from './handlers/link-prompt.js';
 import { logger } from './logger.js';
@@ -19,6 +20,57 @@ import { documentMarker, imageMarker } from './utils/group-media-marker.js';
 import { isWhitelisted } from './utils/whitelist.js';
 import { decideGroupGating } from './utils/gating.js';
 import { isSenderGroupAdmin } from './services/group-admin.js';
+
+interface AlbumItem {
+  messageId: number;
+  caption: string;
+  photo: Promise<PhotoExtraction>;
+}
+
+/**
+ * One photo of an album. Every photo starts its download at once; the first
+ * one to arrive (the leader) waits for the album to settle, then sends all
+ * photos in one request with the album's caption. The others return.
+ */
+async function handleAlbumPhoto(
+  ctx: TelegramContext,
+  albumId: string,
+  caption: string
+): Promise<void> {
+  const items = await collectAlbumItem<AlbumItem>(
+    `${ctx.chat?.id}:${albumId}`,
+    { messageId: ctx.msg?.message_id ?? 0, caption, photo: extractPhotoData(ctx) },
+    config.album
+  );
+  if (!items) return; // another photo of this album leads it
+
+  ctx.chatAction = 'typing';
+  items.sort((a, b) => a.messageId - b.messageId);
+  const results = await Promise.all(items.map((item) => item.photo));
+  const images = results.flatMap((r) =>
+    r.kind === 'ok' ? [{ data: r.data, mimetype: r.mimetype }] : []
+  );
+  if (images.length < results.length) {
+    logger.warn(
+      { albumId, received: results.length, downloaded: images.length },
+      'Some album photos could not be downloaded'
+    );
+  }
+  if (images.length === 0) {
+    await ctx.reply(
+      results.some((r) => r.kind === 'too-large')
+        ? "Sorry, that image is larger than Telegram's 20 MB bot download limit. Please send a smaller file."
+        : "Sorry, I couldn't download that image. Please try again."
+    );
+    return;
+  }
+
+  const albumCaption = items.find((item) => item.caption)?.caption ?? '';
+  await handleTextMessage(ctx, albumCaption || 'Image received', {
+    senderJid: ctx.from ? chatIdToJid(ctx.from.id) : undefined,
+    images,
+  });
+}
 
 export function registerUpdateHandlers(): void {
   // ---------------- Account linking (phone share) ----------------
@@ -136,6 +188,13 @@ export function registerUpdateHandlers(): void {
         senderJid: ctx.from ? chatIdToJid(ctx.from.id) : undefined,
         saveOnly: true,
       });
+      return;
+    }
+
+    // An album arrives as one update per photo: send it as one request.
+    const albumId = ctx.msg.media_group_id;
+    if (albumId) {
+      await handleAlbumPhoto(ctx, albumId, caption);
       return;
     }
 

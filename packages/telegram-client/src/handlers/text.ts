@@ -32,6 +32,8 @@ interface HandleOptions {
   isGroupAdmin?: boolean;
   saveOnly?: boolean;
   image?: ImageData;
+  /** Album photos, sent in one request (utils/album-buffer.ts). */
+  images?: ImageData[];
   document?: DocumentData;
 }
 
@@ -117,7 +119,7 @@ export async function handleTextMessage(
       from: jid,
       text,
       conversationType,
-      hasImage: !!options.image,
+      hasImage: !!options.image || !!options.images?.length,
       hasDocument: !!options.document,
     },
     'Received message'
@@ -132,6 +134,7 @@ export async function handleTextMessage(
       messageId: String(messageId),
       isGroupAdmin: options.isGroupAdmin,
       image: options.image,
+      images: options.images,
       document: options.document,
     });
 

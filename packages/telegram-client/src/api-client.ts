@@ -44,6 +44,8 @@ interface MessageOptions {
   saveOnly?: boolean;
   messageId?: string;
   image?: ImagePayload;
+  /** Several images sent together (an album): answered in one run. */
+  images?: ImagePayload[];
   document?: DocumentPayload;
   isGroupAdmin?: boolean;
 }
@@ -147,6 +149,10 @@ export async function sendMessageToAI(
   if (image) {
     requestBody.image_data = image.data;
     requestBody.image_mimetype = image.mimetype;
+  }
+
+  if (options.images && options.images.length > 0) {
+    requestBody.images = options.images;
   }
 
   if (document) {
