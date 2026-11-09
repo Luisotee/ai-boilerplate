@@ -54,6 +54,14 @@ def renders_markdown(surface: Surface) -> bool:
     return surface == "web"
 
 
+def stores_markdown(jid: str | None) -> bool:
+    """Whether this chat's history keeps the model's Markdown. Only a web-only
+    ``web:`` user: it is only ever read on the web, and a ``/link`` discards that
+    row and its history, so nothing mixes. Every other chat, including a WhatsApp
+    or Telegram user reached through a key, stores WhatsApp markup."""
+    return _starts(jid, WEB_JID_PREFIX)
+
+
 def delivers_through_chat_client(client_id: str | None, jid: str | None) -> bool:
     """Whether tools that send through a chat client (reactions, messages,
     locations, group posts, later deliveries) may run for this job."""

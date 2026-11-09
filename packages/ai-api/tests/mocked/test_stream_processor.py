@@ -389,7 +389,7 @@ class TestMarkdownSanitising:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "jid,client_id",
-        [("web:abc", "web"), ("5511999999999@s.whatsapp.net", "web")],  # web-only / linked
+        [("5511999999999@s.whatsapp.net", "web")],  # a key on a WhatsApp user
     )
     async def test_web_surface_gets_markdown_but_history_is_converted(self, jid, client_id):
         _result, mock_save_chunk, _meta, mock_save_message, _wa = await _run_processor(
@@ -403,6 +403,16 @@ class TestMarkdownSanitising:
             "## Plan\n**Step one**: read [the docs](https://example.com/docs)\n\nDone?"
         )
         assert mock_save_message.call_args.args[3] == self.WHATSAPP
+
+    @pytest.mark.asyncio
+    async def test_web_only_user_keeps_markdown_in_history(self):
+        _result, mock_save_chunk, _meta, mock_save_message, _wa = await _run_processor(
+            _make_streaming_agent([self.MARKDOWN]),
+            whatsapp_jid="web:abc",
+            client_id="web",
+            whatsapp_message_id=None,
+        )
+        assert mock_save_message.call_args.args[3] == self.MARKDOWN
 
     @pytest.mark.asyncio
     async def test_terminal_chat_gets_whatsapp_markup(self):

@@ -416,3 +416,123 @@ def test_rate_limit_key_is_per_app_key():
     request = MagicMock()
     request.state.app_key_id = "k1"
     assert _rate_limit_key(request) == "v1:k1"
+
+
+# --- Round-2 review fixes -------------------------------------------------------------
+
+
+class TestSessionReleasedBeforeWaiting:
+    """The wait lasts up to 120 s; the request's DB connection must not be held
+    idle in transaction for it (it would drain the API's pool)."""
+
+    @pytest.mark.parametrize("stream", [False, True])
+    @patch("ai_api.main.init_db")
+    async def test_connection_is_checked_in_before_polling(self, _init, stream, authed, no_redis):
+        from sqlalchemy import text
+        from sqlalchemy.engine.create import create_engine  # conftest patches the top-level name
+        from sqlalchemy.orm import Session
+        from sqlalchemy.pool import QueuePool
+
+        from ai_api.database import get_db
+        from ai_api.main import app
+
+        engine = create_engine("sqlite://", poolclass=QueuePool)
+        db = Session(bind=engine)
+        seen = []
+
+        async def enqueue(session, *_a, **_k):
+            session.execute(text("select 1"))  # like save_message + reading user.id
+            assert session.in_transaction()
+            return "job-1"
+
+        async def poll(_redis, _job):
+            seen.append((db.in_transaction(), engine.pool.checkedout()))
+            return "complete", "ok"
+
+        app.dependency_overrides[get_db] = lambda: (yield db)
+        try:
+            with (
+                patch(f"{MOD}.enqueue_text_job", side_effect=enqueue),
+                patch(f"{MOD}._poll_once", side_effect=poll),
+            ):
+                async with _client(app) as c:
+                    r = await c.post(
+                        "/v1/chat/completions", json=_body(USER_HI, stream=stream), headers=BEARER
+                    )
+        finally:
+            app.dependency_overrides.clear()
+        assert r.status_code == 200
+        assert seen and all(state == (False, 0) for state in seen)
+
+
+class TestAuthFailureThrottle:
+    @patch("ai_api.main.init_db")
+    async def test_bad_keys_are_throttled_per_ip(self, _init, app):
+        from limits import parse
+        from limits.storage import MemoryStorage
+        from limits.strategies import FixedWindowRateLimiter
+
+        backend = FixedWindowRateLimiter(MemoryStorage())
+        with (
+            patch(f"{MOD}._auth_limiter", return_value=backend),
+            patch(f"{MOD}.AUTH_FAILURE_LIMIT", parse("2/minute")),
+            patch(f"{MOD}.authenticate", return_value=None) as auth,
+        ):
+            async with _client(app) as c:
+                codes = [(await c.get("/v1/models", headers=BEARER)).status_code for _ in range(4)]
+        assert codes == [401, 401, 429, 429]
+        # A throttled request never reaches the key lookup.
+        assert auth.call_count == 2
+
+    @patch("ai_api.main.init_db")
+    async def test_valid_keys_do_not_count(self, _init, app, authed):
+        from limits import parse
+        from limits.storage import MemoryStorage
+        from limits.strategies import FixedWindowRateLimiter
+
+        backend = FixedWindowRateLimiter(MemoryStorage())
+        with (
+            patch(f"{MOD}._auth_limiter", return_value=backend),
+            patch(f"{MOD}.AUTH_FAILURE_LIMIT", parse("1/minute")),
+        ):
+            async with _client(app) as c:
+                codes = [(await c.get("/v1/models", headers=BEARER)).status_code for _ in range(3)]
+        assert codes == [200, 200, 200]
+
+    def test_storage_error_fails_open(self):
+        from ai_api.routes import openai_compat
+
+        broken = MagicMock()
+        broken.test.side_effect = ConnectionError("redis down")
+        with patch(f"{MOD}._auth_limiter", return_value=broken):
+            assert openai_compat._auth_throttled("1.2.3.4", hit=False) is False
+
+
+@patch("ai_api.main.init_db")
+async def test_unlink_is_refused_on_the_web(_init, app, authed):
+    with patch(f"{MOD}.link_command_reply", new_callable=AsyncMock) as lk:
+        async with _client(app) as c:
+            r = await c.post(
+                "/v1/chat/completions",
+                json=_body({"role": "user", "content": "/unlink"}),
+                headers=BEARER,
+            )
+    assert r.status_code == 200
+    assert "revoke" in r.json()["choices"][0]["message"]["content"]
+    lk.assert_not_awaited()
+
+
+@pytest.mark.parametrize("role", ["User", "USER"])
+@patch("ai_api.main.init_db")
+async def test_user_role_is_case_insensitive(_init, role, app, authed, no_redis):
+    with (
+        patch(f"{MOD}.enqueue_text_job", new_callable=AsyncMock, return_value="job-1"),
+        patch(f"{MOD}._poll_once", new_callable=AsyncMock, return_value=("complete", "ok")),
+    ):
+        async with _client(app) as c:
+            r = await c.post(
+                "/v1/chat/completions",
+                json=_body({"role": role, "content": "hi"}),
+                headers=BEARER,
+            )
+    assert r.status_code == 200

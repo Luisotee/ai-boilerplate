@@ -8,6 +8,7 @@ from ai_api.surfaces import (
     is_app_jid,
     is_cli_jid,
     renders_markdown,
+    stores_markdown,
     surface_of,
 )
 
@@ -40,6 +41,13 @@ def test_jid_predicates():
     assert is_cli_jid("cli:x") and not is_cli_jid("web:x")
 
 
+def test_only_web_only_users_store_markdown():
+    assert stores_markdown("web:abc")
+    assert not stores_markdown("cli:luis")
+    assert not stores_markdown("5511@s.whatsapp.net")  # also when reached through a key
+    assert not stores_markdown(None)
+
+
 def test_chat_client_delivery():
     assert delivers_through_chat_client(None, "5511@s.whatsapp.net")
     assert not delivers_through_chat_client("web", "5511@s.whatsapp.net")
@@ -53,6 +61,21 @@ class TestStripSplitDelimiters:
     def test_leaves_fenced_code_alone(self):
         text = "Config:\n```yaml\n---\nkey: 1\n```\nDone"
         assert strip_split_delimiters(text) == text
+
+    def test_text_without_delimiters_is_unchanged(self):
+        # PEP 8's two blank lines and a leading indented block must survive.
+        code = "```python\nimport os\n\n\ndef f():\n    pass\n```"
+        assert strip_split_delimiters(code) == code
+        assert strip_split_delimiters("    indented\n\n\nx") == "    indented\n\n\nx"
+
+    def test_blank_runs_inside_fences_survive_a_delimiter_elsewhere(self):
+        text = "Intro\n---\n\n```python\nimport os\n\n\ndef f():\n    pass\n```"
+        assert strip_split_delimiters(text) == (
+            "Intro\n\n```python\nimport os\n\n\ndef f():\n    pass\n```"
+        )
+
+    def test_trims_only_newlines(self):
+        assert strip_split_delimiters("---\n    code\n---") == "    code"
 
     def test_only_exact_delimiter_lines(self):
         # Same rule as the TS clients' /^---\s*$/: indented or longer rules stay.

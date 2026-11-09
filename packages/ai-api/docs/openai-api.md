@@ -34,17 +34,20 @@ docker compose exec api python -m ai_api.scripts.api_keys revoke sk-AbCdEfG   # 
 
 - Open WebUI, LibreChat and Chatbox resend the whole transcript every turn: harmless, the tail is read.
 - *Regenerate* or *edit and resend* sends the last user message again, so the server history gets that turn twice. Branches in the client don't fork the server history.
+- A `/link` merge while a web reply is still running: the worker's save recreates an empty `web:` row (no key, no route) holding that last turn. Harmless and rare (the code must be redeemed during a pending reply); the same race exists for WhatsApp↔Telegram merges.
 - Every chat in the app shares one server conversation per key: it is one person's memory, the same one WhatsApp uses once linked.
 
-**Slash commands** (`/help`, `/settings`, `/memories`, `/clean`, `/link`, …) run as on `/chat/enqueue` and come back as the reply.
+**Slash commands** (`/help`, `/settings`, `/memories`, `/clean`, `/link`, …) run as on `/chat/enqueue` and come back as the reply. `/unlink` is refused here: on a key attached to a WhatsApp user it would cut the WhatsApp↔Telegram link, not detach the app (revoke the key for that).
 
-**Replies** keep the model's Markdown (`surfaces.py`: `client_id="web"`), minus the `---` burst lines, which would otherwise split a WhatsApp reply into several messages. The formatting guidance asks the model for Markdown. History still stores the WhatsApp-markup version, so it stays uniform for a user linked across surfaces. Tools that deliver through a chat client (WhatsApp reaction/message/location/contact, shared-group tools) are hidden; so is the broadcast-subscription tool for a web-only user, who has no broadcast route.
+**Replies** keep the model's Markdown (`surfaces.py`: `client_id="web"`), minus the `---` burst lines, which would otherwise split a WhatsApp reply into several messages. The formatting guidance asks the model for Markdown. History stores the WhatsApp-markup version, so it stays uniform for a user linked across surfaces; only a web-only `web:` user keeps Markdown in history (`surfaces.stores_markdown`), since a `/link` discards that row and its history. Tools that deliver through a chat client (WhatsApp reaction/message/location/contact, shared-group tools) are hidden; so is the broadcast-subscription tool for a web-only user, who has no broadcast route.
 
 **Non-streaming**: a `chat.completion` with `finish_reason: "stop"` and zero `usage` (token cost lives in Logfire). The route polls the job every 500 ms for up to 120 s, like the chat clients: a failed job is a 502, a timeout a 504 (the job still finishes and its answer lands in history).
 
 **`stream: true`**: `text/event-stream` with a role delta at once, `: ping` comments every 15 s while the worker runs, the reply as one content delta (the worker publishes the reply in one piece), a `finish_reason: "stop"` chunk, a usage chunk if `stream_options.include_usage`, then `data: [DONE]`. A failure or timeout is an `{"error": …}` event before `[DONE]`.
 
-**Rate limits** are per key, not per IP (one Open WebUI server proxies all its users from one address): `RATE_LIMIT_EXPENSIVE`/min for completions, `RATE_LIMIT_GLOBAL`/min for models.
+**Rate limits** are per key, not per IP (one Open WebUI server proxies all its users from one address): `RATE_LIMIT_EXPENSIVE`/min for completions, `RATE_LIMIT_GLOBAL`/min for models. Those run after auth, and a route with its own limit skips the middleware's per-IP default, so failed key checks get their own limit: `RATE_LIMIT_GLOBAL`/min per IP, then 429 before the key lookup (valid keys don't count).
+
+**DB connection**: the route closes its session once the turn is saved and queued, before the wait (up to 120 s), so waiting chats never hold pooled connections.
 
 ## Client setup
 

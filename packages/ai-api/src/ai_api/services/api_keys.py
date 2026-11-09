@@ -58,11 +58,17 @@ def _now() -> datetime:
     return datetime.utcnow()
 
 
+#: ``ApiKey.name`` is ``String(100)``; longer would fail on commit with a DataError.
+MAX_NAME_CHARS = 100
+
+
 def create_key(db: Session, name: str, jid: str | None = None) -> IssuedKey:
     """Issue a key. Raises ``ValueError`` with a user-facing reason on bad input."""
     name = name.strip()
     if not name:
         raise ValueError("name is required")
+    if len(name) > MAX_NAME_CHARS:
+        raise ValueError(f"name is too long (max {MAX_NAME_CHARS} characters)")
     if jid is None:
         user = User(
             whatsapp_jid=f"{WEB_JID_PREFIX}{uuid.uuid4().hex}",
@@ -123,6 +129,8 @@ def authenticate(db: Session, key: str | None) -> tuple[ApiKey, User] | None:
 
 def list_keys(db: Session) -> list[tuple[ApiKey, User | None]]:
     rows = db.query(ApiKey).order_by(ApiKey.created_at).all()
+    if not rows:
+        return []
     users = {u.id: u for u in db.query(User).filter(User.id.in_([r.user_id for r in rows])).all()}
     return [(r, users.get(r.user_id)) for r in rows]
 

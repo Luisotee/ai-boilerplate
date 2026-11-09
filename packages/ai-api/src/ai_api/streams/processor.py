@@ -16,7 +16,7 @@ from ..logger import logger
 from ..queue.connection import get_redis_client
 from ..queue.utils import delete_job_image, get_job_image, save_job_chunk, set_job_metadata
 from ..services.bug_reports import record_auto_report
-from ..surfaces import renders_markdown, surface_of
+from ..surfaces import renders_markdown, stores_markdown, surface_of
 from ..whatsapp import WhatsAppClient, create_whatsapp_client
 from .manager import enqueue_pdf_processing
 
@@ -302,12 +302,15 @@ async def process_chat_job_direct(
             # replayed as history and reinforce the habit. `---` burst lines are
             # left untouched, so the clients still split on them.
             # The web surface (/v1) renders Markdown, so it gets the reply as
-            # written (surfaces.py); history always gets the converted text, so
-            # it stays uniform for a user linked across WhatsApp and the web.
+            # written (surfaces.py). History gets the converted text, so it stays
+            # uniform for a user linked across WhatsApp and the web; only a
+            # web-only `web:` user keeps Markdown (`stores_markdown`), or its
+            # replayed history would teach the model WhatsApp's `*bold*`.
             delivered = render_reply(
                 full_response, renders_markdown(surface_of(client_id, whatsapp_jid))
             )
-            full_response = markdown_to_whatsapp(full_response)
+            if not stores_markdown(whatsapp_jid):
+                full_response = markdown_to_whatsapp(full_response)
 
             # Save complete response as single chunk
             await save_job_chunk(redis, job_id, 0, delivered)
@@ -377,7 +380,12 @@ async def process_chat_job_direct(
                         "assistant",
                         # Converted here too: an unexpected error can skip the
                         # happy-path conversion, and this row is replayed as history.
-                        f"[Partial - Error] {markdown_to_whatsapp(full_response)}",
+                        "[Partial - Error] "
+                        + (
+                            full_response
+                            if stores_markdown(whatsapp_jid)
+                            else markdown_to_whatsapp(full_response)
+                        ),
                         conversation_type,
                         embedding=None,
                     )

@@ -14,6 +14,7 @@ from ai_api.services.api_keys import (
     create_key,
     generate_key,
     hash_key,
+    list_keys,
     move_api_keys,
     revoke_key,
 )
@@ -74,6 +75,19 @@ class TestCreateKey:
     def test_empty_name(self):
         with pytest.raises(ValueError, match="name"):
             create_key(MagicMock(), "  ")
+
+    def test_name_longer_than_the_column(self):
+        db = MagicMock()
+        create_key(db, "x" * 100)  # the limit itself is fine
+        with pytest.raises(ValueError, match="too long"):
+            create_key(MagicMock(), "x" * 101)
+
+
+def test_list_keys_without_rows_skips_the_user_query():
+    db = MagicMock()
+    db.query.return_value.order_by.return_value.all.return_value = []
+    assert list_keys(db) == []
+    db.query.assert_called_once_with(ApiKey)
 
 
 class TestAuthenticate:

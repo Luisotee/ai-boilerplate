@@ -3,7 +3,7 @@
 Detail behind the Markdown rule in the root `CLAUDE.md` / `AGENTS.md`. Read it before changing `formatting.py`, the `formatting_guidance` hook, `DEFAULT_SYSTEM_PROMPT` or the Telegram formatter.
 
 Models drift into Markdown (`**bold**`, `[label](url)`, `#` headings) despite the prompt, and WhatsApp renders it literally. `formatting.markdown_to_whatsapp` (pure, idempotent, never touches code spans or URLs, leaves `---` burst lines byte-for-byte) converts every model-authored text:
-- in `streams/processor.py` before delivery/embedding/save, and on the `[Partial - Error]` history row (saved Markdown would be replayed as history and reinforce the habit);
+- in `streams/processor.py` before delivery/embedding/save, and on the `[Partial - Error]` history row (saved Markdown would be replayed as history and reinforce the habit). Exceptions for the `/v1` web surface (`surfaces.py`): the delivered reply keeps its Markdown, and a web-only `web:` user's history keeps it too (`docs/openai-api.md`);
 - in the sync `/chat` route;
 - in the `send_whatsapp_message` tool.
 

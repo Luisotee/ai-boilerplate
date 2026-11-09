@@ -14,7 +14,8 @@ it as a ``chat.completion`` (or SSE ``chat.completion.chunk`` events with
 - **One message per request**: only the last message is used and it must be a
   user message. The server keeps the history (shared with WhatsApp/Telegram once
   the key's user is linked with ``/link``), so a client resending the whole
-  transcript is harmless, and its system prompt is ignored. Client background
+  transcript is harmless, and its system prompt is ignored. *Regenerate* or
+  *edit and resend* does resend the last user turn, which is saved again. Client background
   chores (Open WebUI's ``### Task:`` titles/tags/follow-ups, LibreChat's
   ``system``-role title request) are refused, never queued.
 - **Rendering**: the job runs with ``client_id="web"``, so the reply keeps its
@@ -35,7 +36,10 @@ from typing import Any
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
+from limits import RateLimitItem, parse
+from limits.strategies import RateLimiter
 from pydantic import BaseModel, ConfigDict, Field
+from slowapi.util import get_remote_address
 from sqlalchemy.orm import Session
 from starlette.requests import Request
 
@@ -81,12 +85,47 @@ def openai_error_response(exc: OpenAIError) -> JSONResponse:
     )
 
 
+#: Failed key checks allowed per client IP. The route limits below are per key and
+#: run after auth, and a route with its own limit skips the middleware's per-IP
+#: default, so without this a flood of bad keys would be unthrottled (each one a
+#: DB lookup). Only failures count: one Open WebUI server proxies all its users
+#: from one IP.
+AUTH_FAILURE_LIMIT: RateLimitItem = parse(f"{settings.rate_limit_global}/minute")
+
+
+def _auth_limiter() -> RateLimiter | None:
+    """slowapi's backend (same Redis storage), or None when limiting is off."""
+    return limiter.limiter if limiter.enabled else None
+
+
+def _auth_throttled(ip: str, *, hit: bool) -> bool:
+    """Test (or record) a failed key check for ``ip``. Fails open on storage errors."""
+    backend = _auth_limiter()
+    if backend is None:
+        return False
+    try:
+        if hit:
+            backend.hit(AUTH_FAILURE_LIMIT, "v1-auth-fail", ip)
+            return False
+        return not backend.test(AUTH_FAILURE_LIMIT, "v1-auth-fail", ip)
+    except Exception:
+        logger.warning("/v1 auth throttle unavailable", exc_info=True)
+        return False
+
+
 def require_app_key(request: Request, db: Session = Depends(get_db)) -> User:
-    """Router-wide dependency: a valid, unrevoked per-user key, or 401."""
+    """Router-wide dependency: a valid, unrevoked per-user key, or 401 (429 once
+    an IP has failed ``AUTH_FAILURE_LIMIT`` times)."""
+    ip = get_remote_address(request)
+    if _auth_throttled(ip, hit=False):
+        raise OpenAIError(
+            429, "Too many invalid API key attempts.", "rate_limit_error", "rate_limit_exceeded"
+        )
     header = request.headers.get("authorization", "")
     scheme, _, token = header.partition(" ")
     found = authenticate(db, token.strip()) if scheme.lower() == "bearer" else None
     if found is None:
+        _auth_throttled(ip, hit=True)
         raise OpenAIError(
             401, "Invalid or missing API key.", "invalid_request_error", "invalid_api_key"
         )
@@ -151,7 +190,7 @@ def _text_of(content: str | list[dict[str, Any]] | None) -> str:
 def _user_message(body: ChatCompletionRequest) -> str:
     """The one message this request asks the bot to answer."""
     last = body.messages[-1]
-    if last.role != "user":
+    if last.role.lower() != "user":
         # LibreChat's title request is a single `system` message by default.
         raise OpenAIError(
             400,
@@ -186,7 +225,14 @@ async def _command_reply(db: Session, user: User, text: str) -> str | None:
     if not is_command(text):
         return None
     parts = normalize_command(text).split()
-    if parts and parts[0].lower() in ("/link", "/unlink"):
+    if parts and parts[0].lower() == "/unlink":
+        # The key may sit on a WhatsApp row linked to Telegram; /unlink would cut
+        # that link, not detach this app.
+        return (
+            "/unlink only separates WhatsApp and Telegram, so it isn't available "
+            "here. To detach this app, ask the operator to revoke its key."
+        )
+    if parts and parts[0].lower() == "/link":
         return await link_command_reply(
             db, get_redis_client, user, user.whatsapp_jid, "private", parts
         )
@@ -360,6 +406,11 @@ async def chat_completions(
     except Exception:
         logger.error(f"/v1 enqueue failed for user {user.id}", exc_info=True)
         raise OpenAIError(500, "Internal server error.", "server_error", "internal_error")
+    finally:
+        # Nothing below touches the DB. Release the connection now: the wait can
+        # last JOB_TIMEOUT_SECONDS, and the request-scoped session would otherwise
+        # hold a pooled connection idle in transaction until the response ends.
+        db.close()
 
     if body.stream:
         include_usage = bool((body.stream_options or {}).get("include_usage"))
