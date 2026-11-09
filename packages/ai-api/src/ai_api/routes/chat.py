@@ -709,6 +709,7 @@ async def chat(request: Request, chat_request: ChatRequest, db: Session = Depend
             phone=chat_request.phone,
             whatsapp_lid=chat_request.whatsapp_lid,
             name=_display_name(chat_request),
+            whatsapp_message_id=chat_request.whatsapp_message_id,
         )
 
         # Prepare agent dependencies for semantic search tool (dependency injection)
