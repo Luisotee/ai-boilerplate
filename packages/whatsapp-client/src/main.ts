@@ -16,7 +16,7 @@ import {
   jsonSchemaTransform,
   type ZodTypeProvider,
 } from 'fastify-type-provider-zod';
-import { initializeWhatsApp } from './whatsapp.js';
+import { initializeWhatsApp, shutdownWhatsApp } from './whatsapp.js';
 import { registerHealthRoutes } from './routes/health.js';
 import { registerConnectionRoutes } from './routes/connection.js';
 import { registerMessagingRoutes } from './routes/messaging.js';
@@ -211,14 +211,24 @@ async function start() {
   app.log.info('='.repeat(60));
 
   // Graceful shutdown: stop accepting requests and let in-flight ones finish,
-  // flush Sentry, then exit 0. Errors while closing are logged, never rethrown.
+  // end the WhatsApp socket and wait for a pending creds write (so SIGTERM
+  // can't truncate creds.json), flush Sentry, then exit 0. Runs once even if a
+  // second signal arrives. Errors while closing are logged, never rethrown.
+  let shuttingDown = false;
   for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     process.on(signal, async () => {
+      if (shuttingDown) return;
+      shuttingDown = true;
       app.log.info({ signal }, 'Received shutdown signal, shutting down gracefully...');
       try {
         await app.close();
       } catch (err) {
         app.log.error({ err }, 'Error during graceful shutdown');
+      }
+      try {
+        await shutdownWhatsApp();
+      } catch (err) {
+        app.log.error({ err }, 'Error shutting down WhatsApp');
       }
       await Sentry.close(2000);
       process.exit(0);

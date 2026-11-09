@@ -2,7 +2,6 @@ import makeWASocket, {
   type WAMessage,
   type WASocket,
   DisconnectReason,
-  useMultiFileAuthState,
   normalizeMessageContent,
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
@@ -23,6 +22,7 @@ import {
   sendSerialized,
 } from './services/baileys.js';
 import { getWaVersionConfig } from './services/wa-version.js';
+import { flushPendingCredsSave, useAtomicMultiFileAuthState } from './services/auth-state.js';
 import {
   clearGroupCache,
   invalidateGroup,
@@ -124,6 +124,8 @@ async function resolveGate(
  *  Clears the directory contents — not the dir itself, which is the session volume mountpoint. */
 async function clearAuthState(): Promise<void> {
   setPairedPhoneNumber(null);
+  // A creds write still in flight would land after the wipe and resurrect them.
+  await flushPendingCredsSave(3000);
   try {
     const entries = await readdir(AUTH_DIR);
     await Promise.all(entries.map((e) => rm(`${AUTH_DIR}/${e}`, { recursive: true, force: true })));
@@ -196,10 +198,34 @@ export async function logoutWhatsApp(): Promise<void> {
   await initializeWhatsApp(); // awaited: single re-init owner, errors surface
 }
 
+/**
+ * Stop the WhatsApp side for a process shutdown: no more reconnects, end the
+ * socket, and wait (bounded) for an in-flight creds write so SIGTERM can't
+ * leave a half-written creds.json. Not epoch-bumped on purpose: the current
+ * socket's last `creds.update` must still persist.
+ */
+export async function shutdownWhatsApp(): Promise<void> {
+  shuttingDown = true;
+  resetReconnectionState();
+  const sock = getLiveSocket();
+  if (sock) {
+    // rc13's end() is async and awaits ws.close(), which can hang: don't await it.
+    void Promise.resolve()
+      .then(() => sock.end(undefined))
+      .catch((err: unknown) => logger.debug({ err }, 'socket.end() failed during shutdown'));
+  }
+  if (!(await flushPendingCredsSave(3000))) {
+    logger.warn('A WhatsApp creds write was still running at shutdown');
+  }
+}
+
 // Monotonic socket generation. Bumped on every init and on logout; the connection
 // and creds handlers capture their generation and go inert once it's superseded, so a
 // stale socket can't clobber a newer one or re-persist auth state we've since wiped.
 let socketEpoch = 0;
+
+// Set by shutdownWhatsApp(): the socket's close must not schedule a reconnect.
+let shuttingDown = false;
 
 // Reconnection state
 let reconnectionAttempts = 0;
@@ -261,6 +287,8 @@ function resetReconnectionState(): void {
  * self-heals instead of stalling at disconnected/qr=null.
  */
 function scheduleReconnect(delayOverrideMs?: number): void {
+  if (shuttingDown) return;
+
   // Check if max attempts exceeded
   if (reconnectionAttempts >= config.reconnection.maxAttempts) {
     // Don't give up — keep retrying at the long interval so a prolonged outage
@@ -311,7 +339,9 @@ function scheduleReconnect(delayOverrideMs?: number): void {
 
 export async function initializeWhatsApp(): Promise<void> {
   const myEpoch = ++socketEpoch; // this socket's generation; guards below ignore stale ones
-  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+  // Atomic creds.json writes (temp + fsync + rename, with a .bak restored at
+  // startup): a truncated creds.json would otherwise force a re-pair.
+  const { state, saveCreds } = await useAtomicMultiFileAuthState(AUTH_DIR);
   // Populate paired phone number from existing saved creds so it is known even before
   // the socket opens or while reconnecting.
   const savedPhone = extractPairedNumberFromCreds(state.creds);
@@ -350,6 +380,10 @@ export async function initializeWhatsApp(): Promise<void> {
       setLatestQr(null); // the socket that issued the QR is gone — don't serve a stale code
       clearBaileysSocket(); // the socket is dead — stop reporting "ready" until re-open
       clearStableTimer(); // it didn't stay up long enough to count as healthy
+      if (shuttingDown) {
+        logger.info('WhatsApp connection closed for shutdown');
+        return;
+      }
       const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
       const isConflict = statusCode === DisconnectReason.connectionReplaced;
@@ -426,7 +460,12 @@ export async function initializeWhatsApp(): Promise<void> {
 
   sock.ev.on('creds.update', async () => {
     if (myEpoch !== socketEpoch) return; // stale socket must not re-persist wiped creds
-    await saveCreds();
+    try {
+      await saveCreds();
+    } catch (err) {
+      // An async listener's rejection would be an unhandledRejection (exit 1).
+      logger.error({ err }, 'Failed to save WhatsApp creds');
+    }
     const phone = extractPairedNumberFromCreds(state.creds);
     if (phone) {
       setPairedPhoneNumber(phone);

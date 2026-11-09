@@ -55,6 +55,16 @@ vi.mock('@whiskeysockets/baileys', async (importOriginal) => ({
   useMultiFileAuthState: vi.fn().mockResolvedValue({ state: {}, saveCreds: vi.fn() }),
 }));
 
+// Route the atomic auth-state wrapper to the mocked useMultiFileAuthState above,
+// so each init's saveCreds spy stays observable and no real files are touched.
+vi.mock('../../src/services/auth-state.js', async () => {
+  const baileys = await import('@whiskeysockets/baileys');
+  return {
+    useAtomicMultiFileAuthState: (dir: string) => baileys.useMultiFileAuthState(dir),
+    flushPendingCredsSave: vi.fn().mockResolvedValue(true),
+  };
+});
+
 vi.mock('../../src/services/wa-version.js', () => ({
   getWaVersionConfig: vi.fn().mockResolvedValue({}),
 }));
@@ -66,6 +76,7 @@ type CapturingSocket = { handlers: Map<string, Handler> };
 
 let socks: CapturingSocket[];
 let initializeWhatsApp: () => Promise<void>;
+let shutdownWhatsApp: () => Promise<void>;
 
 function makeCapturingSocket(): CapturingSocket & Record<string, unknown> {
   const handlers = new Map<string, Handler>();
@@ -109,7 +120,7 @@ describe('reconnect policy', () => {
       return sock;
     });
     vi.resetModules();
-    ({ initializeWhatsApp } = await import('../../src/whatsapp.js'));
+    ({ initializeWhatsApp, shutdownWhatsApp } = await import('../../src/whatsapp.js'));
     await initializeWhatsApp();
   });
 
@@ -151,5 +162,21 @@ describe('reconnect policy', () => {
     await close(DisconnectReason.connectionReplaced);
     expect(captureMessage).toHaveBeenCalledWith('WhatsApp session conflict (440)', 'warning');
     expect(await msUntilReconnect()).toBe(900000);
+  });
+
+  it('after shutdownWhatsApp, ends the socket, flushes creds and never reconnects', async () => {
+    const { getLiveSocket } = await import('../../src/services/baileys.js');
+    const { flushPendingCredsSave } = await import('../../src/services/auth-state.js');
+    const sock = latest() as unknown as { end: ReturnType<typeof vi.fn> };
+    (getLiveSocket as ReturnType<typeof vi.fn>).mockReturnValue(sock);
+
+    await shutdownWhatsApp();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sock.end).toHaveBeenCalled();
+    expect(flushPendingCredsSave).toHaveBeenCalled();
+
+    await close(DisconnectReason.connectionClosed);
+    await vi.advanceTimersByTimeAsync(2_000_000);
+    expect(socks).toHaveLength(1);
   });
 });
