@@ -40,6 +40,7 @@ class TestOneShot:
         [
             ("in 30m", "Mon 09 Nov 2026 10:30"),
             ("in 1h30m", "Mon 09 Nov 2026 11:30"),
+            ("in 1h30", "Mon 09 Nov 2026 11:30"),
             ("in 2 hours", "Mon 09 Nov 2026 12:00"),
             ("in 1d", "Tue 10 Nov 2026 10:00"),
             ("at 18:30", "Mon 09 Nov 2026 18:30"),
@@ -72,6 +73,7 @@ class TestOneShot:
             "2020-01-01 10:00",
             "at 25:00",
             "at 13pm",
+            "in 1m30",
             "in 2 years",
             "blah",
             "",
@@ -81,6 +83,14 @@ class TestOneShot:
     def test_rejects(self, text):
         with pytest.raises(ScheduleError):
             parse_schedule(text, ACRE, NOW)
+
+    def test_next_weekday_said_on_that_day_is_a_week_out(self):
+        # Monday 08:00 local: "next monday at 9:00" is not in an hour.
+        monday_8 = datetime(2026, 11, 9, 13, 0)
+        s = parse_schedule("next monday at 9:00", ACRE, monday_8)
+        assert format_local(s.run_at, ACRE) == "Mon 16 Nov 2026 09:00"
+        s = parse_schedule("monday at 9:00", ACRE, monday_8)
+        assert format_local(s.run_at, ACRE) == "Mon 09 Nov 2026 09:00"
 
     def test_more_than_a_year_ahead_is_refused(self):
         with pytest.raises(ScheduleError, match="year"):
@@ -139,6 +149,23 @@ class TestRecurring:
     def test_rejects(self, text):
         with pytest.raises(ScheduleError):
             parse_schedule(text, ACRE, NOW)
+
+    def test_cron_that_never_fires_is_refused(self):
+        with pytest.raises(ScheduleError, match="never fires"):
+            parse_schedule("0 9 30 2 *", ACRE, NOW)
+
+    def test_dst_fall_back_fires_once(self):
+        ny = ZoneInfo("America/New_York")
+        # 2026-11-01 01:30 happens twice in New York (EDT, then EST).
+        s = parse_schedule("30 1 * * *", ny, datetime(2026, 10, 31, 12, 0))
+        slots = upcoming(s, ny, datetime(2026, 10, 31, 12, 0), timedelta(days=3))
+        assert [format_local(x, ny) for x in slots] == [
+            "Sun 01 Nov 2026 01:30",
+            "Mon 02 Nov 2026 01:30",
+            "Tue 03 Nov 2026 01:30",
+        ]
+        first = slots[0]
+        assert next_fire(tz=ny, after=first, cron_expr=s.cron_expr, previous=first) == slots[1]
 
     def test_cron_follows_dst(self):
         before = datetime(2026, 3, 28, 12, 0)

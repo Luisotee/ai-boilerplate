@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from ..database import ScheduledTask, TaskRun, User, get_db
 from ..deps import limiter
 from ..logger import logger
+from ..runtime_config import runtime_config
 from ..schemas import (
     ScheduledTaskDetail,
     ScheduledTaskKind,
@@ -25,7 +26,7 @@ from ..schemas import (
     ScheduledTaskUpdateRequest,
     TaskRunItem,
 )
-from ..services.scheduled_tasks import STATUSES, rearm, utcnow
+from ..services.scheduled_tasks import STATUSES, active_count, rearm, utcnow
 
 router = APIRouter(prefix="/admin/scheduled-tasks", tags=["Admin", "Scheduled tasks"])
 
@@ -149,8 +150,9 @@ async def update_scheduled_task(
     """Re-enable (``active``) or stop (``cancelled``) a task.
 
     Re-enabling resets the failure count and arms the next slot after now; a
-    one-shot whose time has passed can't be re-enabled (409). Completed and
-    cancelled tasks stay as they are (409).
+    one-shot whose time has passed, or a task in a chat already at
+    ``scheduled_tasks_max_per_chat`` active tasks, can't be re-enabled (409).
+    Completed and cancelled tasks stay as they are (409).
     """
     task, user = _get_or_404(db, task_id)
     if task.status == body.status:
@@ -163,6 +165,12 @@ async def update_scheduled_task(
             next_run = rearm(task, now)
             if next_run is None:
                 raise HTTPException(status_code=409, detail="This one-time task's time has passed")
+            max_tasks = runtime_config.get("scheduled_tasks_max_per_chat")
+            if active_count(db, task.user_id) >= max_tasks:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"This chat already has {max_tasks} active scheduled tasks",
+                )
             task.status = "active"
             task.disabled_reason = None
             task.consecutive_failures = 0

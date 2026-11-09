@@ -8,11 +8,12 @@ never target a group. In a group only a confirmed admin may create or cancel
 (fail closed, ``group_admin_refusal``); any member may list.
 """
 
+import uuid
 from typing import Literal
 
 from pydantic_ai import RunContext, ToolDefinition
 
-from ...database import is_group_jid
+from ...database import ConversationMessage, is_group_jid
 from ...logger import logger
 from ...runtime_config import runtime_config
 from ...services.schedule import format_local
@@ -39,9 +40,22 @@ async def scheduled_tasks_enabled(
     ctx: RunContext[AgentDeps], tool_def: ToolDefinition
 ) -> ToolDefinition | None:
     """`prepare` hook: hide the tool when scheduling is off, and in scheduled runs."""
-    if ctx.deps.scheduled_run or not runtime_config.get("scheduled_tasks_enabled"):
+    if (ctx.deps is not None and ctx.deps.scheduled_run) or not runtime_config.get(
+        "scheduled_tasks_enabled"
+    ):
         return None
     return tool_def
+
+
+def _creator(deps: AgentDeps) -> tuple[str | None, str | None]:
+    """(sender_jid, sender_name) of the message being answered, if it is known."""
+    if not deps.user_message_id:
+        return None, None
+    try:
+        msg = deps.db.get(ConversationMessage, uuid.UUID(str(deps.user_message_id)))
+    except ValueError:
+        return None, None
+    return (msg.sender_jid, msg.sender_name) if msg is not None else (None, None)
 
 
 @agent.tool(prepare=scheduled_tasks_enabled)
@@ -58,7 +72,7 @@ async def manage_scheduled_tasks(
 
     Never compute dates yourself: pass the user's timing in `schedule`, as one of
     - once: "in 30m", "in 2h", "in 1d", "at 18:30", "tomorrow at 9:00",
-      "monday at 9:00", "2026-11-20 09:00"
+      "monday at 9:00", "next monday at 9:00", "2026-11-20 09:00"
     - repeating: "every 2h", "every day at 9:00", "every weekday at 8:30",
       "every monday,friday at 9:00", or a 5-field cron like "0 9 * * 1"
     Times are the bot's local time. After creating, tell the user the schedule
@@ -97,6 +111,7 @@ async def manage_scheduled_tasks(
             deps.db.commit()
             return f"Cancelled #{short_id(task)} ({task.schedule})."
 
+        created_by_jid, created_by_name = _creator(deps)
         task = create_task(
             deps.db,
             user_id=deps.user_id,
@@ -105,6 +120,8 @@ async def manage_scheduled_tasks(
             kind=kind,
             text=text or "",
             schedule_text=schedule or "",
+            created_by_name=created_by_name,
+            created_by_jid=created_by_jid,
         )
         tz = task_timezone(task)
         target = "this group" if is_group_jid(deps.whatsapp_jid) else "this chat"

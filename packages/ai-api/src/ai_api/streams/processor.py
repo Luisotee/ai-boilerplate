@@ -203,6 +203,7 @@ async def process_chat_job_direct(
                 client_id=client_id,
                 is_group_admin=is_group_admin,
                 job_id=job_id,
+                user_message_id=user_message_id,
             )
 
             # Step 4: Format message with sender name for group context

@@ -327,7 +327,11 @@ class ScheduledTask(Base):
     )
     client_id = Column(String(16), nullable=True)  # 'baileys' (NULL) | 'cloud' | 'telegram'
     address = Column(String, nullable=False)  # chat JID handed to the client's send-text
-    created_by_name = Column(String, nullable=True)  # group sender's name, display only
+    created_by_name = Column(String, nullable=True)  # the asking sender's name, display only
+    # The asking sender's id in a group (sender_jid: phone JID on Baileys, tg:<id>
+    # on Telegram). Under GROUP_GATING=membership a group task sends only while
+    # this sender is still whitelisted.
+    created_by_jid = Column(String, nullable=True)
     kind = Column(String(16), nullable=False)  # 'reminder' | 'agent'
     text = Column(Text, nullable=False)  # reminder text, or the agent run's prompt
     schedule = Column(String(200), nullable=False)  # normalised human description
@@ -360,7 +364,17 @@ class TaskRun(Base):
     """
 
     __tablename__ = "task_runs"
-    __table_args__ = (UniqueConstraint("task_id", "scheduled_for", name="uq_task_runs_slot"),)
+    __table_args__ = (
+        UniqueConstraint("task_id", "scheduled_for", name="uq_task_runs_slot"),
+        # The send lanes poll 'ready' every couple of seconds and the sweep
+        # scans the unfinished states: keep both off the (growing) history.
+        Index(
+            "ix_task_runs_open",
+            "status",
+            "created_at",
+            postgresql_where=text("status IN ('dispatched', 'running', 'ready', 'sending')"),
+        ),
+    )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     task_id = Column(
@@ -371,8 +385,11 @@ class TaskRun(Base):
     )
     user_id = Column(UUID(as_uuid=True), nullable=True, index=True)  # the task's chat row
     scheduled_for = Column(DateTime, nullable=False)  # the slot (naive UTC)
-    # 'queued' | 'dispatched' | 'running' | 'sent' | 'silent' | 'skipped' | 'failed' | 'unknown'
-    status = Column(String(16), nullable=False, index=True, default="queued")
+    # 'dispatched' (agent run, on the chat stream) | 'running' (agent deciding the
+    # text) | 'ready' (text decided, waiting for a send lane) | 'sending' |
+    # 'sent' | 'silent' | 'skipped' | 'failed' | 'unknown'
+    status = Column(String(16), nullable=False, index=True, default="ready")
+    message = Column(Text, nullable=True)  # the text to send, once decided
     error_code = Column(String(64), nullable=True)
     late_seconds = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)

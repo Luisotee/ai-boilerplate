@@ -1,15 +1,13 @@
-"""streams/scheduled_runner.py: claim, send-time checks, delivery outcomes, auto-disable."""
+"""streams/scheduled_runner.py: run rules (checks, outcomes, auto-disable) and the agent phase."""
 
 import uuid
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
 import pytest
 
 from ai_api.database import ScheduledTask, TaskRun, User
 from ai_api.streams import scheduled_runner as runner
-from ai_api.whatsapp import WhatsAppClientError, WhatsAppNotConnectedError
 
 NOW = datetime(2026, 11, 9, 15, 0)
 
@@ -57,6 +55,27 @@ class TestApplyOutcome:
         assert task.disabled_reason == "consecutive_failures"
         assert task.next_run_at is None
 
+    @pytest.mark.parametrize(
+        "code", ["cloud_window", "daily_limit", "not_whitelisted", "missed", "user_deleted"]
+    )
+    def test_skips_never_disable_a_recurring_task(self, code):
+        task = _task(consecutive_failures=2)
+        for _ in range(3):
+            runner.apply_outcome(task, "skipped", code, NOW)
+        assert task.status == "active"
+        assert task.consecutive_failures == 2
+        assert (task.last_status, task.last_error) == ("skipped", code)
+
+    def test_unknown_counts_as_a_failure(self):
+        task = _task(consecutive_failures=2)
+        runner.apply_outcome(task, "unknown", "unknown", NOW)
+        assert task.status == "disabled"
+
+    def test_skipped_one_shot_is_still_disabled(self):
+        task = _task(cron_expr=None, run_at=NOW, next_run_at=None)
+        runner.apply_outcome(task, "skipped", "cloud_window", NOW)
+        assert (task.status, task.disabled_reason) == ("disabled", "cloud_window")
+
     def test_cancelled_skip_is_not_a_failure(self):
         task = _task(status="cancelled")
         runner.apply_outcome(task, "skipped", "cancelled", NOW)
@@ -81,32 +100,42 @@ class TestApplyOutcome:
         assert task.next_run_at == retry
 
 
-class TestChatAllowed:
+class TestRunAllowed:
     def _user(self, **kw):
         return User(whatsapp_jid=kw.get("jid", "5511@s.whatsapp.net"), phone=kw.get("phone"))
 
+    def _allowed(self, task, user=None, gating="jid", **settings):
+        with _settings(**settings), patch.object(runner.settings, "group_gating", gating):
+            return runner.run_allowed(user or self._user(), task)
+
     def test_empty_whitelist_allows(self):
-        with _settings():
-            assert runner._chat_allowed(self._user(), "5511@s.whatsapp.net")
+        assert self._allowed(_task(address="5511@s.whatsapp.net"))
 
     def test_unlisted_chat_is_blocked(self):
-        with _settings(whitelist_phones="4915755945319"):
-            assert not runner._chat_allowed(self._user(), "5511999@s.whatsapp.net")
+        task = _task(address="5511999@s.whatsapp.net")
+        assert not self._allowed(task, whitelist_phones="4915755945319")
 
     def test_listed_phone_passes(self):
-        with _settings(whitelist_phones="5511999"):
-            assert runner._chat_allowed(self._user(phone="+5511999"), "5511999@s.whatsapp.net")
+        task = _task(address="5511999@s.whatsapp.net")
+        assert self._allowed(task, self._user(phone="+5511999"), whitelist_phones="5511999")
 
     def test_group_under_jid_gating_must_be_listed(self):
-        with _settings(whitelist_phones="4915755945319"):
-            assert not runner._chat_allowed(self._user(), "120363@g.us")
+        task = _task(address="120363@g.us", created_by_jid="4915755945319@s.whatsapp.net")
+        assert not self._allowed(task, whitelist_phones="4915755945319")
+        assert self._allowed(task, whitelist_phones="120363@g.us")
 
-    def test_group_under_membership_gating_passes(self):
-        with (
-            _settings(whitelist_phones="4915755945319"),
-            patch.object(runner.settings, "group_gating", "membership"),
-        ):
-            assert runner._chat_allowed(self._user(), "120363@g.us")
+    def test_group_under_membership_gating_needs_its_creator_whitelisted(self):
+        task = _task(address="120363@g.us", created_by_jid="4915755945319@s.whatsapp.net")
+        assert self._allowed(task, gating="membership", whitelist_phones="4915755945319")
+        assert not self._allowed(task, gating="membership", whitelist_phones="5511888")
+
+    def test_group_under_membership_gating_without_a_creator_fails_closed(self):
+        task = _task(address="120363@g.us", created_by_jid=None)
+        assert not self._allowed(task, gating="membership", whitelist_phones="4915755945319")
+
+    def test_telegram_group_creator(self):
+        task = _task(address="tg:-1001", created_by_jid="tg:42")
+        assert self._allowed(task, gating="membership", whitelist_phones="tg:42")
 
 
 def _prepare_db(run, task, user, sent_today=0):
@@ -128,11 +157,11 @@ class TestPrepare:
         return job, run, db
 
     def test_eligible_run_becomes_a_job(self):
-        task = _task()
+        task = _task(kind="agent")
         user = User(whatsapp_jid=task.address)
         job, run, db = self._go(task, user)
-        assert job.address == task.address
-        assert job.platform == "baileys"
+        assert job.text == task.text
+        assert job.chat_jid == task.address
         db.commit.assert_not_called()
 
     @pytest.mark.parametrize(
@@ -170,7 +199,7 @@ class TestPrepare:
         task = _task(client_id="cloud")
         user = User(whatsapp_jid=task.address, cloud_last_inbound_at=NOW - timedelta(hours=2))
         job, _, _ = self._go(task, user)
-        assert job.platform == "cloud"
+        assert job.client_id == "cloud"
 
     def test_daily_cap(self):
         task = _task()
@@ -200,15 +229,11 @@ class TestText:
     def test_agent_prompt_puts_the_time_last_and_guards_recursion(self):
         job = runner._Job(
             run_id=uuid.uuid4(),
-            task_id=uuid.uuid4(),
             user_id=uuid.uuid4(),
-            kind="agent",
             text="check the river level",
             schedule="every day at 07:00",
             timezone="America/Rio_Branco",
-            platform="baileys",
             client_id=None,
-            address="x",
             chat_jid="x",
         )
         prompt = runner.agent_prompt(job, NOW)
@@ -218,106 +243,94 @@ class TestText:
         assert "Mon 09 Nov 2026 10:00" in prompt
 
 
-def _job(kind="reminder", text="drink water"):
+def _job(text="check the river"):
     return runner._Job(
         run_id=uuid.uuid4(),
-        task_id=uuid.uuid4(),
         user_id=uuid.uuid4(),
-        kind=kind,
         text=text,
         schedule="every day at 09:00",
         timezone="UTC",
-        platform="baileys",
         client_id=None,
-        address="5511@s.whatsapp.net",
         chat_jid="5511@s.whatsapp.net",
     )
 
 
+class TestRecord:
+    def _db(self, run, task):
+        db = MagicMock()
+        db.query.return_value.filter.return_value.with_for_update.return_value.one_or_none.return_value = run
+        db.get.return_value = task
+        return db
+
+    def test_settles_a_run_still_in_the_expected_state(self):
+        task = _task()
+        run = TaskRun(id=uuid.uuid4(), task_id=task.id, status="sending")
+        db = self._db(run, task)
+        with patch.object(runner, "SessionLocal", return_value=db):
+            assert runner.record(run.id, "sending", "sent", history_text="⏰ hi")
+        assert run.status == "sent"
+        assert task.run_count == 1
+        db.add.assert_called_once()
+        db.commit.assert_called_once()
+
+    def test_a_run_the_sweep_settled_is_not_rewritten(self):
+        db = self._db(None, None)
+        with patch.object(runner, "SessionLocal", return_value=db):
+            assert not runner.record(uuid.uuid4(), "sending", "sent", history_text="⏰ hi")
+        db.add.assert_not_called()
+        db.commit.assert_not_called()
+
+
 class TestProcess:
-    def _patches(self, job, *, claimed=True, send=None, agent=None):
-        return (
+    """The agent phase: claim, checks, agent, then ready / silent / failed. Never sends."""
+
+    async def _run(self, job, *, claimed=True, reply=None, agent_error=None, ready=True):
+        agent = AsyncMock(return_value=reply, side_effect=agent_error)
+        with (
             patch.object(runner, "_claim", return_value=claimed),
             patch.object(runner, "_prepare", return_value=job),
-            patch.object(runner, "_send", new_callable=AsyncMock, side_effect=send),
-            patch.object(runner, "_record"),
-            patch.object(runner, "_agent_reply", new_callable=AsyncMock, side_effect=agent),
-        )
-
-    async def _run(self, job, **kw):
-        p_claim, p_prepare, p_send, p_record, p_agent = self._patches(job, **kw)
-        with p_claim, p_prepare, p_send as send, p_record as record, p_agent as agent:
+            patch.object(runner, "_agent_reply", agent),
+            patch.object(runner, "record") as record,
+            patch.object(runner, "_mark_ready", return_value=ready) as mark_ready,
+        ):
             await runner.process_scheduled_run(str(job.run_id if job else uuid.uuid4()))
-        return send, record, agent
+        return agent, record, mark_ready
 
     async def test_lost_claim_does_nothing(self):
-        send, record, _ = await self._run(_job(), claimed=False)
-        send.assert_not_awaited()
+        agent, record, mark_ready = await self._run(_job(), claimed=False)
+        agent.assert_not_awaited()
+        record.assert_not_called()
+        mark_ready.assert_not_called()
+
+    async def test_skipped_run_never_calls_the_model(self):
+        agent, record, mark_ready = await self._run(None)
+        agent.assert_not_awaited()
+        mark_ready.assert_not_called()
+
+    async def test_agent_reply_is_left_ready_for_the_sender(self):
+        job = _job()
+        _, record, mark_ready = await self._run(job, reply="River is rising.")
+        mark_ready.assert_called_once_with(job.run_id, "River is rising.")
         record.assert_not_called()
 
-    async def test_reminder_is_sent_and_saved_to_history(self):
-        job = _job()
-        send, record, agent = await self._run(job)
-        send.assert_awaited_once_with(job, "⏰ drink water")
-        agent.assert_not_awaited()
-        record.assert_called_once_with(job.run_id, "sent", history_text="⏰ drink water")
-
-    async def test_maybe_delivered_is_unknown_and_never_retried(self):
-        job = _job()
-        _, record, _ = await self._run(job, send=httpx.ReadTimeout("slow"))
-        record.assert_called_once_with(job.run_id, "unknown", "unknown", provably_not_sent=False)
-
-    async def test_disconnected_client_counts_as_not_sent(self):
-        job = _job()
-        _, record, _ = await self._run(job, send=WhatsAppNotConnectedError())
-        args = record.call_args
-        assert args.args[1] == "failed"
-        assert args.kwargs["provably_not_sent"] is True
-
-    async def test_refused_address_is_final(self):
-        job = _job()
-        _, record, _ = await self._run(job, send=WhatsAppClientError("x", status_code=404))
-        record.assert_called_once_with(
-            job.run_id, "failed", "not_on_whatsapp", provably_not_sent=False
-        )
-
     async def test_agent_silent_sends_nothing(self):
-        job = _job(kind="agent")
-        p = self._patches(job)
-        with (
-            p[0],
-            p[1],
-            p[2] as send,
-            p[3] as record,
-            patch.object(runner, "_agent_reply", new_callable=AsyncMock, return_value=None),
-        ):
-            await runner.process_scheduled_run(str(job.run_id))
-        send.assert_not_awaited()
-        record.assert_called_once_with(job.run_id, "silent")
-
-    async def test_agent_reply_is_sent(self):
-        job = _job(kind="agent")
-        p = self._patches(job)
-        with (
-            p[0],
-            p[1],
-            p[2] as send,
-            p[3] as record,
-            patch.object(
-                runner, "_agent_reply", new_callable=AsyncMock, return_value="River is rising."
-            ),
-        ):
-            await runner.process_scheduled_run(str(job.run_id))
-        send.assert_awaited_once_with(job, "River is rising.")
-        record.assert_called_once_with(job.run_id, "sent", history_text="River is rising.")
+        job = _job()
+        _, record, mark_ready = await self._run(job, reply=None)
+        mark_ready.assert_not_called()
+        record.assert_called_once_with(job.run_id, "running", "silent")
 
     async def test_agent_model_error_fails_quietly(self):
         from pydantic_ai.exceptions import ModelAPIError
 
-        job = _job(kind="agent")
-        send, record, _ = await self._run(job, agent=ModelAPIError("gemini", "down"))
-        send.assert_not_awaited()
-        record.assert_called_once_with(job.run_id, "failed", "model_error")
+        job = _job()
+        _, record, mark_ready = await self._run(job, agent_error=ModelAPIError("gemini", "down"))
+        mark_ready.assert_not_called()
+        record.assert_called_once_with(job.run_id, "running", "failed", "model_error")
+
+    async def test_other_agent_error_is_a_run_error(self):
+        job = _job()
+        _, record, _ = await self._run(job, agent_error=RuntimeError("boom"))
+        record.assert_called_once_with(job.run_id, "running", "failed", "run_error")
 
     async def test_never_raises(self):
         with patch.object(runner, "_claim", side_effect=RuntimeError("db down")):

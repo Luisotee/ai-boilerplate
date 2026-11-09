@@ -43,7 +43,9 @@ class TestAdvance:
         task = _task(interval_seconds=3600, next_run_at=NOW)
         db = _db()
         run = scheduler._advance(db, task, NOW + timedelta(seconds=10))
-        assert run.status == "queued"
+        # A reminder goes straight to the sender, with its text.
+        assert run.status == "ready"
+        assert run.message == "⏰ drink water"
         assert run.scheduled_for == NOW
         assert task.next_run_at == NOW + timedelta(hours=1)
         assert db.added == [run]
@@ -63,14 +65,14 @@ class TestAdvance:
         slot = datetime(2026, 11, 9, 14, 0)
         task = _task(cron_expr="0 9 * * *", next_run_at=slot)
         run = scheduler._advance(_db(), task, slot + timedelta(minutes=40))
-        assert run.status == "queued"
+        assert run.status == "ready"
         assert run.late_seconds == 2400
         assert task.next_run_at == datetime(2026, 11, 10, 14, 0)
 
     def test_one_shot_inside_grace_fires_late(self):
         task = _task(run_at=NOW - timedelta(hours=1), next_run_at=NOW - timedelta(hours=1))
         run = scheduler._advance(_db(), task, NOW)
-        assert run.status == "queued"
+        assert run.status == "ready"
         assert task.next_run_at is None
         assert task.status == "active"  # completed only once delivered
 
@@ -82,6 +84,18 @@ class TestAdvance:
         assert task.disabled_reason == "missed"
         assert task.next_run_at is None
 
+    def test_agent_task_is_dispatched_without_text(self):
+        task = _task(kind="agent", interval_seconds=6 * 3600, next_run_at=NOW)
+        run = scheduler._advance(_db(), task, NOW)
+        assert run.status == "dispatched"
+        assert run.message is None
+
+    def test_recurring_with_no_next_slot_is_disabled(self):
+        task = _task(cron_expr="0 9 * * *", next_run_at=NOW)
+        with patch.object(scheduler, "next_fire", return_value=None):
+            scheduler._advance(_db(), task, NOW)
+        assert (task.status, task.disabled_reason) == ("disabled", "no_next_slot")
+
     def test_a_slot_that_already_ran_is_never_fired_again(self):
         task = _task(interval_seconds=3600, next_run_at=NOW)
         db = _db()
@@ -90,19 +104,51 @@ class TestAdvance:
         assert task.next_run_at == NOW + timedelta(hours=1)
 
 
+def _claim_db(tasks):
+    db = _db()
+    query = db.query.return_value.filter.return_value.order_by.return_value.limit.return_value
+    query.with_for_update.return_value.all.return_value = tasks
+    return db, query
+
+
 class TestClaimDue:
     def test_locks_with_skip_locked_and_commits_once(self):
-        task = _task(interval_seconds=3600, next_run_at=NOW)
-        db = _db()
-        query = db.query.return_value.filter.return_value.order_by.return_value.limit.return_value
-        query.with_for_update.return_value.all.return_value = [task]
+        reminder = _task(interval_seconds=3600, next_run_at=NOW)
+        agent = _task(kind="agent", interval_seconds=6 * 3600, next_run_at=NOW)
+        db, query = _claim_db([reminder, agent])
         with patch.object(scheduler, "SessionLocal", return_value=db):
-            fired = scheduler.claim_due(NOW)
+            fired, claimed = scheduler.claim_due(NOW)
         query.with_for_update.assert_called_once_with(skip_locked=True)
         db.commit.assert_called_once()
-        assert len(fired) == 1
-        assert fired[0].user_id == task.user_id
+        assert claimed == 2
+        # Only the agent run goes on a chat stream; the reminder is already ready.
+        assert [f.user_id for f in fired] == [agent.user_id]
         db.close.assert_called_once()
+
+    def test_one_bad_task_is_disabled_and_the_batch_goes_on(self):
+        bad = _task(interval_seconds=3600, next_run_at=NOW)
+        good = _task(kind="agent", interval_seconds=6 * 3600, next_run_at=NOW)
+        db, _ = _claim_db([bad, good])
+        real = scheduler._advance
+
+        def advance(session, task, now):
+            if task is bad:
+                raise ValueError("corrupt row")
+            return real(session, task, now)
+
+        with (
+            patch.object(scheduler, "SessionLocal", return_value=db),
+            patch.object(scheduler, "_advance", side_effect=advance),
+        ):
+            fired, claimed = scheduler.claim_due(NOW)
+        assert (bad.status, bad.disabled_reason, bad.next_run_at) == (
+            "disabled",
+            "advance_error",
+            None,
+        )
+        assert [f.user_id for f in fired] == [good.user_id]
+        db.commit.assert_called_once()
+        db.rollback.assert_not_called()
 
     def test_rolls_back_on_error(self):
         db = _db()
@@ -116,58 +162,101 @@ class TestClaimDue:
 
 
 class TestSweep:
-    def test_orphaned_running_run_becomes_unknown_and_counts(self):
-        task = _task(interval_seconds=3600, next_run_at=NOW + timedelta(hours=1))
-        run = TaskRun(id=uuid.uuid4(), task_id=task.id, status="running")
+    def _sweep(self, task, run, position):
         db = _db()
-        results = iter([[], [], [run]])  # queued, dispatched, running
+        results = iter([[run] if i == position else [] for i in range(4)])
         db.query.return_value.filter.return_value.with_for_update.return_value.all.side_effect = (
             lambda: next(results)
         )
         db.get.return_value = task
         with patch.object(scheduler, "SessionLocal", return_value=db):
             assert scheduler.sweep_orphans(NOW) == 1
-        assert run.status == "unknown"
-        assert task.consecutive_failures == 1
         db.commit.assert_called_once()
+
+    # Rule order: dispatched, ready, running, sending.
+    def test_orphaned_send_becomes_unknown_and_counts(self):
+        task = _task(interval_seconds=3600, next_run_at=NOW + timedelta(hours=1))
+        run = TaskRun(id=uuid.uuid4(), task_id=task.id, status="sending")
+        self._sweep(task, run, 3)
+        assert (run.status, run.error_code) == ("unknown", "unknown")
+        assert task.consecutive_failures == 1
+
+    def test_crashed_agent_phase_is_a_failure_not_unknown(self):
+        task = _task(kind="agent", interval_seconds=6 * 3600)
+        run = TaskRun(id=uuid.uuid4(), task_id=task.id, status="running")
+        self._sweep(task, run, 2)
+        assert (run.status, run.error_code) == ("failed", "abandoned")
+
+    def test_stale_ready_run_expires(self):
+        task = _task(interval_seconds=3600)
+        run = TaskRun(id=uuid.uuid4(), task_id=task.id, status="ready")
+        self._sweep(task, run, 1)
+        assert (run.status, run.error_code) == ("failed", "expired")
+
+
+def _redis():
+    pipe = MagicMock()
+    pipe.execute = AsyncMock(return_value=[b"1-0"])
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=pipe)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    redis = MagicMock()
+    redis.pipeline.return_value = ctx
+    return redis, pipe
 
 
 class TestTick:
-    async def test_dispatches_onto_the_chats_stream_and_marks_it(self):
-        fired = [scheduler.Fired(uuid.uuid4(), uuid.uuid4())]
+    async def test_dispatches_agent_runs_in_one_pipeline(self):
+        fired = [scheduler.Fired(uuid.uuid4(), uuid.uuid4()) for _ in range(2)]
+        redis, pipe = _redis()
         with (
             patch.object(scheduler, "sweep_orphans"),
-            patch.object(scheduler, "claim_due", return_value=fired),
-            patch.object(scheduler, "mark_dispatched") as mark,
-            patch.object(scheduler, "add_message_to_stream", new_callable=AsyncMock) as xadd,
+            patch.object(scheduler, "claim_due", return_value=(fired, 2)),
             patch.object(scheduler.runtime_config, "get", return_value=True),
         ):
-            assert await scheduler.tick(MagicMock()) == 1
-        _redis, user_id, job = xadd.await_args.args
-        assert user_id == str(fired[0].user_id)
+            assert await scheduler.tick(redis) == 2
+        redis.pipeline.assert_called_once_with(transaction=False)
+        assert pipe.xadd.call_count == 2
+        key, job = pipe.xadd.call_args_list[0].args
+        assert key == f"stream:user:{fired[0].user_id}"
         assert job == {
             "trigger": "scheduled",
             "run_id": str(fired[0].run_id),
             "user_id": str(fired[0].user_id),
         }
-        mark.assert_called_once_with(fired[0].run_id)
+        pipe.execute.assert_awaited_once()
 
-    async def test_failed_enqueue_is_left_for_the_sweep(self):
+    async def test_failed_enqueue_is_recorded_at_once(self):
         fired = [scheduler.Fired(uuid.uuid4(), uuid.uuid4())]
+        redis, pipe = _redis()
+        pipe.execute.side_effect = ConnectionError
         with (
             patch.object(scheduler, "sweep_orphans"),
-            patch.object(scheduler, "claim_due", return_value=fired),
-            patch.object(scheduler, "mark_dispatched") as mark,
-            patch.object(
-                scheduler,
-                "add_message_to_stream",
-                new_callable=AsyncMock,
-                side_effect=ConnectionError,
-            ),
+            patch.object(scheduler, "claim_due", return_value=(fired, 1)),
+            patch.object(scheduler, "fail_dispatched") as fail,
             patch.object(scheduler.runtime_config, "get", return_value=True),
         ):
-            assert await scheduler.tick(MagicMock()) == 0
-        mark.assert_not_called()
+            assert await scheduler.tick(redis) == 0
+        fail.assert_called_once_with([fired[0].run_id], "enqueue_failed")
+
+    async def test_a_full_batch_claims_again_at_once(self):
+        batches = iter([([], scheduler.BATCH_SIZE), ([], scheduler.BATCH_SIZE), ([], 3)])
+        with (
+            patch.object(scheduler, "sweep_orphans"),
+            patch.object(scheduler, "claim_due", side_effect=lambda _now: next(batches)) as claim,
+            patch.object(scheduler.runtime_config, "get", return_value=True),
+        ):
+            await scheduler.tick(MagicMock())
+        assert claim.call_count == 3
+
+    async def test_batches_per_tick_are_capped(self):
+        with (
+            patch.object(scheduler, "sweep_orphans"),
+            patch.object(scheduler, "claim_due", return_value=([], scheduler.BATCH_SIZE)) as claim,
+            patch.object(scheduler.runtime_config, "get", return_value=True),
+        ):
+            await scheduler.tick(MagicMock())
+        assert claim.call_count == scheduler.MAX_BATCHES_PER_TICK
 
     async def test_disabled_scheduler_fires_nothing(self):
         with (

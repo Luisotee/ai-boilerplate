@@ -5,9 +5,10 @@ user's intent over in this small English grammar and everything else happens
 here, in the bot's time zone (never the server's).
 
 One-shot:
-- ``in 30m`` / ``in 2h`` / ``in 1d`` / ``in 1h30m``
+- ``in 30m`` / ``in 2h`` / ``in 1d`` / ``in 1h30m`` / ``in 1h30``
 - ``at 18:30`` (the next 18:30: today, or tomorrow if it has passed)
-- ``today at 18:30`` / ``tomorrow at 9:00`` / ``monday at 9:00`` (the next Monday)
+- ``today at 18:30`` / ``tomorrow at 9:00`` / ``monday at 9:00`` (the next Monday;
+  ``next monday`` said on a Monday is a week out)
 - ``2026-11-20 09:00`` (ISO; a naive time is local)
 
 Recurring:
@@ -30,7 +31,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from croniter import croniter
+from croniter import CroniterBadDateError, croniter
 
 #: A one-shot can't be scheduled further out than this.
 MAX_ONE_SHOT_AHEAD = timedelta(days=366)
@@ -108,12 +109,18 @@ def _parse_duration(text: str) -> int | None:
     text = text.replace(" and ", " ").strip()
     pos = 0
     total = 0
+    unit = ""
     for match in _DURATION_PART.finditer(text):
         if text[pos : match.start()].strip(" ,"):
             return None
-        total += int(match.group(1)) * _UNIT_SECONDS[match.group(2)[0].lower()]
+        unit = match.group(2)[0].lower()
+        total += int(match.group(1)) * _UNIT_SECONDS[unit]
         pos = match.end()
-    if pos == 0 or text[pos:].strip():
+    rest = text[pos:].strip()
+    if pos and unit == "h" and re.fullmatch(r"\d{1,2}", rest):
+        # ``1h30``: bare digits after an hour count as minutes (like ``9h30``).
+        return total + int(rest) * 60
+    if pos == 0 or rest:
         return None
     return total
 
@@ -221,6 +228,7 @@ def parse_schedule(text: str, tz: ZoneInfo, now: datetime) -> Schedule:
         rf"(?:(today|tomorrow|(?:on |next )?(?!at\b)[a-z]+)\s+)?(?:at\s+)?{_TIME}", s
     )
     if match:
+        is_next = (match.group(1) or "").startswith("next ")
         day_word = (match.group(1) or "").removeprefix("on ").removeprefix("next ")
         h, m = _parse_time(*match.group(2, 3, 4))
         base = local_now.replace(hour=h, minute=m, second=0, microsecond=0)
@@ -230,6 +238,8 @@ def parse_schedule(text: str, tz: ZoneInfo, now: datetime) -> Schedule:
             target = base + timedelta(days=1)
         elif day_word in _DAYS:
             ahead = (_DAYS[day_word] - _cron_dow(local_now)) % 7
+            if is_next and ahead == 0:
+                ahead = 7  # "next monday" said on a Monday is a week out
             target = base + timedelta(days=ahead)
             if target <= local_now:
                 target += timedelta(days=7)
@@ -244,6 +254,8 @@ def parse_schedule(text: str, tz: ZoneInfo, now: datetime) -> Schedule:
     # cron
     if len(s.split()) == 5:
         expr = _validate_cron(s)
+        if next_fire(tz=tz, after=now, cron_expr=expr) is None:
+            raise ScheduleError("That cron schedule never fires (e.g. 30 February).")
         return Schedule(f"cron {expr}", cron_expr=expr)
 
     raise ScheduleError(
@@ -299,11 +311,20 @@ def next_fire(
     """First slot strictly after ``after`` (naive UTC); None for a one-shot.
 
     An interval is anchored at ``previous`` (the last slot) so it doesn't drift;
-    without one it starts ``interval_seconds`` after ``after``.
+    without one it starts ``interval_seconds`` after ``after``. A cron that
+    never fires again (``0 9 30 2 *``) gives None. On a DST fall-back day a
+    cron slot inside the repeated hour fires once: the second pass (same wall
+    time as ``previous``) is skipped.
     """
     if cron_expr:
-        local_after = to_local(after, tz)
-        return to_utc_naive(croniter(cron_expr, local_after).get_next(datetime))
+        it = croniter(cron_expr, to_local(after, tz))
+        try:
+            nxt = it.get_next(datetime)
+            if previous is not None and _wall(nxt) == _wall(to_local(previous, tz)):
+                nxt = it.get_next(datetime)
+        except CroniterBadDateError:
+            return None
+        return to_utc_naive(nxt)
     if interval_seconds:
         step = timedelta(seconds=interval_seconds)
         if previous is None:
@@ -317,13 +338,18 @@ def next_fire(
     return None
 
 
+def _wall(local: datetime) -> datetime:
+    """Local wall-clock time (fold and offset dropped)."""
+    return local.replace(tzinfo=None, fold=0)
+
+
 def period(*, tz: ZoneInfo, slot: datetime, cron_expr: str | None, interval_seconds: int | None):
     """Time between ``slot`` and the slot after it (None for a one-shot)."""
     if interval_seconds:
         return timedelta(seconds=interval_seconds)
     if cron_expr:
-        nxt = next_fire(tz=tz, after=slot, cron_expr=cron_expr)
-        return nxt - slot
+        nxt = next_fire(tz=tz, after=slot, cron_expr=cron_expr, previous=slot)
+        return nxt - slot if nxt is not None else None
     return None
 
 

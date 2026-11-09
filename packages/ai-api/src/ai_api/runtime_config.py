@@ -133,8 +133,10 @@ REGISTRY: tuple[SettingSpec, ...] = (
         True,
         "conversation",
         "Reminders and scheduled agent runs: the manage_scheduled_tasks tool and "
-        "the worker's scheduler. Off pauses firing; due tasks catch up (without a "
-        "burst) when turned back on.",
+        "the worker's scheduler. Off: nothing fires. Back on: a slot that fell due "
+        "meanwhile fires only within its catch-up window (2 min-2 h; a one-shot up "
+        "to 2 h late); older slots are recorded as missed, and a missed one-shot "
+        "is disabled.",
     ),
     SettingSpec(
         "scheduled_tasks_max_per_chat",

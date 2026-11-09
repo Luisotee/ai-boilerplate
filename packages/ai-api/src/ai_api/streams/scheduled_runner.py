@@ -1,37 +1,32 @@
-"""Runs one fired slot of a scheduled task: decide the text, deliver it, record it.
+"""Scheduled-task runs: the shared state rules, and the agent phase.
 
-``streams/scheduler.py`` fires a slot by adding a ``trigger=scheduled`` job to
-the chat's own stream (``stream:user:{id}``), so it is serialised with that
-chat's messages; ``streams/consumer.py`` hands it to
-``process_scheduled_run``. Rules:
+A fired slot is a ``task_runs`` row that moves through
+``dispatched → running → ready → sending → sent|silent|skipped|failed|unknown``:
 
-- **Claim before anything else** (``queued|dispatched`` → ``running``, a
-  conditional UPDATE committed first). A run the orphan sweep already settled,
-  or another worker took, is left alone. A run is never re-sent: ``running``
-  left behind by a crash is swept to ``unknown``.
-- **Re-checked at send time** (like broadcasts): the task is still active, the
-  chat row exists, the chat is whitelisted, a Cloud chat is inside the 23h
-  window (no templates), and the chat is under its daily cap.
-- **Text**: a ``reminder`` sends its stored text (no LLM). An ``agent`` task
-  runs the prompt in a fresh session (no history) with read-only tools
-  (``agent/core.py`` ``scheduled_run_tools``), and a reply containing
-  ``[SILENT]`` sends nothing.
-- **Delivery** reuses the broadcast sender's ``_deliver`` (typing first on
-  Baileys) and ``classify_outcome``; Baileys sends from this process are spaced
-  a few seconds apart so many tasks due at 09:00 don't go out in one burst.
-- **Outcome**: the delivered text is saved to the chat's history in the same
-  commit as ``sent``. Failures count toward auto-disable
-  (``MAX_CONSECUTIVE_FAILURES``); a one-shot that provably sent nothing is
-  re-armed a couple of minutes later (``ONE_SHOT_ATTEMPTS`` in all).
+- ``streams/scheduler.py`` creates it: a **reminder** straight as ``ready``
+  (its text needs no LLM), an **agent** task as ``dispatched`` plus a
+  ``trigger=scheduled`` entry on the chat's own stream (``stream:user:{id}``).
+- ``process_scheduled_run`` (here, called by ``streams/consumer.py``) is the
+  agent phase: claim ``dispatched → running``, the send-time checks (no LLM
+  call for a run that would be skipped), the agent run in a fresh session with
+  read-only tools (``agent/core.py`` ``scheduled_run_tools``), then ``silent``
+  (``[SILENT]``) or ``ready`` with the text. It never sends and never waits on
+  pacing, so it costs the chat consumer what a normal reply costs.
+- ``streams/scheduled_sender.py`` sends ``ready`` runs, with its own pacing.
 
-Never raises: every failure becomes a run outcome and a log line, so the chat
-stream keeps flowing.
+Rules shared by both: every state change is conditional on the state the step
+owns (``record``), so a run the orphan sweep already settled is never
+rewritten; a run is never re-sent. Only real failures (``failed`` /
+``unknown``) count toward auto-disable (``MAX_CONSECUTIVE_FAILURES``); skips
+are recorded but don't.
+
+``process_scheduled_run`` never raises: every failure becomes a run outcome
+and a log line, so the chat stream keeps flowing.
 """
 
 from __future__ import annotations
 
 import asyncio
-import random
 import re
 import uuid
 from dataclasses import dataclass
@@ -40,7 +35,7 @@ from datetime import datetime, timedelta
 import httpx
 from sqlalchemy import func
 
-from ..config import get_whatsapp_api_key, get_whatsapp_client_url, settings
+from ..config import settings
 from ..database import (
     ConversationMessage,
     ScheduledTask,
@@ -48,40 +43,31 @@ from ..database import (
     TaskRun,
     User,
     is_group_jid,
-    is_telegram_jid,
 )
 from ..logger import logger
 from ..runtime_config import runtime_config
 from ..services.broadcast import in_cloud_window
 from ..services.schedule import format_local
 from ..services.scheduled_tasks import utcnow, zone
-from ..whatsapp import create_whatsapp_client
-from ..whitelist import is_whitelisted, parse_whitelist
-from .broadcast_consumer import (
-    FINAL,
-    RELEASE,
-    RETRY,
-    TELEGRAM_SEND_TIMEOUT_SECONDS,
-    _deliver,
-    classify_outcome,
-)
+from ..whitelist import chat_in_scope, is_whitelisted, parse_whitelist
 
 #: Consecutive failed runs after which a task is disabled (shown in /admin).
 MAX_CONSECUTIVE_FAILURES = 3
 #: A one-shot whose send provably went nowhere is retried this many times in all.
 ONE_SHOT_ATTEMPTS = 3
 ONE_SHOT_RETRY_DELAY = timedelta(minutes=2)
-#: Gap between two scheduled Baileys sends from this process.
-BAILEYS_GAP_SECONDS = (3.0, 8.0)
-#: Attempts at recording a message that WAS sent.
-SENT_RECORD_ATTEMPTS = 3
 
 SILENT_TOKEN = "[SILENT]"
 REMINDER_PREFIX = "⏰ "
 
-# Run outcomes (task_runs.status) and the error codes this module adds to
+# Run states (task_runs.status) and the error codes this module adds to
 # classify_outcome's.
+DISPATCHED, RUNNING, READY, SENDING = "dispatched", "running", "ready", "sending"
 SENT, SILENT, SKIPPED, FAILED, UNKNOWN = "sent", "silent", "skipped", "failed", "unknown"
+#: Outcomes that count toward auto-disable. Skips never do: a Cloud chat out of
+#: its window, a chat at its daily cap or a slot missed in downtime is not a
+#: broken task.
+FAILURE_STATUSES = (FAILED, UNKNOWN)
 SKIP_CANCELLED = "cancelled"
 SKIP_USER_DELETED = "user_deleted"
 SKIP_NOT_WHITELISTED = "not_whitelisted"
@@ -90,44 +76,41 @@ SKIP_DAILY_LIMIT = "daily_limit"
 MODEL_ERROR = "model_error"
 RUN_ERROR = "run_error"
 
-_baileys_lock = asyncio.Lock()
-_baileys_last_send: float | None = None
-
 
 @dataclass(frozen=True)
 class _Job:
     run_id: uuid.UUID
-    task_id: uuid.UUID
     user_id: uuid.UUID
-    kind: str
     text: str
     schedule: str
     timezone: str
-    platform: str
     client_id: str | None
-    address: str
     chat_jid: str
 
 
-# --- DB steps (sync; run through asyncio.to_thread) -------------------------
+# --- Rules (sync; the caller holds the session) ------------------------------
 
 
-def _chat_allowed(user: User, address: str) -> bool:
-    """Chat whitelist semantics (``routes/chat.py`` ``_is_whitelisted``) for the address.
+def run_allowed(user: User, task: ScheduledTask) -> bool:
+    """Whitelist check at send time: the chat's own rule, plus the creator in a gated group.
 
-    The task was asked for in this chat, so the rule is the chat's own: under
-    ``GROUP_GATING=membership`` a group is in scope through its members.
+    The chat rule is ``routes/chat.py``'s (``whitelist.chat_in_scope``) on the
+    address the chat route checked when the task was asked for. Under
+    ``GROUP_GATING=membership`` that admits every group, so a group task also
+    needs the member who asked for it (``created_by_jid``) to be whitelisted
+    still; one with no recorded creator fails closed.
     """
     wl = parse_whitelist(runtime_config.get("whitelist_phones") or "")
     if wl.size == 0:
         return True
-    if is_group_jid(address):
-        return settings.group_gating == "membership" or is_whitelisted(wl, address)
-    if is_telegram_jid(address):
-        return is_whitelisted(wl, address)
-    if is_whitelisted(wl, address, user.phone):
-        return True
-    return bool(user.whatsapp_lid) and is_whitelisted(wl, user.whatsapp_lid, user.phone)
+    is_group = is_group_jid(task.address)
+    if not chat_in_scope(
+        wl, task.address, user.phone, is_group=is_group, group_gating=settings.group_gating
+    ):
+        return False
+    if is_group and settings.group_gating == "membership":
+        return bool(task.created_by_jid) and is_whitelisted(wl, task.created_by_jid)
+    return True
 
 
 def _sent_today(db, user_id, now: datetime) -> int:
@@ -141,6 +124,23 @@ def _sent_today(db, user_id, now: datetime) -> int:
         .scalar()
         or 0
     )
+
+
+def skip_reason(db, task: ScheduledTask, user: User | None, now: datetime) -> str | None:
+    """Why this run can't go now (a skip code), or None. Checked before the LLM and before a send."""
+    if task.status != "active":
+        return SKIP_CANCELLED
+    if user is None:
+        return SKIP_USER_DELETED
+    if not run_allowed(user, task):
+        return SKIP_NOT_WHITELISTED
+    if (task.client_id or "baileys") == "cloud" and not in_cloud_window(
+        user.cloud_last_inbound_at, now
+    ):
+        return SKIP_CLOUD_WINDOW
+    if _sent_today(db, task.user_id, now) >= runtime_config.get("scheduled_tasks_max_runs_per_day"):
+        return SKIP_DAILY_LIMIT
+    return None
 
 
 def apply_outcome(
@@ -161,7 +161,7 @@ def apply_outcome(
     if status in (SENT, SILENT):
         task.consecutive_failures = 0
         task.run_count = (task.run_count or 0) + 1
-    elif not (status == SKIPPED and error_code == SKIP_CANCELLED):
+    elif status in FAILURE_STATUSES:
         task.consecutive_failures = (task.consecutive_failures or 0) + 1
     if task.status != "active":
         return
@@ -188,66 +188,7 @@ def apply_outcome(
         )
 
 
-def _claim(run_id: uuid.UUID, now: datetime) -> bool:
-    db = SessionLocal()
-    try:
-        won = (
-            db.query(TaskRun)
-            .filter(TaskRun.id == run_id, TaskRun.status.in_(("queued", "dispatched")))
-            .update({"status": "running", "started_at": now}, synchronize_session=False)
-        )
-        db.commit()
-        return bool(won)
-    finally:
-        db.close()
-
-
-def _prepare(run_id: uuid.UUID, now: datetime) -> _Job | None:
-    """Re-check the run right before sending; records a skip and returns None if it can't go."""
-    db = SessionLocal()
-    try:
-        run = db.get(TaskRun, run_id)
-        task = db.get(ScheduledTask, run.task_id) if run else None
-        if run is None or task is None:
-            return None
-        user = db.get(User, task.user_id)
-        platform = task.client_id or "baileys"
-        reason = None
-        if task.status != "active":
-            reason = SKIP_CANCELLED
-        elif user is None:
-            reason = SKIP_USER_DELETED
-        elif not _chat_allowed(user, task.address):
-            reason = SKIP_NOT_WHITELISTED
-        elif platform == "cloud" and not in_cloud_window(user.cloud_last_inbound_at, now):
-            reason = SKIP_CLOUD_WINDOW
-        elif _sent_today(db, task.user_id, now) >= runtime_config.get(
-            "scheduled_tasks_max_runs_per_day"
-        ):
-            reason = SKIP_DAILY_LIMIT
-        if reason is not None:
-            _settle(db, run, task, SKIPPED, reason, now)
-            db.commit()
-            logger.info("Scheduled run %s skipped (%s)", run_id, reason)
-            return None
-        return _Job(
-            run_id=run.id,
-            task_id=task.id,
-            user_id=task.user_id,
-            kind=task.kind,
-            text=task.text,
-            schedule=task.schedule,
-            timezone=task.timezone,
-            platform=platform,
-            client_id=task.client_id,
-            address=task.address,
-            chat_jid=user.whatsapp_jid,
-        )
-    finally:
-        db.close()
-
-
-def _settle(
+def settle(
     db,
     run: TaskRun,
     task: ScheduledTask | None,
@@ -271,31 +212,109 @@ def _one_shot_retry_at(db, task: ScheduledTask, now: datetime) -> datetime | Non
     return now + ONE_SHOT_RETRY_DELAY if attempts < ONE_SHOT_ATTEMPTS else None
 
 
-def _record(
+def record(
     run_id: uuid.UUID,
+    expected: str,
     status: str,
     error_code: str | None = None,
     *,
     history_text: str | None = None,
     provably_not_sent: bool = False,
-) -> None:
-    """Store a run's outcome (and the delivered text in the chat's history) in one commit."""
+) -> bool:
+    """Settle a run that is still in ``expected`` (and save the delivered text) in one commit.
+
+    Returns False and changes nothing when the run moved on meanwhile (the
+    orphan sweep settled it): a late outcome never rewrites a settled run.
+    """
     now = utcnow()
     db = SessionLocal()
     try:
-        run = db.get(TaskRun, run_id)
+        run = (
+            db.query(TaskRun)
+            .filter(TaskRun.id == run_id, TaskRun.status == expected)
+            .with_for_update()
+            .one_or_none()
+        )
         if run is None:
-            return
+            logger.warning(
+                "Scheduled run %s is no longer %s; outcome %s not recorded",
+                run_id,
+                expected,
+                status,
+            )
+            return False
         task = db.get(ScheduledTask, run.task_id)
         retry_at = (
             _one_shot_retry_at(db, task, now) if provably_not_sent and task is not None else None
         )
-        _settle(db, run, task, status, error_code, now, retry_at=retry_at)
+        settle(db, run, task, status, error_code, now, retry_at=retry_at)
         if history_text is not None and task is not None:
             db.add(
                 ConversationMessage(user_id=task.user_id, role="assistant", content=history_text)
             )
         db.commit()
+        return True
+    finally:
+        db.close()
+
+
+# --- Agent phase (DB steps are sync; run through asyncio.to_thread) ----------
+
+
+def _claim(run_id: uuid.UUID, now: datetime) -> bool:
+    db = SessionLocal()
+    try:
+        won = (
+            db.query(TaskRun)
+            .filter(TaskRun.id == run_id, TaskRun.status == DISPATCHED)
+            .update({"status": RUNNING, "started_at": now}, synchronize_session=False)
+        )
+        db.commit()
+        return bool(won)
+    finally:
+        db.close()
+
+
+def _prepare(run_id: uuid.UUID, now: datetime) -> _Job | None:
+    """Check a claimed run before the LLM call; records a skip and returns None if it can't go."""
+    db = SessionLocal()
+    try:
+        run = db.get(TaskRun, run_id)
+        task = db.get(ScheduledTask, run.task_id) if run else None
+        if run is None or task is None:
+            return None
+        user = db.get(User, task.user_id)
+        reason = skip_reason(db, task, user, now)
+        if reason is not None:
+            if run.status == RUNNING:
+                settle(db, run, task, SKIPPED, reason, now)
+                db.commit()
+            logger.info("Scheduled run %s skipped (%s)", run_id, reason)
+            return None
+        return _Job(
+            run_id=run.id,
+            user_id=task.user_id,
+            text=task.text,
+            schedule=task.schedule,
+            timezone=task.timezone,
+            client_id=task.client_id,
+            chat_jid=user.whatsapp_jid,
+        )
+    finally:
+        db.close()
+
+
+def _mark_ready(run_id: uuid.UUID, text: str) -> bool:
+    """running → ready with the text to send (conditional)."""
+    db = SessionLocal()
+    try:
+        won = (
+            db.query(TaskRun)
+            .filter(TaskRun.id == run_id, TaskRun.status == RUNNING)
+            .update({"status": READY, "message": text}, synchronize_session=False)
+        )
+        db.commit()
+        return bool(won)
     finally:
         db.close()
 
@@ -364,57 +383,8 @@ async def _agent_reply(job: _Job, now: datetime) -> str | None:
     return join_bursts(reply) or None
 
 
-# --- Delivery ---------------------------------------------------------------
-
-
-async def _baileys_gap() -> None:
-    """Space scheduled Baileys sends from this process a few seconds apart."""
-    global _baileys_last_send
-    loop = asyncio.get_running_loop()
-    if _baileys_last_send is not None:
-        wait = _baileys_last_send + random.uniform(*BAILEYS_GAP_SECONDS) - loop.time()
-        if wait > 0:
-            await asyncio.sleep(wait)
-    _baileys_last_send = loop.time()
-
-
-async def _send(job: _Job, text: str) -> None:
-    timeout = (
-        TELEGRAM_SEND_TIMEOUT_SECONDS
-        if job.platform == "telegram"
-        else settings.whatsapp_client_timeout
-    )
-    async with httpx.AsyncClient(timeout=timeout) as http:
-        client = create_whatsapp_client(
-            http_client=http,
-            base_url=get_whatsapp_client_url(job.client_id),
-            api_key=get_whatsapp_api_key(job.client_id),
-        )
-        if job.platform == "baileys":
-            async with _baileys_lock:
-                await _baileys_gap()
-                await _deliver(client, job.platform, job.address, text)
-        else:
-            await _deliver(client, job.platform, job.address, text)
-
-
-async def _record_sent(job: _Job, text: str) -> None:
-    for attempt in range(1, SENT_RECORD_ATTEMPTS + 1):
-        try:
-            await asyncio.to_thread(_record, job.run_id, SENT, history_text=text)
-            return
-        except Exception:
-            if attempt == SENT_RECORD_ATTEMPTS:
-                # Left 'running': the sweep records it as 'unknown', never re-sent.
-                logger.error(
-                    "Scheduled run %s was sent but could not be recorded", job.run_id, exc_info=True
-                )
-                return
-            await asyncio.sleep(0.5 * 2 ** (attempt - 1))
-
-
 async def process_scheduled_run(run_id: str) -> None:
-    """Run one fired slot. Never raises."""
+    """Agent phase of one fired slot (a ``trigger=scheduled`` stream entry). Never raises."""
     try:
         await _process(uuid.UUID(run_id))
     except Exception:
@@ -426,39 +396,27 @@ async def _process(run_id: uuid.UUID) -> None:
 
     now = utcnow()
     if not await asyncio.to_thread(_claim, run_id, now):
+        # Settled by the sweep, taken by another worker, or a redelivered entry.
         logger.info("Scheduled run %s already settled or taken; skipping", run_id)
         return
     job = await asyncio.to_thread(_prepare, run_id, now)
     if job is None:
         return
-
-    if job.kind == "agent":
-        try:
-            text = await _agent_reply(job, now)
-        except MODEL_ERRORS:
-            logger.error("Scheduled run %s: AI model failed", run_id, exc_info=True)
-            await asyncio.to_thread(_record, run_id, FAILED, MODEL_ERROR)
-            return
-        except Exception:
-            logger.error("Scheduled run %s: agent run failed", run_id, exc_info=True)
-            await asyncio.to_thread(_record, run_id, FAILED, RUN_ERROR)
-            return
-        if text is None:
-            logger.info("Scheduled run %s: agent answered [SILENT]", run_id)
-            await asyncio.to_thread(_record, run_id, SILENT)
-            return
-    else:
-        text = REMINDER_PREFIX + job.text
-
     try:
-        await _send(job, text)
-    except Exception as e:
-        kind, code = classify_outcome(e)
-        logger.warning("Scheduled run %s: send failed (%s, %s)", run_id, kind, code)
-        status = FAILED if kind in (FINAL, RELEASE, RETRY) else UNKNOWN
-        await asyncio.to_thread(
-            _record, run_id, status, code, provably_not_sent=kind in (RELEASE, RETRY)
-        )
+        text = await _agent_reply(job, now)
+    except MODEL_ERRORS:
+        logger.error("Scheduled run %s: AI model failed", run_id, exc_info=True)
+        await asyncio.to_thread(record, run_id, RUNNING, FAILED, MODEL_ERROR)
         return
-    await _record_sent(job, text)
-    logger.info("Scheduled run %s sent to %s…", run_id, job.address[:8])
+    except Exception:
+        logger.error("Scheduled run %s: agent run failed", run_id, exc_info=True)
+        await asyncio.to_thread(record, run_id, RUNNING, FAILED, RUN_ERROR)
+        return
+    if text is None:
+        logger.info("Scheduled run %s: agent answered [SILENT]", run_id)
+        await asyncio.to_thread(record, run_id, RUNNING, SILENT)
+        return
+    if await asyncio.to_thread(_mark_ready, run_id, text):
+        logger.info("Scheduled run %s: text ready for the sender", run_id)
+    else:
+        logger.warning("Scheduled run %s settled during the agent run; not sent", run_id)

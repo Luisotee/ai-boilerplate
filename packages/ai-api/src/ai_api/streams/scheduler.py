@@ -1,25 +1,31 @@
-"""Scheduler: fires due scheduled tasks onto the chats' own streams.
+"""Scheduler: fires due scheduled tasks.
 
 Runs as the fourth task of the stream worker (``scripts/run_stream_worker.py``).
 Every ``TICK_SECONDS``:
 
 1. **Claim due rows** with ``SELECT … FOR UPDATE SKIP LOCKED``, so several
    workers on one database never take the same task (no Redis lease needed).
+   A full batch is followed at once by the next (up to ``MAX_BATCHES_PER_TICK``).
 2. **Advance before dispatch (at most once).** In the same commit as the
    ``task_runs`` row for the slot, ``next_run_at`` moves to the next slot (or
    NULL for a one-shot). A crash after the commit can lose a slot, never fire
-   it twice; ``UNIQUE(task_id, scheduled_for)`` backs that up.
+   it twice; ``UNIQUE(task_id, scheduled_for)`` backs that up. Each task
+   advances in its own savepoint: one that raises is disabled
+   (``advance_error``) instead of stalling the batch on every tick.
 3. **No burst after downtime.** A recurring slot fires only if it is less late
    than its catch-up window (half the period, 2 min - 2 h); the next slot is
    always the first one after *now*, so N missed slots become one send or
    none. A one-shot fires up to ``ONE_SHOT_GRACE`` (2 h) late, otherwise it is
    recorded as missed and disabled, never silently lost.
-4. **Dispatch**: add ``trigger=scheduled`` to ``stream:user:{chat id}`` (the
-   run is serialised with that chat's messages; ``scheduled_runner.py`` runs
-   it) and mark the run ``dispatched``.
-5. **Orphan sweep**: ``queued`` > 5 min (the XADD never happened) → failed;
-   ``dispatched`` > 1 h (stuck behind a dead stream) → failed, not sent hours
-   late; ``running`` > 15 min (crashed mid-send) → ``unknown``, never re-sent.
+4. **Hand over.** A reminder's run is created ``ready`` with its text, for
+   ``scheduled_sender.py``. An agent task's run is created ``dispatched`` and a
+   ``trigger=scheduled`` entry goes on the chat's own stream (one Redis
+   pipeline per tick), where ``scheduled_runner.py`` runs the agent. If the
+   XADDs fail, those runs are recorded ``failed/enqueue_failed`` at once.
+5. **Orphan sweep**: ``dispatched`` > 1 h (stuck behind a dead stream) and
+   ``ready`` > 1 h (no sender) → failed, not sent hours late; ``running`` >
+   15 min (crashed in the agent run, nothing sent) → failed; ``sending`` >
+   15 min (crashed mid-send) → ``unknown``, never re-sent.
 
 A failing tick is logged and the loop goes on; it never takes the worker down.
 """
@@ -39,28 +45,49 @@ from ..logger import logger
 from ..runtime_config import runtime_config
 from ..services.schedule import catchup_window, next_fire, period
 from ..services.scheduled_tasks import task_timezone, utcnow
-from .manager import add_message_to_stream
-from .scheduled_runner import FAILED, SKIPPED, UNKNOWN, apply_outcome
+from .scheduled_runner import (
+    DISPATCHED,
+    FAILED,
+    READY,
+    REMINDER_PREFIX,
+    RUNNING,
+    SENDING,
+    SKIPPED,
+    UNKNOWN,
+    apply_outcome,
+    settle,
+)
 
 TICK_SECONDS = 15.0
 BATCH_SIZE = 50
-QUEUED_ORPHAN_AFTER = timedelta(minutes=5)
+MAX_BATCHES_PER_TICK = 10
+STREAM_MAXLEN = 1000  # same cap as streams/manager.py add_message_to_stream
 DISPATCHED_EXPIRE_AFTER = timedelta(hours=1)
+READY_EXPIRE_AFTER = timedelta(hours=1)
 RUNNING_ORPHAN_AFTER = timedelta(minutes=15)
+SENDING_ORPHAN_AFTER = timedelta(minutes=15)
 
 MISSED = "missed"
 ENQUEUE_FAILED = "enqueue_failed"
 EXPIRED = "expired"
+ABANDONED = "abandoned"
+ADVANCE_ERROR = "advance_error"
+NO_NEXT_SLOT = "no_next_slot"
 
 
 @dataclass(frozen=True)
 class Fired:
+    """An agent run to put on its chat's stream."""
+
     run_id: uuid.UUID
     user_id: uuid.UUID
 
 
-def claim_due(now: datetime) -> list[Fired]:
-    """Advance every due task past ``now`` and create its run rows; returns runs to dispatch."""
+def claim_due(now: datetime) -> tuple[list[Fired], int]:
+    """Advance every due task past ``now`` and create its run rows.
+
+    Returns the agent runs to dispatch and how many tasks were claimed.
+    """
     db = SessionLocal()
     fired: list[Fired] = []
     try:
@@ -77,11 +104,22 @@ def claim_due(now: datetime) -> list[Fired]:
             .all()
         )
         for task in tasks:
-            run = _advance(db, task, now)
-            if run is not None and run.status == "queued":
+            try:
+                with db.begin_nested():
+                    run = _advance(db, task, now)
+            except Exception:
+                logger.error(
+                    "Scheduled task %s: could not advance; disabling", task.id, exc_info=True
+                )
+                db.refresh(task)
+                task.status = "disabled"
+                task.disabled_reason = ADVANCE_ERROR
+                task.next_run_at = None
+                continue
+            if run is not None and run.status == DISPATCHED:
                 fired.append(Fired(run.id, task.user_id))
         db.commit()
-        return fired
+        return fired, len(tasks)
     except Exception:
         db.rollback()
         raise
@@ -108,15 +146,26 @@ def _advance(db, task: ScheduledTask, now: datetime) -> TaskRun | None:
             interval_seconds=task.interval_seconds,
             previous=slot,
         )
+        if task.next_run_at is None:
+            # A cron with no future slot (parse_schedule refuses those).
+            task.status = "disabled"
+            task.disabled_reason = NO_NEXT_SLOT
     else:
         task.next_run_at = None
 
+    if not fire:
+        status = SKIPPED
+    elif task.kind == "agent":
+        status = DISPATCHED
+    else:
+        status = READY
     run = TaskRun(
         id=uuid.uuid4(),
         task_id=task.id,
         user_id=task.user_id,
         scheduled_for=slot,
-        status="queued" if fire else SKIPPED,
+        status=status,
+        message=REMINDER_PREFIX + task.text if status == READY else None,
         error_code=None if fire else MISSED,
         late_seconds=max(0, int(late.total_seconds())),
         finished_at=None if fire else now,
@@ -145,13 +194,23 @@ def _advance(db, task: ScheduledTask, now: datetime) -> TaskRun | None:
     return run
 
 
-def mark_dispatched(run_id: uuid.UUID) -> None:
+def fail_dispatched(run_ids: list[uuid.UUID], code: str) -> None:
+    """Record runs whose stream entry was never added (only those still ``dispatched``)."""
+    now = utcnow()
     db = SessionLocal()
     try:
-        db.query(TaskRun).filter(TaskRun.id == run_id, TaskRun.status == "queued").update(
-            {"status": "dispatched"}, synchronize_session=False
+        runs = (
+            db.query(TaskRun)
+            .filter(TaskRun.id.in_(run_ids), TaskRun.status == DISPATCHED)
+            .with_for_update(skip_locked=True)
+            .all()
         )
+        for run in runs:
+            settle(db, run, db.get(ScheduledTask, run.task_id), FAILED, code, now)
         db.commit()
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
 
@@ -159,9 +218,10 @@ def mark_dispatched(run_id: uuid.UUID) -> None:
 def sweep_orphans(now: datetime) -> int:
     """Settle runs that will never finish on their own; returns how many."""
     rules = (
-        ("queued", QUEUED_ORPHAN_AFTER, TaskRun.created_at, FAILED, ENQUEUE_FAILED),
-        ("dispatched", DISPATCHED_EXPIRE_AFTER, TaskRun.created_at, FAILED, EXPIRED),
-        ("running", RUNNING_ORPHAN_AFTER, TaskRun.started_at, UNKNOWN, UNKNOWN),
+        (DISPATCHED, DISPATCHED_EXPIRE_AFTER, TaskRun.created_at, FAILED, EXPIRED),
+        (READY, READY_EXPIRE_AFTER, TaskRun.created_at, FAILED, EXPIRED),
+        (RUNNING, RUNNING_ORPHAN_AFTER, TaskRun.started_at, FAILED, ABANDONED),
+        (SENDING, SENDING_ORPHAN_AFTER, TaskRun.started_at, UNKNOWN, UNKNOWN),
     )
     db = SessionLocal()
     settled = 0
@@ -174,12 +234,7 @@ def sweep_orphans(now: datetime) -> int:
                 .all()
             )
             for run in runs:
-                run.status = new_status
-                run.error_code = code
-                run.finished_at = now
-                task = db.get(ScheduledTask, run.task_id)
-                if task is not None:
-                    apply_outcome(task, new_status, code, now)
+                settle(db, run, db.get(ScheduledTask, run.task_id), new_status, code, now)
                 logger.warning("Scheduled run %s settled as %s (%s)", run.id, new_status, code)
                 settled += 1
         db.commit()
@@ -191,35 +246,46 @@ def sweep_orphans(now: datetime) -> int:
         db.close()
 
 
+async def dispatch(redis: Redis, fired: list[Fired]) -> int:
+    """Put agent runs on their chats' streams in one pipeline; returns how many."""
+    if not fired:
+        return 0
+    try:
+        async with redis.pipeline(transaction=False) as pipe:
+            for item in fired:
+                pipe.xadd(
+                    f"stream:user:{item.user_id}",
+                    {
+                        "trigger": "scheduled",
+                        "run_id": str(item.run_id),
+                        "user_id": str(item.user_id),
+                    },
+                    maxlen=STREAM_MAXLEN,
+                )
+            await pipe.execute()
+    except Exception:
+        logger.error("Scheduled runs: could not enqueue %d agent runs", len(fired), exc_info=True)
+        try:
+            await asyncio.to_thread(fail_dispatched, [f.run_id for f in fired], ENQUEUE_FAILED)
+        except Exception:
+            # Left 'dispatched': the sweep expires them after an hour.
+            logger.error("Scheduled runs: could not record the enqueue failure", exc_info=True)
+        return 0
+    return len(fired)
+
+
 async def tick(redis: Redis) -> int:
-    """One scheduler pass; returns how many runs were dispatched."""
+    """One scheduler pass; returns how many agent runs were put on a stream."""
     now = utcnow()
     await asyncio.to_thread(sweep_orphans, now)
     if not runtime_config.get("scheduled_tasks_enabled"):
         return 0
-    fired = await asyncio.to_thread(claim_due, now)
     dispatched = 0
-    for item in fired:
-        try:
-            await add_message_to_stream(
-                redis,
-                str(item.user_id),
-                {
-                    "trigger": "scheduled",
-                    "run_id": str(item.run_id),
-                    "user_id": str(item.user_id),
-                },
-            )
-        except Exception:
-            # Left 'queued': the sweep records it as enqueue_failed.
-            logger.error("Scheduled run %s: could not enqueue", item.run_id, exc_info=True)
-            continue
-        try:
-            await asyncio.to_thread(mark_dispatched, item.run_id)
-        except Exception:
-            # Harmless: the runner claims 'queued' runs too.
-            logger.warning("Scheduled run %s: could not mark dispatched", item.run_id)
-        dispatched += 1
+    for _ in range(MAX_BATCHES_PER_TICK):
+        fired, claimed = await asyncio.to_thread(claim_due, now)
+        dispatched += await dispatch(redis, fired)
+        if claimed < BATCH_SIZE:
+            break
     return dispatched
 
 

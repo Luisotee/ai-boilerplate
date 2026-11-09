@@ -44,6 +44,9 @@ class AgentDeps:
     #: True for a scheduled task's agent run (streams/scheduled_runner.py): no
     #: user is waiting, so only read-only tools are offered (SCHEDULED_RUN_TOOLS).
     scheduled_run: bool = False
+    #: Id of the saved user message being answered (conversation_messages.id):
+    #: its sender_jid / sender_name record who asked for a scheduled task.
+    user_message_id: str | None = None
 
 
 #: The only tools a scheduled agent run may use: read-only ones. Nothing that
@@ -207,14 +210,8 @@ DEFAULT_SYSTEM_PROMPT = """You are a helpful AI assistant communicating via What
         Use when the user asks you to report a problem, or when you got
         something wrong (see the BUG REPORTS section)
 
-    Scheduling Tools:
-    20. manage_scheduled_tasks - Create, list or cancel reminders and recurring messages
-        Use when the user asks to be reminded of something or wants a message at a set
-        time or on a schedule. Never compute dates yourself: pass the user's timing in
-        the tool's schedule format. In a group, only a group admin may create or cancel
-
     Memory Tools:
-    21. update_core_memory - Rewrite your persistent notes (replaces entire document)
+    20. update_core_memory - Rewrite your persistent notes (replaces entire document)
         Pass the FULL new content — anything not included will be lost
         To forget something, rewrite the document without it; to forget
         everything, pass an empty string (in a group, only an admin may clear it)
@@ -344,6 +341,31 @@ async def bug_report_guidance(ctx: RunContext[AgentDeps]) -> str:
     follows BUG_REPORTS_ENABLED, which also hides the tool (``prepare`` hook).
     """
     return _BUG_REPORT_GUIDANCE if runtime_config.get("bug_reports_enabled") else ""
+
+
+_SCHEDULED_TASKS_GUIDANCE = (
+    "\n\n== SCHEDULED TASKS ==\n"
+    "manage_scheduled_tasks creates, lists or cancels reminders and recurring messages in "
+    "this chat. Use it when the user asks to be reminded of something or wants a message "
+    "at a set time or on a schedule. Never compute dates yourself: pass the user's timing "
+    "in the tool's schedule format, and after creating, restate the schedule and next run "
+    "exactly as the tool returned them. In a group, only a group admin may create or "
+    "cancel.\n"
+    "== END SCHEDULED TASKS =="
+)
+
+
+@agent.instructions
+async def scheduled_tasks_guidance(ctx: RunContext[AgentDeps]) -> str:
+    """Describe ``manage_scheduled_tasks`` — only when scheduling is on.
+
+    An instructions hook so it survives an ``/admin`` prompt override and
+    follows SCHEDULED_TASKS_ENABLED, which also hides the tool (``prepare``
+    hook). Left out of scheduled runs, which can't schedule.
+    """
+    if ctx.deps is not None and ctx.deps.scheduled_run:
+        return ""
+    return _SCHEDULED_TASKS_GUIDANCE if runtime_config.get("scheduled_tasks_enabled") else ""
 
 
 @agent.instructions

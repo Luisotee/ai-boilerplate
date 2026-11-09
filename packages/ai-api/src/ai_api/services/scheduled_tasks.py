@@ -9,15 +9,18 @@ except ``create_task``, which commits the new row.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import get_args
 from zoneinfo import ZoneInfo
 
+from sqlalchemy import String, cast, func
 from sqlalchemy.orm import Session
 
 from ..broadcast_pacing import parse_timezone
 from ..database import ScheduledTask
+from ..formatting import markdown_to_whatsapp
 from ..logger import logger
 from ..runtime_config import runtime_config
+from ..schemas import ScheduledTaskKind, ScheduledTaskStatus
 from .schedule import (
     ScheduleError,
     format_local,
@@ -28,9 +31,8 @@ from .schedule import (
     upcoming,
 )
 
-Kind = Literal["reminder", "agent"]
-KINDS: tuple[str, ...] = ("reminder", "agent")
-STATUSES: tuple[str, ...] = ("active", "completed", "cancelled", "disabled")
+KINDS: tuple[str, ...] = get_args(ScheduledTaskKind)
+STATUSES: tuple[str, ...] = get_args(ScheduledTaskStatus)
 
 MAX_REMINDER_CHARS = 1000
 MAX_AGENT_PROMPT_CHARS = 2000
@@ -112,6 +114,7 @@ def create_task(
     text: str,
     schedule_text: str,
     created_by_name: str | None = None,
+    created_by_jid: str | None = None,
     now: datetime | None = None,
 ) -> ScheduledTask:
     """Validate, create and commit a task. Raises ``TaskError`` with a user-facing reason."""
@@ -124,6 +127,9 @@ def create_task(
         raise TaskError("Say what to send (the reminder text, or what the task should do).")
     if len(text) > limit:
         raise TaskError(f"That text is too long (max {limit} characters).")
+    if kind == "reminder":
+        # The text is model output and is sent as is: same Markdown rule as replies.
+        text = markdown_to_whatsapp(text).strip() or text
 
     tz = bot_timezone()
     try:
@@ -140,7 +146,17 @@ def create_task(
 
     if schedule.recurring:
         min_minutes = runtime_config.get("scheduled_tasks_min_interval_minutes")
-        slots = upcoming(schedule, tz, now, _LOOKAHEAD)
+        next_run_at = next_fire(
+            tz=tz,
+            after=now,
+            cron_expr=schedule.cron_expr,
+            interval_seconds=schedule.interval_seconds,
+        )
+        if next_run_at is None:
+            raise TaskError("That schedule never fires.")
+        # Measured from the first slot, not from now: '* * 1 * *' has no slot in
+        # the next 8 days but fires every minute on the 1st.
+        slots = upcoming(schedule, tz, next_run_at - timedelta(seconds=1), _LOOKAHEAD)
         gap = (
             timedelta(seconds=schedule.interval_seconds)
             if schedule.interval_seconds
@@ -155,12 +171,6 @@ def create_task(
                 f"A task that runs the assistant may fire at most {AGENT_MAX_DAILY_FIRES} "
                 "times a day."
             )
-        next_run_at = next_fire(
-            tz=tz,
-            after=now,
-            cron_expr=schedule.cron_expr,
-            interval_seconds=schedule.interval_seconds,
-        )
     else:
         next_run_at = schedule.run_at
 
@@ -169,6 +179,7 @@ def create_task(
         client_id=client_id,
         address=address,
         created_by_name=(created_by_name or None),
+        created_by_jid=(created_by_jid or None),
         kind=kind,
         text=text,
         schedule=schedule.description,
@@ -190,27 +201,36 @@ def create_task(
     return task
 
 
-def list_tasks(db: Session, user_id, *, include_inactive: bool = False) -> list[ScheduledTask]:
-    query = db.query(ScheduledTask).filter(ScheduledTask.user_id == user_id)
-    if not include_inactive:
-        query = query.filter(ScheduledTask.status == "active")
-    return query.order_by(ScheduledTask.next_run_at.asc().nulls_last()).all()
+def list_tasks(db: Session, user_id) -> list[ScheduledTask]:
+    """This chat's active tasks, soonest first."""
+    return (
+        db.query(ScheduledTask)
+        .filter(ScheduledTask.user_id == user_id, ScheduledTask.status == "active")
+        .order_by(ScheduledTask.next_run_at.asc().nulls_last())
+        .all()
+    )
 
 
 def find_task(db: Session, user_id, ref: str) -> ScheduledTask:
     """This chat's task whose id starts with ``ref`` (``#`` and dashes ignored).
 
     Raises ``TaskError`` when none or several match. Scoped to the chat, so a
-    guessed id can never touch another chat's task.
+    guessed id can never touch another chat's task; only active and disabled
+    tasks match (a finished one can't make a prefix ambiguous).
     """
     ref = (ref or "").strip().lstrip("#").replace("-", "").lower()
     if len(ref) < MIN_ID_PREFIX or any(c not in "0123456789abcdef" for c in ref):
         raise TaskError("Give the task id shown by the list action (like #ab12cd34).")
-    matches = [
-        t
-        for t in db.query(ScheduledTask).filter(ScheduledTask.user_id == user_id).all()
-        if str(t.id).replace("-", "").startswith(ref)
-    ]
+    matches = (
+        db.query(ScheduledTask)
+        .filter(
+            ScheduledTask.user_id == user_id,
+            ScheduledTask.status.in_(("active", "disabled")),
+            func.replace(cast(ScheduledTask.id, String), "-", "").like(f"{ref}%"),
+        )
+        .limit(2)
+        .all()
+    )
     if not matches:
         raise TaskError(f"No scheduled task #{ref} in this chat.")
     if len(matches) > 1:
@@ -221,8 +241,6 @@ def find_task(db: Session, user_id, ref: str) -> ScheduledTask:
 def cancel_task(db: Session, user_id, ref: str) -> ScheduledTask:
     """Cancel one of this chat's tasks (not committed). Raises ``TaskError``."""
     task = find_task(db, user_id, ref)
-    if task.status in ("completed", "cancelled"):
-        raise TaskError(f"Task #{short_id(task)} is already {task.status}.")
     task.status = "cancelled"
     task.next_run_at = None
     return task

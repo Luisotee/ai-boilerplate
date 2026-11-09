@@ -486,7 +486,15 @@ class BugReportUpdateRequest(BaseModel):
 ScheduledTaskStatus = Literal["active", "completed", "cancelled", "disabled"]
 ScheduledTaskKind = Literal["reminder", "agent"]
 TaskRunStatus = Literal[
-    "queued", "dispatched", "running", "sent", "silent", "skipped", "failed", "unknown"
+    "dispatched",
+    "running",
+    "ready",
+    "sending",
+    "sent",
+    "silent",
+    "skipped",
+    "failed",
+    "unknown",
 ]
 
 

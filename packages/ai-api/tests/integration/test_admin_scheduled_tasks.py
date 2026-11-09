@@ -162,16 +162,30 @@ class TestUpdate:
     async def test_reenable_resets_failures_and_arms_next_slot(self, client_for):
         t = task()
         db = make_db(found=(t, user()))
-        async with client_for(db) as c:
-            resp = await c.patch(
-                f"/admin/scheduled-tasks/{t.id}", json={"status": "active"}, headers=AUTH
-            )
+        with patch("ai_api.routes.scheduled_tasks.active_count", return_value=0):
+            async with client_for(db) as c:
+                resp = await c.patch(
+                    f"/admin/scheduled-tasks/{t.id}", json={"status": "active"}, headers=AUTH
+                )
         assert resp.status_code == 200
         assert t.status == "active"
         assert t.consecutive_failures == 0
         assert t.disabled_reason is None
         assert t.next_run_at > NOW
         db.commit.assert_called_once()
+
+    async def test_reenable_refused_when_the_chat_is_at_its_limit(self, client_for):
+        t = task()
+        db = make_db(found=(t, user()))
+        with patch("ai_api.routes.scheduled_tasks.active_count", return_value=10):
+            async with client_for(db) as c:
+                resp = await c.patch(
+                    f"/admin/scheduled-tasks/{t.id}", json={"status": "active"}, headers=AUTH
+                )
+        assert resp.status_code == 409
+        assert "10 active" in resp.json()["detail"]
+        assert t.status == "disabled"
+        db.commit.assert_not_called()
 
     async def test_past_one_shot_cannot_be_reenabled(self, client_for):
         t = task(cron_expr=None, run_at=NOW - timedelta(hours=5), disabled_reason="missed")
