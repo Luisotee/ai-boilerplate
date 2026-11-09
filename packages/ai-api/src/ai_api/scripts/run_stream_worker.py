@@ -2,7 +2,7 @@
 """
 Redis Streams worker entry point.
 
-Runs three consumers side by side in one process:
+Runs four tasks side by side in one process:
 
 - the chat consumer (``streams/consumer.py``) — per-user sequential processing
   of chat messages, concurrent across users
@@ -11,9 +11,11 @@ Runs three consumers side by side in one process:
 - the broadcast consumer (``streams/broadcast_consumer.py``) — operator
   broadcasts from ``POST /admin/broadcasts``, paced per platform; only one
   worker process sends at a time (Redis lease)
+- the scheduler (``streams/scheduler.py``) — fires due scheduled tasks and
+  reminders onto the chats' own streams (``SELECT … FOR UPDATE SKIP LOCKED``)
 
 If any consumer stops, the worker exits non-zero so the process supervisor
-(Docker ``restart: unless-stopped``) restarts it with both consumers healthy.
+(Docker ``restart: unless-stopped``) restarts it with every task healthy.
 """
 
 import asyncio
@@ -27,6 +29,7 @@ from ..logger import logger
 from ..streams.broadcast_consumer import run_broadcast_consumer
 from ..streams.consumer import run_stream_consumer
 from ..streams.pdf_consumer import run_pdf_consumer
+from ..streams.scheduler import run_scheduler
 
 
 async def main() -> int:
@@ -47,6 +50,7 @@ async def main() -> int:
         asyncio.create_task(run_stream_consumer(redis), name="chat-consumer"),
         asyncio.create_task(run_pdf_consumer(redis), name="pdf-consumer"),
         asyncio.create_task(run_broadcast_consumer(redis), name="broadcast-consumer"),
+        asyncio.create_task(run_scheduler(redis), name="scheduler"),
     }
     try:
         done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)

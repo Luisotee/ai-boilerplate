@@ -22,6 +22,7 @@ from .database import (
 from .kb_models import KnowledgeBaseDocument
 from .logger import logger
 from .services.bug_reports import scrub_user_reports
+from .services.scheduled_tasks import cancel_chat_tasks
 
 # Supported language codes
 SUPPORTED_LANGUAGES = {"en", "es", "pt", "fr", "de"}
@@ -120,7 +121,7 @@ def _get_help_text() -> str:
 /stt lang auto - Use auto-detection for STT
 /clean - Delete conversation messages
 /clean data - Delete messages + conversation documents
-/clean all - Full reset (messages, documents, memories, preferences)
+/clean all - Full reset (messages, documents, memories, preferences, scheduled tasks)
 /memories - Show saved core memories
 /memories clear - Delete all core memories
 /broadcast - Show whether update announcements are on
@@ -131,6 +132,8 @@ def _get_help_text() -> str:
 /linkphone - (Telegram) Link by sharing your phone number instead of a code
 /unlink - Unlink your accounts
 /help - Show this message
+
+Reminders: just ask, e.g. "remind me tomorrow at 9:00 to call Ana" or "list my reminders".
 
 Language codes: {lang_codes}"""
 
@@ -278,6 +281,7 @@ def handle_clean_command(
 
     had_memories = False
     had_prefs_changes = False
+    cancelled_tasks = 0
     if level == "all":
         mem = get_or_create_core_memory(db, user_id)
         had_memories = bool(mem.content)
@@ -291,6 +295,9 @@ def handle_clean_command(
         prefs.tts_enabled = False
         prefs.tts_language = "en"
         prefs.stt_language = None
+
+        # A full reset also stops everything this chat scheduled.
+        cancelled_tasks = cancel_chat_tasks(db, user_id)
 
     db.commit()
 
@@ -323,11 +330,18 @@ def handle_clean_command(
         return f"Deleted {summary}. Conversation data cleared."
 
     # level == "all"
-    if message_count == 0 and doc_count == 0 and not had_memories and not had_prefs_changes:
+    if (
+        message_count == 0
+        and doc_count == 0
+        and not had_memories
+        and not had_prefs_changes
+        and not cancelled_tasks
+    ):
         return "Nothing to reset. Your account is already clean."
     logger.info(f"Clean [all] for user {user_id}: full reset")
     return (
-        "Full reset complete. All messages, documents, memories, and preferences have been cleared."
+        "Full reset complete. All messages, documents, memories, preferences and "
+        "scheduled tasks have been cleared."
     )
 
 

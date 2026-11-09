@@ -132,3 +132,30 @@ class TestNetworkTools:
 
         assert SECRET not in result
         assert result.startswith("Failed to send")
+
+
+class TestScheduledTasksTool:
+    @pytest.mark.parametrize("action", ["create", "list", "cancel"])
+    async def test_db_failure_rolls_back_without_leaking(self, action):
+        from ai_api.agent.tools.scheduled_tasks import manage_scheduled_tasks
+
+        ctx = _ctx()
+        ctx.deps.is_group_admin = None
+        with (
+            patch(
+                "ai_api.agent.tools.scheduled_tasks.create_task", side_effect=RuntimeError(SECRET)
+            ),
+            patch(
+                "ai_api.agent.tools.scheduled_tasks.list_tasks", side_effect=RuntimeError(SECRET)
+            ),
+            patch(
+                "ai_api.agent.tools.scheduled_tasks.cancel_task", side_effect=RuntimeError(SECRET)
+            ),
+        ):
+            result = await manage_scheduled_tasks(
+                ctx, action, schedule="in 5m", text="x", task_id="abcd1234"
+            )
+
+        assert SECRET not in result
+        assert result == "Failed to manage scheduled tasks. Please try again."
+        ctx.deps.db.rollback.assert_called_once()

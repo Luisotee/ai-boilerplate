@@ -299,6 +299,89 @@ class BugReport(Base):
     resolution_note = Column(Text, nullable=True)
 
 
+class ScheduledTask(Base):
+    """A reminder or scheduled agent run, created by a user in one chat.
+
+    Created by the ``manage_scheduled_tasks`` agent tool, fired by the stream
+    worker's scheduler (``streams/scheduler.py``) and delivered by
+    ``streams/scheduled_runner.py``; listed and managed through
+    ``/admin/scheduled-tasks``. A task always delivers to the chat it was
+    created in (``user_id`` / ``address``): a group's task only to that group.
+    ``status`` and ``kind`` are closed enums once FleetView mirrors them.
+    """
+
+    __tablename__ = "scheduled_tasks"
+    __table_args__ = (
+        Index(
+            "ix_scheduled_tasks_due",
+            "next_run_at",
+            postgresql_where=text("status = 'active'"),
+        ),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    # The chat the task belongs to and delivers to (a group's row in a group).
+    # CASCADE: deleting a chat row (e.g. a /link orphan) drops its tasks.
+    user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    client_id = Column(String(16), nullable=True)  # 'baileys' (NULL) | 'cloud' | 'telegram'
+    address = Column(String, nullable=False)  # chat JID handed to the client's send-text
+    created_by_name = Column(String, nullable=True)  # group sender's name, display only
+    kind = Column(String(16), nullable=False)  # 'reminder' | 'agent'
+    text = Column(Text, nullable=False)  # reminder text, or the agent run's prompt
+    schedule = Column(String(200), nullable=False)  # normalised human description
+    run_at = Column(DateTime, nullable=True)  # one-shot (naive UTC)
+    cron_expr = Column(String(100), nullable=True)  # recurring, in ``timezone``
+    interval_seconds = Column(Integer, nullable=True)  # recurring, every N seconds
+    timezone = Column(String(64), nullable=False)
+    # 'active' | 'completed' | 'cancelled' | 'disabled'
+    status = Column(String(16), nullable=False, index=True, default="active")
+    disabled_reason = Column(String(64), nullable=True)
+    next_run_at = Column(DateTime, nullable=True)  # naive UTC; NULL = nothing armed
+    last_run_at = Column(DateTime, nullable=True)
+    last_status = Column(String(16), nullable=True)
+    last_error = Column(String(64), nullable=True)
+    consecutive_failures = Column(Integer, nullable=False, default=0)
+    run_count = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    runs = relationship(
+        "TaskRun", back_populates="task", cascade="all, delete-orphan", passive_deletes=True
+    )
+
+
+class TaskRun(Base):
+    """One firing of a scheduled task: the slot it was for and what happened.
+
+    UNIQUE(task_id, scheduled_for): one run per slot, so even two schedulers
+    racing over the same row can't fire it twice.
+    """
+
+    __tablename__ = "task_runs"
+    __table_args__ = (UniqueConstraint("task_id", "scheduled_for", name="uq_task_runs_slot"),)
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    task_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("scheduled_tasks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    user_id = Column(UUID(as_uuid=True), nullable=True, index=True)  # the task's chat row
+    scheduled_for = Column(DateTime, nullable=False)  # the slot (naive UTC)
+    # 'queued' | 'dispatched' | 'running' | 'sent' | 'silent' | 'skipped' | 'failed' | 'unknown'
+    status = Column(String(16), nullable=False, index=True, default="queued")
+    error_code = Column(String(64), nullable=True)
+    late_seconds = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+
+    task = relationship("ScheduledTask", back_populates="runs")
+
+
 def init_db():
     """Initialize database tables"""
     logger.info("Initializing database...")

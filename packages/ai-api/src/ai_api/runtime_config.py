@@ -120,6 +120,44 @@ REGISTRY: tuple[SettingSpec, ...] = (
         "turn reports off with bug_reports_enabled).",
     ),
     SettingSpec(
+        "bot_timezone",
+        "str",
+        True,
+        "conversation",
+        "IANA time zone the bot's scheduled tasks use (e.g. America/Rio_Branco). "
+        "Empty = broadcast_timezone. Applies to tasks created after the change.",
+    ),
+    SettingSpec(
+        "scheduled_tasks_enabled",
+        "bool",
+        True,
+        "conversation",
+        "Reminders and scheduled agent runs: the manage_scheduled_tasks tool and "
+        "the worker's scheduler. Off pauses firing; due tasks catch up (without a "
+        "burst) when turned back on.",
+    ),
+    SettingSpec(
+        "scheduled_tasks_max_per_chat",
+        "int",
+        True,
+        "conversation",
+        "Most active scheduled tasks one chat may have.",
+    ),
+    SettingSpec(
+        "scheduled_tasks_min_interval_minutes",
+        "int",
+        True,
+        "conversation",
+        "Shortest gap allowed between two runs of a recurring scheduled task.",
+    ),
+    SettingSpec(
+        "scheduled_tasks_max_runs_per_day",
+        "int",
+        True,
+        "conversation",
+        "Most scheduled messages one chat may receive per rolling 24h; later runs are skipped.",
+    ),
+    SettingSpec(
         "core_memory_max_length",
         "int",
         True,

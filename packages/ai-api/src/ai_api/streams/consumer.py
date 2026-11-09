@@ -12,6 +12,7 @@ from redis.asyncio import Redis
 from ..logger import logger
 from .manager import GROUP_NAME, acknowledge_message, read_stream_messages
 from .processor import process_chat_job_direct
+from .scheduled_runner import process_scheduled_run
 
 
 async def discover_active_streams(redis: Redis) -> set[str]:
@@ -123,6 +124,13 @@ async def process_single_message(user_id: str, message_id: str, data: dict):
         except (UnicodeDecodeError, AttributeError) as e:
             logger.warning(f"Failed to decode value: {e}")
             return default
+
+    # A fired scheduled task (streams/scheduler.py), not a user message. It
+    # shares the chat's stream only so it runs in order with that chat's
+    # messages; it must never be merged with them or deduplicated as one.
+    if data.get(b"trigger") == b"scheduled":
+        await process_scheduled_run(safe_decode(data.get(b"run_id"), "") or "")
+        return
 
     try:
         # Validate required fields
