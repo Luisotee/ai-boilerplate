@@ -50,6 +50,7 @@ vi.mock('../../src/services/baileys.js', () => ({
   setLastDisconnect: vi.fn(),
   setReconnectAttempts: vi.fn(),
   stopSends: vi.fn(),
+  clearTimelockCache: vi.fn(),
 }));
 
 vi.mock('@whiskeysockets/baileys', async (importOriginal) => ({
@@ -186,6 +187,12 @@ describe('reconnect policy', () => {
     await close(DisconnectReason.connectionClosed);
     await vi.advanceTimersByTimeAsync(2_000_000);
     expect(socks).toHaveLength(1);
+  });
+
+  it('a reachoutTimeLock update clears the cached timelock', async () => {
+    const { clearTimelockCache } = await import('../../src/services/baileys.js');
+    await update({ reachoutTimeLock: { isActive: true } });
+    expect(clearTimelockCache).toHaveBeenCalledOnce();
   });
 
   it('connects with markOnlineOnConnect: false', () => {

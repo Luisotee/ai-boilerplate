@@ -24,6 +24,7 @@ import {
   stopSends,
   setLastDisconnect,
   setReconnectAttempts,
+  clearTimelockCache,
 } from './services/baileys.js';
 import { getWaVersionConfig } from './services/wa-version.js';
 import { flushPendingCredsSave, useAtomicMultiFileAuthState } from './services/auth-state.js';
@@ -407,6 +408,12 @@ export async function initializeWhatsApp(): Promise<void> {
   sock.ev.on('connection.update', async (update) => {
     if (myEpoch !== socketEpoch) return; // a newer socket has superseded this generation
     const { connection, lastDisconnect, qr } = update;
+
+    // WhatsApp pushed a reach-out timelock change (set, renewed or lifted), or
+    // fetchAccountReachoutTimelock() reported one (emitted synchronously, before
+    // the route caches its answer): drop the cached answer so the next lookup
+    // re-queries.
+    if (update.reachoutTimeLock) clearTimelockCache();
 
     if (qr) {
       // Retain the latest QR so it can be served over HTTP (the dashboard polls

@@ -432,6 +432,11 @@ class _Claimed:
     attempts: int
 
 
+def _has_pending(broadcast_id: uuid.UUID, platform: str) -> bool:
+    """Whether this lane still has a recipient to send to (eligibility re-checked)."""
+    return _next_recipient(broadcast_id, platform) is not None
+
+
 def _next_recipient(broadcast_id: uuid.UUID, platform: str) -> _Claimed | None:
     """Next pending recipient on this lane, re-checking eligibility right before sending.
 
@@ -602,7 +607,8 @@ async def _timelock_wait_seconds(client: WhatsAppClient) -> float:
         return TIMELOCK_UNKNOWN_END_WAIT_SECONDS
     seconds = (lock.ends_at - _utcnow()).total_seconds()
     if seconds <= 0:
-        # Already over (the client caches its answer for 5 min): send now.
+        # Already over: send now. The client re-queries a lock past its ends_at,
+        # so a renewed lock comes back with a new end.
         return 0.0
     return min(max(seconds, TIMELOCK_MIN_WAIT_SECONDS), TIMELOCK_MAX_WAIT_SECONDS)
 
@@ -723,7 +729,18 @@ async def run_lane(
     disconnect_key = (broadcast_id, platform)
     logger.info("Broadcast %s: %s lane started", broadcast_id, platform)
 
+    async def nothing_left() -> bool:
+        # Checked before any Baileys wait: a lane with no pending recipient must
+        # finish now, not sleep out a gap or a timelock (up to 6 h) first while
+        # the broadcast stays `running` and its heartbeat holds the sender lock.
+        if not await asyncio.to_thread(_has_pending, broadcast_id, platform):
+            logger.info("Broadcast %s: %s lane finished", broadcast_id, platform)
+            return True
+        return False
+
     if platform == "baileys":
+        if await nothing_left():
+            return
         # Pick up the schedule where the last Baileys lane left it.
         pacing = await asyncio.to_thread(_pacing_settings)
         recent = await asyncio.to_thread(_recent_baileys_sends, pacing.batch_size)
@@ -740,6 +757,8 @@ async def run_lane(
             return
 
         if platform == "baileys":
+            if await nothing_left():
+                return
             wait = await asyncio.to_thread(_baileys_wait_seconds)
             if wait > 0:
                 logger.info("Broadcast %s: baileys lane waiting %.0fs", broadcast_id, wait)

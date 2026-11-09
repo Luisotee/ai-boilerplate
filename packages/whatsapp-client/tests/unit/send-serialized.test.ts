@@ -129,15 +129,31 @@ describe('sendSerialized', () => {
     await result;
   });
 
-  it('counts the ready deadline from enqueue, so a long outage does not stack waits', async () => {
+  it('starts the ready window when a send reaches the head of its chat queue', async () => {
+    // Link down from t=0 with two sends queued. It reopens at 14s just long
+    // enough for the first send, so the second reaches the head at ~14s.
+    const sendMessage = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        mod.setSocketOpen(false);
+        return { key: { id: 'm1' } };
+      })
+      .mockResolvedValue({ key: { id: 'm2' } });
+    mod.setBaileysSocket(socket(sendMessage));
     const a = mod.sendSerialized('a@s.whatsapp.net', { text: '1' });
     const b = mod.sendSerialized('a@s.whatsapp.net', { text: '2' });
-    const ra = expect(a).rejects.toBeInstanceOf(mod.WhatsAppNotReadyError);
-    const rb = expect(b).rejects.toBeInstanceOf(mod.WhatsAppNotReadyError);
-    // Both were queued at t=0: both fail at ~15s, not 15s + 15s.
-    await vi.advanceTimersByTimeAsync(mod.SEND_READY_WAIT_MS);
-    await ra;
-    await rb;
+    const bResult = expect(b).resolves.toEqual({ key: { id: 'm2' } });
+    await vi.advanceTimersByTimeAsync(14_000);
+    mod.setSocketOpen(true);
+    await vi.advanceTimersByTimeAsync(500);
+    await expect(a).resolves.toEqual({ key: { id: 'm1' } });
+
+    // The second still gets its full 15s: a reopen at ~25s lands it (an
+    // enqueue-time deadline would have failed it at 15s).
+    await vi.advanceTimersByTimeAsync(10_500);
+    mod.setSocketOpen(true);
+    await vi.advanceTimersByTimeAsync(500);
+    await bResult;
   });
 
   it('drops a chat queue once it is idle', async () => {

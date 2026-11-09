@@ -210,32 +210,56 @@ async function start() {
   }
   app.log.info('='.repeat(60));
 
-  // Graceful shutdown: end the WhatsApp socket and wait for a pending creds
-  // write (so SIGTERM can't truncate creds.json), then stop accepting requests
-  // and let in-flight ones finish, flush Sentry, then exit 0. Runs once even if a
-  // second signal arrives. Errors while closing are logged, never rethrown.
+  // Graceful shutdown, inside the Baileys service's stop_grace_period (20s):
+  // 1. app.close() stops accepting requests and gets a SHUTDOWN_HEAD_START_MS
+  //    head start, so a send already inside sock.sendMessage (a broadcast text)
+  //    can finish and be recorded "sent" instead of being cut by step 2.
+  // 2. shutdownWhatsApp() fails queued sends, ends the socket and waits up to 3s
+  //    for a pending creds.json write (by ~7s, well before the grace ends).
+  // 3. app.close() gets at most SHUTDOWN_DRAIN_MS more (a long media upload can
+  //    hold it for SEND_TIMEOUT_MS), then Sentry flushes and we exit 0.
+  // Worst case 4 + 3 + 8 + 2 = 17s. Runs once even if a second signal arrives;
+  // errors while closing are logged, never rethrown.
+  const SHUTDOWN_HEAD_START_MS = 4000;
+  const SHUTDOWN_DRAIN_MS = 8000;
   let shuttingDown = false;
   for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     process.on(signal, async () => {
       if (shuttingDown) return;
       shuttingDown = true;
       app.log.info({ signal }, 'Received shutdown signal, shutting down gracefully...');
-      // WhatsApp first: it fails queued sends fast (an HTTP send can otherwise
-      // hold app.close() for 15s + SEND_TIMEOUT_MS) and flushes creds while
-      // Docker's grace period still has room.
+      const closing = app.close().then(
+        () => true,
+        (err: unknown) => {
+          app.log.error({ err }, 'Error during graceful shutdown');
+          return true;
+        }
+      );
+      await settlesWithin(closing, SHUTDOWN_HEAD_START_MS);
       try {
         await shutdownWhatsApp();
       } catch (err) {
         app.log.error({ err }, 'Error shutting down WhatsApp');
       }
-      try {
-        await app.close();
-      } catch (err) {
-        app.log.error({ err }, 'Error during graceful shutdown');
+      if (!(await settlesWithin(closing, SHUTDOWN_DRAIN_MS))) {
+        app.log.warn('HTTP requests still running at shutdown; exiting anyway');
       }
       await Sentry.close(2000);
       process.exit(0);
     });
+  }
+}
+
+/** Wait for `promise`, at most `ms`. True when it settled in time. */
+async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), ms);
+  });
+  try {
+    return await Promise.race([promise.then(() => true as const), timeout]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 

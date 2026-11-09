@@ -57,7 +57,12 @@ export function isBaileysReady(): boolean {
 type SendArgs = Parameters<WASocket['sendMessage']>;
 type SendResult = Awaited<ReturnType<WASocket['sendMessage']>>;
 
-/** How long a send waits for the link to (re)open, counted from when it was queued. */
+/**
+ * How long a send waits for the link to (re)open, counted from when it reaches
+ * the head of its chat's queue (so a send queued behind slow ones still gets
+ * the full window). During an outage a chat's queued sends therefore fail one
+ * window after another; stopSends() cuts that short at shutdown.
+ */
 export const SEND_READY_WAIT_MS = 15_000;
 const READY_POLL_MS = 500;
 
@@ -108,10 +113,10 @@ async function withSendTimeout<T>(promise: Promise<T>, timeoutMs: number): Promi
 async function runSend(
   jid: string,
   content: SendArgs[1],
-  options: SendArgs[2],
-  readyDeadline: number
+  options: SendArgs[2]
 ): Promise<SendResult> {
   if (sendsStopped) throw new WhatsAppNotReadyError();
+  const readyDeadline = Date.now() + SEND_READY_WAIT_MS;
   while (!isBaileysReady()) {
     const left = readyDeadline - Date.now();
     if (left <= 0 || sendsStopped) throw new WhatsAppNotReadyError();
@@ -127,9 +132,8 @@ export function sendSerialized(
   content: SendArgs[1],
   options?: SendArgs[2]
 ): Promise<SendResult> {
-  const readyDeadline = Date.now() + SEND_READY_WAIT_MS;
   const previous = sendQueues.get(jid) ?? Promise.resolve();
-  const job = previous.then(() => runSend(jid, content, options, readyDeadline));
+  const job = previous.then(() => runSend(jid, content, options));
   const tail = job.then(
     () => undefined,
     () => undefined
@@ -144,6 +148,41 @@ export function sendSerialized(
 /** Number of chats with a queued or running send (for tests). */
 export function pendingSendQueues(): number {
   return sendQueues.size;
+}
+
+// ── Reach-out timelock cache (GET /whatsapp/reachout-timelock) ───────────────
+// One WMex query per lookup and a broadcast asks before every send, so the
+// answer is cached per socket (a new socket may be a new account). An entry
+// expires after 5 min or at the lock's ends_at, whichever comes first: a lock
+// past its end is re-queried, never served stale (it may have been renewed).
+// whatsapp.ts clears it when Baileys pushes a reachoutTimeLock update.
+
+export interface TimelockValue {
+  active: boolean;
+  ends_at: string | null;
+  enforcement_type: string | null;
+}
+
+export const TIMELOCK_CACHE_MS = 5 * 60_000;
+let timelockCache: { sock: WASocket; expiresAt: number; value: TimelockValue } | null = null;
+
+export function getTimelockCache(sock: WASocket): TimelockValue | null {
+  if (!timelockCache || timelockCache.sock !== sock) return null;
+  if (Date.now() >= timelockCache.expiresAt) return null;
+  return timelockCache.value;
+}
+
+export function setTimelockCache(sock: WASocket, value: TimelockValue): void {
+  let expiresAt = Date.now() + TIMELOCK_CACHE_MS;
+  if (value.active && value.ends_at) {
+    const endsAt = Date.parse(value.ends_at);
+    if (!Number.isNaN(endsAt)) expiresAt = Math.min(expiresAt, endsAt);
+  }
+  timelockCache = { sock, expiresAt, value };
+}
+
+export function clearTimelockCache(): void {
+  timelockCache = null;
 }
 
 // ── Connection / pairing state ───────────────────────────────────────────────

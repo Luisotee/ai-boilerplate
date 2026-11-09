@@ -389,18 +389,26 @@ describe('handleTextMessage — dead link and presence failures', () => {
   const reactions = (sock: ReturnType<typeof makeMockSocket>) =>
     sock.sendMessage.mock.calls.filter(([, content]) => 'react' in (content as object));
 
-  it.each([
-    ['SendTimeoutError', () => new SendTimeoutError(60000)],
-    ['WhatsAppNotReadyError', () => new WhatsAppNotReadyError()],
-  ])('skips the ❌ and error reply when the reply send fails with %s', async (_n, makeErr) => {
+  it('skips the ❌ and error reply when the link is down (WhatsAppNotReadyError)', async () => {
     const sock = makeMockSocket();
-    sock.sendMessage.mockRejectedValueOnce(makeErr());
+    sock.sendMessage.mockRejectedValueOnce(new WhatsAppNotReadyError());
     mockSendMessageToAI.mockResolvedValueOnce('answer');
 
     await handleTextMessage(sock as never, makeTextMsg('hey') as never, 'hey');
 
     expect(sock.sendMessage).toHaveBeenCalledTimes(1); // only the failed reply
     expect(reactions(sock)).toHaveLength(0);
+  });
+
+  it('on a send timeout, sends the ❌ but no error text', async () => {
+    const sock = makeMockSocket();
+    sock.sendMessage.mockRejectedValueOnce(new SendTimeoutError(60000));
+    mockSendMessageToAI.mockResolvedValueOnce('answer');
+
+    await handleTextMessage(sock as never, makeTextMsg('hey') as never, 'hey');
+
+    expect(reactions(sock)).toHaveLength(1);
+    expect(textSends(sock)).toHaveLength(1); // only the timed-out reply
   });
 
   it('still sends ❌ and the error reply on other errors, and a failing reply does not throw', async () => {

@@ -1,7 +1,12 @@
 import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
-import type { WASocket } from '@whiskeysockets/baileys';
-import { getBaileysSocket, getConnectionInfo, isBaileysReady } from '../services/baileys.js';
+import {
+  getBaileysSocket,
+  getConnectionInfo,
+  getTimelockCache,
+  isBaileysReady,
+  setTimelockCache,
+} from '../services/baileys.js';
 import {
   ConnectionInfoSchema,
   StatusResponseSchema,
@@ -10,15 +15,6 @@ import {
   ReachoutTimelockResponseSchema,
 } from '../schemas/messaging.js';
 import { logoutWhatsApp } from '../whatsapp.js';
-
-// One WMex query per lookup; a broadcast asks before every send, so cache the
-// answer per socket (a new socket may be a new account) for a few minutes.
-const TIMELOCK_CACHE_MS = 5 * 60_000;
-let timelockCache: {
-  sock: WASocket;
-  fetchedAt: number;
-  value: { active: boolean; ends_at: string | null; enforcement_type: string | null };
-} | null = null;
 
 export async function registerConnectionRoutes(app: FastifyInstance) {
   app.withTypeProvider<ZodTypeProvider>().get(
@@ -109,13 +105,8 @@ export async function registerConnectionRoutes(app: FastifyInstance) {
         return reply.code(503).send({ error: 'WhatsApp not connected' });
       }
       const sock = getBaileysSocket();
-      if (
-        timelockCache &&
-        timelockCache.sock === sock &&
-        Date.now() - timelockCache.fetchedAt < TIMELOCK_CACHE_MS
-      ) {
-        return timelockCache.value;
-      }
+      const cached = getTimelockCache(sock);
+      if (cached) return cached;
       try {
         const result = await sock.fetchAccountReachoutTimelock();
         const value = {
@@ -123,7 +114,7 @@ export async function registerConnectionRoutes(app: FastifyInstance) {
           ends_at: result.timeEnforcementEnds?.toISOString() ?? null,
           enforcement_type: result.enforcementType ? String(result.enforcementType) : null,
         };
-        timelockCache = { sock, fetchedAt: Date.now(), value };
+        setTimelockCache(sock, value);
         return value;
       } catch (err) {
         app.log.warn({ err }, 'Failed to fetch the reach-out timelock');

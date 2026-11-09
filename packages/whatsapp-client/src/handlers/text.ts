@@ -193,10 +193,14 @@ export async function handleTextMessage(
     }
   } catch (error) {
     logger.error({ error, whatsappJid }, 'Error processing message');
-    // The link is down or a send hung: a ❌ and an error reply would only queue
-    // behind it and stall this chat (and the inbound loop) for minutes more.
-    if (error instanceof SendTimeoutError || error instanceof WhatsAppNotReadyError) return;
+    // Link down: a ❌ and an error reply would only wait out another ready
+    // window each and fail too.
+    if (error instanceof WhatsAppNotReadyError) return;
     await sendFailureReaction(msg);
+    // A reply send hung past SEND_TIMEOUT_MS. The queue has moved on, so the ❌
+    // (one guarded send) tells the user something went wrong, but no error text:
+    // the timed-out send may still land late and the text would contradict it.
+    if (error instanceof SendTimeoutError) return;
     try {
       await sendSerialized(whatsappJid, { text: config.errorReplyText });
     } catch (replyErr) {

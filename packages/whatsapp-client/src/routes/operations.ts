@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
-import { isBaileysReady, sendSerialized, WhatsAppNotReadyError } from '../services/baileys.js';
+import { isBaileysReady, sendSerialized } from '../services/baileys.js';
+import { replyIfNotConnected } from '../utils/not-connected.js';
 import { normalizeJid } from '../utils/jid.js';
 import {
   EditMessageSchema,
@@ -51,10 +52,8 @@ export async function registerOperationsRoutes(app: FastifyInstance) {
 
         return { success: true };
       } catch (err) {
-        // Nothing was sent: 503 lets a caller (the broadcast lane) retry safely.
-        if (err instanceof WhatsAppNotReadyError) {
-          return reply.code(503).send({ error: 'WhatsApp not connected' });
-        }
+        const notConnected = replyIfNotConnected(err, reply);
+        if (notConnected) return notConnected;
         const error = err as Error;
         app.log.error({ error }, 'Failed to edit message');
 
@@ -114,10 +113,8 @@ export async function registerOperationsRoutes(app: FastifyInstance) {
 
         return { success: true };
       } catch (err) {
-        // Nothing was sent: 503 lets a caller (the broadcast lane) retry safely.
-        if (err instanceof WhatsAppNotReadyError) {
-          return reply.code(503).send({ error: 'WhatsApp not connected' });
-        }
+        const notConnected = replyIfNotConnected(err, reply);
+        if (notConnected) return notConnected;
         const error = err as Error;
         app.log.error({ error }, 'Failed to delete message');
 
