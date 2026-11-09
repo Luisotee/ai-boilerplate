@@ -1,19 +1,11 @@
 from pydantic_ai import RunContext
-from pydantic_ai.tools import ToolDefinition
 
 from ...formatting import markdown_to_whatsapp
 from ...logger import logger
 from ..core import AgentDeps, agent
 
 
-async def has_message_to_react_to(
-    ctx: RunContext[AgentDeps], tool_def: ToolDefinition
-) -> ToolDefinition | None:
-    """`prepare` hook: a reaction needs the id of the message being answered."""
-    return tool_def if ctx.deps.current_message_id else None
-
-
-@agent.tool(prepare=has_message_to_react_to)
+@agent.tool
 async def send_whatsapp_reaction(ctx: RunContext[AgentDeps], emoji: str) -> str:
     """
     React to the user's message with an emoji.

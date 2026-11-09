@@ -68,3 +68,38 @@ def test_stepped_window_reuses_most_of_the_history():
     # A step of 10 messages is 5 private turns: 4 of them repeat the whole
     # previous history, the 5th (the jump) repeats none of it. ~74% on average.
     assert _reused_share(20, 10, turns=200) > 0.7
+
+
+class TestGetConversationHistoryQuery:
+    """The query itself: newest first with a LIMIT (a bounded sort), reversed."""
+
+    def _run(self, step: int, total: int, limit: int = 20):
+        from unittest.mock import MagicMock, patch
+
+        from ai_api import database
+
+        query = MagicMock()
+        query.filter.return_value = query
+        query.order_by.return_value = query
+        query.limit.return_value = query
+        query.count.return_value = total
+        query.all.return_value = ["m3", "m2", "m1"]
+        db = MagicMock()
+        db.query.return_value = query
+        with (
+            patch.object(database, "get_or_create_user", return_value=MagicMock(id="u1")),
+            patch.object(database.settings, "history_window_step", step),
+        ):
+            result = database.get_conversation_history(db, "jid", "private", limit=limit)
+        return query, result
+
+    def test_step_one_skips_count_and_limits_to_the_limit(self):
+        query, result = self._run(step=1, total=500)
+        query.count.assert_not_called()
+        query.limit.assert_called_once_with(20)
+        assert result == ["m1", "m2", "m3"]  # oldest first
+
+    def test_stepped_window_limits_to_the_window_size(self):
+        query, _ = self._run(step=10, total=35)
+        query.count.assert_called_once()
+        query.limit.assert_called_once_with(35 - stepped_window_start(35, 20, 10))

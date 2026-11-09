@@ -18,7 +18,7 @@ from ...commands import (
     handle_clean_command,
     set_broadcast_opt_out,
 )
-from ...database import get_or_create_preferences, is_group_jid
+from ...database import User, get_or_create_preferences, is_group_jid
 from ...logger import logger
 from ..core import AgentDeps, agent
 from ._db import safe_rollback
@@ -41,6 +41,7 @@ async def settings(
     - "tts": your replies as audio/voice messages; enabled turns them on/off,
       language sets their language ("stop sending me audio" = enabled=false).
     - "stt": the language voice messages are transcribed in; language="auto" auto-detects.
+      Transcription itself can't be turned off.
     - "announcements": the operators' update messages; enabled=false stops them
       ("stop sending me news"), enabled=true resumes them.
 
@@ -72,7 +73,10 @@ async def settings(
 async def _show(deps: AgentDeps) -> str:
     try:
         prefs = get_or_create_preferences(deps.db, deps.user_id)
-        return format_settings(prefs)
+        # Same view as /settings: the announcements flag lives on the user row.
+        user = deps.db.get(User, deps.user_id)
+        opt_out = bool(user.broadcast_opt_out) if user is not None else None
+        return format_settings(prefs, opt_out)
     except Exception as e:
         safe_rollback(deps.db)
         logger.error(f"Error getting user settings: {str(e)}", exc_info=True)
@@ -119,6 +123,14 @@ async def _update_tts(deps: AgentDeps, enabled: bool | None, language: str | Non
 
 
 async def _update_stt(deps: AgentDeps, language: str | None) -> str:
+    # No language is not a reset: "stop transcribing" arrives as enabled=false
+    # with no language, and must not silently drop a configured language.
+    if language is None:
+        codes = ", ".join(sorted(SUPPORTED_LANGUAGES))
+        return (
+            "Nothing changed: voice messages are always transcribed; transcription "
+            f'can\'t be turned off. Pass language ({codes}) or "auto" to auto-detect.'
+        )
     refusal = group_admin_refusal(deps, "change this group's transcription settings", "/stt")
     if refusal:
         return refusal
@@ -126,7 +138,7 @@ async def _update_stt(deps: AgentDeps, language: str | None) -> str:
     try:
         prefs = get_or_create_preferences(deps.db, deps.user_id)
 
-        if language is None or language.lower() == "auto":
+        if language.lower() == "auto":
             prefs.stt_language = None
             deps.db.commit()
             result = "STT language set to auto-detect."
@@ -185,8 +197,10 @@ async def clean_user_data(
     """
     Delete this chat's data ("clear my history", "forget everything about me", "start over").
 
-    Destructive: if the intent is at all unclear, confirm before calling. In a group
-    it clears the whole group's data and only a group admin may do it.
+    Destructive and can't be undone. For level "data" or "all", ALWAYS tell the user
+    what will be deleted and wait for their yes before calling; for "messages",
+    confirm when the intent is at all unclear. In a group it clears the whole
+    group's data and only a group admin may do it.
 
     Args:
         level: "messages" = the conversation only; "data" = messages and the chat's

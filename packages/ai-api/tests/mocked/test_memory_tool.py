@@ -410,3 +410,32 @@ async def test_core_memory_header_shows_the_size():
         text = await inject_core_memory(ctx)
     assert f"{len(DOC)}/2000 chars" in text
     assert DOC in text
+
+
+@pytest.mark.parametrize("old_text", ["- likes tea\n", "- likes tea\r\n", "\n- likes tea"])
+def test_remove_matches_a_line_copied_with_its_line_break(old_text):
+    assert "- likes tea" not in apply_operations(DOC, [_op("remove", old_text=old_text)])
+
+
+async def test_a_shrinking_edit_saves_when_the_limit_was_lowered_below_the_notes():
+    previous = "\n".join(f"- fact number {i:03d}" for i in range(100))  # ~1.9k chars
+    mem, result = await _call(
+        _ctx(), previous, [_op("remove", old_text="fact number 000")], max_length=1000
+    )
+    assert "fact number 000" not in mem.content
+    assert result.startswith("Core memory saved")
+
+
+async def test_an_edit_that_grows_past_the_limit_is_refused():
+    mem, result = await _call(_ctx(), "- a", [_op("add", "- " + "x" * 50)], max_length=20)
+    assert mem.content == "- a"
+    assert result.startswith("Nothing saved")
+
+
+async def test_tidying_a_legacy_document_alone_is_not_a_change():
+    ctx = _ctx()
+    legacy = "- likes tea   \n\n\n\n- likes coffee"
+    # Patch a span to itself: the result differs from `legacy` only by tidying.
+    mem, _ = await _call(ctx, legacy, [_op("patch", "likes tea", "likes tea")])
+    assert mem.previous_content is None
+    ctx.deps.db.commit.assert_not_called()

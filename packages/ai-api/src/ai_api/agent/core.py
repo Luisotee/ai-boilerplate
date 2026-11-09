@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass
 
 import httpx
@@ -8,7 +9,9 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import get_active_prompt, get_or_create_core_memory
 from ..embeddings import EmbeddingService
+from ..logger import logger
 from ..runtime_config import runtime_config
+from ..services.shared_groups import shared_group_tools_available
 from ..whatsapp import WhatsAppClient
 from .model_chain import build_model
 
@@ -88,7 +91,9 @@ Your tools are described in their own definitions. Rules for choosing between th
   transcription language, or to stop or resume update messages is a settings change:
   call the settings tool. Deleting data: clean_user_data. You cannot do either by
   promising it; never say it is done without calling the tool.
-- Confirm before clean_user_data unless the request is explicit.
+- clean_user_data with level "data" or "all": ALWAYS say what will be deleted and wait
+  for the user's yes first, however explicit the request. "messages": confirm unless
+  the request is explicit.
 - Recall: use what is already in the conversation first. For "what did we talk about
   yesterday" or "the last 50 messages", use get_chat_history (this chat, in order). For
   a topic mentioned some time ago, use search_conversation_history. For questions about
@@ -106,6 +111,36 @@ Multi-part replies (intro + answer, answer + follow-up question, distinct though
 feel more human when split. Put --- on its own line between parts and each part is
 sent as a separate message. Aim for 2-3 bursts. Keep lists, code blocks and
 single-thought answers as one message; never put --- inside a list or code block."""
+
+
+# Tools this codebase renamed or merged. A stored /admin prompt (bot_prompt)
+# written for them still names them, and the model then calls tools that don't
+# exist; warn_on_removed_tools logs it so the operator can edit the prompt.
+REMOVED_TOOLS = {
+    "update_core_memory": "memory",
+    "get_user_settings": "settings",
+    "update_tts_settings": "settings",
+    "update_stt_settings": "settings",
+    "set_broadcast_subscription": "settings",
+}
+
+
+def removed_tools_named(prompt: str | None) -> list[str]:
+    """The removed tool names that ``prompt`` mentions, in REMOVED_TOOLS order."""
+    if not prompt:
+        return []
+    return [name for name in REMOVED_TOOLS if re.search(rf"\b{name}\b", prompt)]
+
+
+def warn_on_removed_tools(prompt: str | None) -> None:
+    """Log a warning when a stored prompt names tools that no longer exist."""
+    named = removed_tools_named(prompt)
+    if named:
+        renames = ", ".join(f"{old} -> {REMOVED_TOOLS[old]}" for old in named)
+        logger.warning(
+            f"⚠️ The stored system prompt (bot_prompt) names removed tools: {renames}. "
+            "Edit it via PUT /admin/prompt, or the model will call tools that don't exist."
+        )
 
 
 @agent.instructions
@@ -187,13 +222,13 @@ _SHARED_GROUP_GUIDANCE = (
 
 @agent.instructions
 async def shared_group_guidance(ctx: RunContext[AgentDeps]) -> str:
-    """Describe the shared-group tools — only when they are enabled.
+    """Describe the shared-group tools — only where the model has them.
 
     An instructions hook (not part of ``DEFAULT_SYSTEM_PROMPT``) so it follows
-    the SHARED_GROUP_TOOLS_ENABLED switch, which hides the tools themselves via
-    their ``prepare`` hook, and survives an ``/admin`` prompt override.
+    the same predicate as the tools' ``prepare`` hook (the flag, private chat,
+    not Cloud API) and survives an ``/admin`` prompt override.
     """
-    return _SHARED_GROUP_GUIDANCE if runtime_config.get("shared_group_tools_enabled") else ""
+    return _SHARED_GROUP_GUIDANCE if shared_group_tools_available(ctx.deps) else ""
 
 
 _BUG_REPORT_GUIDANCE = (

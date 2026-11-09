@@ -103,7 +103,9 @@ def apply_operations(document: str, operations: list[MemoryOperation]) -> str:
             document = document.replace(op.old_text, op.text, 1)
         else:  # remove
             lines = document.splitlines()
-            hits = [i for i, line in enumerate(lines) if op.old_text in line]
+            # A line copied with its line break still names that one line.
+            target = op.old_text.strip("\r\n")
+            hits = [i for i, line in enumerate(lines) if target in line]
             if len(hits) != 1:
                 raise MemoryOperationError(f"{where}: {_match_problem(len(hits), 'lines')}")
             del lines[hits[0]]
@@ -162,7 +164,9 @@ async def memory(ctx: RunContext[AgentDeps], operations: list[MemoryOperation]) 
         except MemoryOperationError as e:
             return f"Nothing saved: {e}."
 
-        if len(content) > max_length:
+        # Over the limit only when the edit grows past it: if the limit was
+        # lowered below the current notes, a shrinking edit still saves.
+        if len(content) > max(len(previous), max_length):
             return (
                 f"Nothing saved: the notes would be {len(content)}/{max_length} chars. "
                 "In the same call, patch or remove lines to make room (merge related "
@@ -179,7 +183,9 @@ async def memory(ctx: RunContext[AgentDeps], operations: list[MemoryOperation]) 
             if refusal:
                 return refusal
 
-        if content != previous:
+        # Compare tidied: tidying a legacy document alone is not a change, and
+        # must not replace the /memories undo backup with a near-copy.
+        if content != _tidy(previous):
             mem.previous_content, mem.content_trusted = backup_after_save(
                 previous,
                 mem.previous_content,

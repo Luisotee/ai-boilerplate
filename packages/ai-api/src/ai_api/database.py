@@ -512,15 +512,22 @@ def get_conversation_history(db, whatsapp_jid: str, conversation_type: str, limi
 
     query = db.query(ConversationMessage).filter(ConversationMessage.user_id == user.id)
 
-    # Stepped window (see stepped_window_start): oldest first, from a start that
-    # only moves every `history_window_step` messages, so the history prefix is
-    # identical across runs and the provider's prompt cache can serve it.
-    start = stepped_window_start(query.count(), limit, settings.history_window_step)
-    return (
-        query.order_by(ConversationMessage.timestamp.asc(), ConversationMessage.id.asc())
-        .offset(start)
+    # Stepped window (see stepped_window_start): a start that only moves every
+    # `history_window_step` messages, so the history prefix is identical across
+    # runs and the provider's prompt cache can serve it. Either way the fetch is
+    # newest-first with a LIMIT (a bounded top-N sort), reversed to oldest first;
+    # a message saved after count() only shifts the window by one.
+    step = settings.history_window_step
+    size = limit
+    if step > 1:
+        total = query.count()
+        size = total - stepped_window_start(total, limit, step)
+    messages = (
+        query.order_by(ConversationMessage.timestamp.desc(), ConversationMessage.id.desc())
+        .limit(size)
         .all()
     )
+    return list(reversed(messages))
 
 
 def stepped_window_start(total: int, limit: int, step: int) -> int:

@@ -8,5 +8,5 @@
   for the free local run.
 
 Local run (no cost, part of the test suite): ``tests/mocked/test_golden_evals.py``.
-Real models (opt-in, costs tokens): ``uv run python -m ai_api.scripts.run_evals``.
+Real models (opt-in, costs tokens): ``uv run python -m tests.evals.run``.
 """

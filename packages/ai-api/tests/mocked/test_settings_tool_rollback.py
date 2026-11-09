@@ -116,3 +116,37 @@ class TestCleanUserDataRollback:
 
         ctx.deps.db.rollback.assert_not_called()
         assert result == "Cleared 42 messages."
+
+
+class TestSttWithoutLanguage:
+    async def test_no_language_changes_nothing(self):
+        # "stop transcribing" arrives as enabled=false with no language; it
+        # must not reset a configured language to auto-detect.
+        ctx = _make_ctx()
+        prefs = MagicMock(stt_language="pt")
+        with patch("ai_api.agent.tools.settings.get_or_create_preferences", return_value=prefs):
+            result = await settings(ctx, "stt", enabled=False)
+
+        assert prefs.stt_language == "pt"
+        ctx.deps.db.commit.assert_not_called()
+        assert "can't be turned off" in result
+
+    async def test_auto_must_be_explicit(self):
+        ctx = _make_ctx()
+        prefs = MagicMock(stt_language="pt")
+        with patch("ai_api.agent.tools.settings.get_or_create_preferences", return_value=prefs):
+            result = await settings(ctx, "stt", language="auto")
+
+        assert prefs.stt_language is None
+        assert result == "STT language set to auto-detect."
+
+
+class TestShowIncludesAnnouncements:
+    async def test_show_reports_the_announcements_flag(self):
+        ctx = _make_ctx()
+        ctx.deps.db.get.return_value = MagicMock(broadcast_opt_out=True)
+        prefs = MagicMock(tts_enabled=False, tts_language="en", stt_language=None)
+        with patch("ai_api.agent.tools.settings.get_or_create_preferences", return_value=prefs):
+            result = await settings(ctx, "show")
+
+        assert "Update announcements: off" in result

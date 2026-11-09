@@ -111,6 +111,16 @@ class ToolReturnContains(Evaluator[EvalInput, EvalOutput, ExpectedBehaviour]):
 
 
 @dataclass
+class NoToolFailed(Evaluator[EvalInput, EvalOutput, ExpectedBehaviour]):
+    """No tool reported an internal failure ("Failed to ..."), which would mean
+    the case measured retry/apology behaviour instead of what it is about."""
+
+    def evaluate(self, ctx: EvalContext) -> EvaluationReason:
+        failures = ctx.output.tool_failures
+        return EvaluationReason(value=not failures, reason="; ".join(failures) or "ok")
+
+
+@dataclass
 class ReplyContains(Evaluator[EvalInput, EvalOutput, ExpectedBehaviour]):
     """The reply mentions every expected fragment (case-insensitive)."""
 
@@ -146,6 +156,7 @@ ALL_EVALUATORS = [
     ExpectedToolsCalled(),
     NoUnexpectedTools(),
     ToolReturnContains(),
+    NoToolFailed(),
     ReplyContains(),
     RepliesInLanguage(),
     NoMarkdown(),

@@ -1,7 +1,7 @@
 """The pt-BR golden set, run locally against a scripted FunctionModel (no cost).
 
 The oracle model plays each case's expected tool calls, so this does NOT
-measure tool choice (``python -m ai_api.scripts.run_evals`` does, against the
+measure tool choice (``python -m tests.evals.run`` does, against the
 real models). It guards what the golden set relies on: every expected tool
 still exists with those arguments, the tools run against the stubs, the
 group-admin refusal reaches the tool reply, and the evaluators themselves.
@@ -9,9 +9,9 @@ group-admin refusal reaches the tool reply, and the evaluators themselves.
 
 import pytest
 
-from ai_api.evals.evaluators import NoMarkdown, guess_language
-from ai_api.evals.golden import CASES, golden_dataset
-from ai_api.evals.harness import EvalInput, EvalOutput, oracle_model, run_case
+from tests.evals.evaluators import NoMarkdown, guess_language
+from tests.evals.golden import CASES, golden_dataset
+from tests.evals.harness import EvalInput, EvalOutput, oracle_model, run_case
 
 
 def _expected_by_input():
@@ -72,3 +72,21 @@ def test_no_markdown_evaluator(reply, ok):
         output = EvalOutput(route="agent", reply=reply)
 
     assert NoMarkdown().evaluate(Ctx()).value is ok
+
+
+async def test_the_memory_case_really_saves():
+    # The stub once lacked content_trusted, so `memory` always returned
+    # "Failed to update core memory" and no evaluator noticed.
+    case = next(c for c in CASES if c.name == "lembrar_fato")
+    output = await run_case(case.inputs, model=oracle_model(case.metadata))
+    assert output.tool_returns["memory"].startswith("Core memory saved")
+    assert not output.tool_failures
+
+
+def test_a_tool_failure_fails_the_case():
+    from tests.evals.evaluators import NoToolFailed
+
+    class Ctx:
+        output = EvalOutput(route="agent", tool_failures=["memory: Failed to update core memory."])
+
+    assert NoToolFailed().evaluate(Ctx()).value is False

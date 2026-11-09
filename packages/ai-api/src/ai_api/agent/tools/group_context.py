@@ -31,7 +31,12 @@ from ...logger import logger
 from ...rag.conversation import format_conversation_results, format_transcript
 from ...rag.conversation import search_conversation_history as search_conversation_fn
 from ...runtime_config import runtime_config
-from ...services.shared_groups import platform_of, resolve_shared_groups, telegram_identity
+from ...services.shared_groups import (
+    platform_of,
+    resolve_shared_groups,
+    shared_group_tools_available,
+    telegram_identity,
+)
 from ...whatsapp import WhatsAppNotConnectedError
 from ...whatsapp.client import SharedGroup
 from ..core import AgentDeps, agent
@@ -51,16 +56,9 @@ CLOUD_UNSUPPORTED = (
 async def shared_group_tools_enabled(
     ctx: RunContext[AgentDeps], tool_def: ToolDefinition
 ) -> ToolDefinition | None:
-    """`prepare` hook: show both tools only where they can work.
-
-    That is: SHARED_GROUP_TOOLS_ENABLED is on, the chat is private (inside a
-    group both refuse), and the client isn't the Cloud API (no group context).
-    """
-    if not runtime_config.get("shared_group_tools_enabled"):
-        return None
-    if is_group_jid(ctx.deps.whatsapp_jid) or platform_of(ctx.deps.client_id) == "cloud":
-        return None
-    return tool_def
+    """`prepare` hook: show both tools only where they can work
+    (`shared_group_tools_available`)."""
+    return tool_def if shared_group_tools_available(ctx.deps) else None
 
 
 def _match_shared_group(

@@ -86,16 +86,19 @@ async def get_ai_response(
 def cached_input_tokens(usage: RunUsage) -> int:
     """Input tokens the provider served from its prompt cache in this run.
 
-    pydantic-ai normalises them into ``cache_read_tokens`` when the provider's
-    usage block has a known field (Gemini ``cachedContentTokenCount``, OpenAI-
-    style ``prompt_tokens_details.cached_tokens``); DeepSeek's own
-    ``prompt_cache_hit_tokens`` only lands in ``details``, so read that too.
+    Checked against pydantic-ai 1.61 (``models/openai.py`` ``_map_usage``):
+    every top-level int in an OpenAI-compatible usage block lands in
+    ``details``, so DeepSeek's ``prompt_cache_hit_tokens`` is always there
+    (summed across requests by ``RunUsage.incr``). ``cache_read_tokens`` is
+    filled only from ``prompt_tokens_details.cached_tokens`` (OpenAI style;
+    Gemini's ``cachedContentTokenCount`` too), which DeepSeek may omit. Take
+    the larger; a None value (a provider sending null) counts as 0.
     """
     details = usage.details or {}
     return max(
-        usage.cache_read_tokens,
-        details.get("prompt_cache_hit_tokens", 0),
-        details.get("cached_content_tokens", 0),
+        usage.cache_read_tokens or 0,
+        details.get("prompt_cache_hit_tokens") or 0,
+        details.get("cached_content_tokens") or 0,
     )
 
 

@@ -38,7 +38,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.models import Model
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 
-from ..commands import is_command
+from ai_api.commands import is_command
 
 PRIVATE_JID = "5591999990000@s.whatsapp.net"
 GROUP_JID = "120363000000000000@g.us"
@@ -121,6 +121,9 @@ class EvalOutput:
     tool_calls: list[ToolCall] = field(default_factory=list)
     #: tool name -> its last reply in the run.
     tool_returns: dict[str, str] = field(default_factory=dict)
+    #: Every reply that reports an internal failure ("Failed to ..."): a broken
+    #: stub or a real bug, never the behaviour a case means to measure.
+    tool_failures: list[str] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- stubs
@@ -183,9 +186,9 @@ def _fake_wikipedia() -> MagicMock:
 @contextlib.contextmanager
 def stubbed_environment(inputs: EvalInput) -> Iterator[SimpleNamespace]:
     """Patch everything a run would reach outside the process; yields the state."""
-    from ..runtime_config import runtime_config
+    from ai_api.runtime_config import runtime_config
 
-    memory = SimpleNamespace(content=inputs.memory, previous_content=None)
+    memory = SimpleNamespace(content=inputs.memory, previous_content=None, content_trusted=True)
     prefs = SimpleNamespace(tts_enabled=False, tts_language="pt", stt_language=None)
     targets = {
         "ai_api.agent.core.get_active_prompt": MagicMock(return_value=None),
@@ -210,7 +213,7 @@ def stubbed_environment(inputs: EvalInput) -> Iterator[SimpleNamespace]:
 
 
 def _deps(inputs: EvalInput, http_client: httpx.AsyncClient):
-    from ..agent import AgentDeps
+    from ai_api.agent import AgentDeps
 
     is_group = inputs.chat == "group"
     whatsapp_client = MagicMock()
@@ -242,16 +245,22 @@ def _history(inputs: EvalInput) -> list[ModelMessage] | None:
     return messages or None
 
 
-def _read_tools(messages: list[ModelMessage]) -> tuple[list[ToolCall], dict[str, str]]:
+def _read_tools(
+    messages: list[ModelMessage],
+) -> tuple[list[ToolCall], dict[str, str], list[str]]:
     calls: list[ToolCall] = []
     returns: dict[str, str] = {}
+    failures: list[str] = []
     for message in messages:
         for part in message.parts:
             if isinstance(part, ToolCallPart):
                 calls.append(ToolCall(part.tool_name, part.args_as_dict()))
             elif isinstance(part, ToolReturnPart):
-                returns[part.tool_name] = part.model_response_str()
-    return calls, returns
+                text = part.model_response_str()
+                returns[part.tool_name] = text
+                if text.startswith("Failed"):
+                    failures.append(f"{part.tool_name}: {text}")
+    return calls, returns, failures
 
 
 # --------------------------------------------------------------------------- runner
@@ -266,7 +275,7 @@ async def run_case(inputs: EvalInput, model: Model | None = None) -> EvalOutput:
     if is_command(inputs.message):
         return EvalOutput(route="command")
 
-    from ..agent import agent, get_ai_response
+    from ai_api.agent import agent, get_ai_response
 
     prompt = inputs.message
     if inputs.chat == "group":
@@ -282,8 +291,10 @@ async def run_case(inputs: EvalInput, model: Model | None = None) -> EvalOutput:
                     prompt, _history(inputs), agent_deps=_deps(inputs, http_client)
                 ):
                     reply = text
-    calls, returns = _read_tools(messages)
-    return EvalOutput(route="agent", reply=reply, tool_calls=calls, tool_returns=returns)
+    calls, returns, failures = _read_tools(messages)
+    return EvalOutput(
+        route="agent", reply=reply, tool_calls=calls, tool_returns=returns, tool_failures=failures
+    )
 
 
 def _oracle_args(call: ExpectedCall) -> dict[str, Any]:

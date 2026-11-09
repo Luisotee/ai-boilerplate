@@ -24,7 +24,7 @@ import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from ai_api.evals.harness import EvalInput, run_case
+from tests.evals.harness import EvalInput, run_case
 
 SNAPSHOT_DIR = Path(__file__).parent.parent / "fixtures" / "prompt_surface"
 UPDATE = os.environ.get("UPDATE_PROMPT_SURFACE") == "1"
