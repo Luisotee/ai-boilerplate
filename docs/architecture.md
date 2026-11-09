@@ -17,7 +17,7 @@ How a WhatsApp message traverses the system:
 
 ## Database tables
 
-11 tables: models in `database.py` (users, conversation_messages, conversation_preferences, core_memories, bot_prompt, runtime_settings, broadcasts, broadcast_recipients, bug_reports) and `kb_models.py` (knowledge_base_documents, knowledge_base_chunks).
+13 tables: models in `database.py` (users, conversation_messages, conversation_preferences, core_memories, bot_prompt, runtime_settings, broadcasts, broadcast_recipients, bug_reports, group_topics, group_topic_cursors) and `kb_models.py` (knowledge_base_documents, knowledge_base_chunks).
 
 ## Job pipeline history
 

@@ -51,6 +51,7 @@ Claude Code loads a folder's `CLAUDE.md` when it works there. **These subsystems
 | `docs/docker.md` | Non-root images, ignore files, volume chown on upgrade, TS logging/shutdown |
 | `packages/ai-api/docs/admin-api.md` | `/admin` routes, runtime settings `REGISTRY` |
 | `packages/ai-api/docs/media-and-kb.md` | KB dedup, hybrid/vector search, PDF parser, STT |
+| `packages/ai-api/docs/group-topics.md` | Group topics job (opt-in), topic search |
 | `packages/ai-api/docs/markdown-formatting.md` | Model-output Markdown → WhatsApp/Telegram conversion |
 | `packages/ai-api/docs/logfire.md` | Logfire instrumentation details |
 | `docs/architecture.md`, `docs/commands.md`, `docs/testing.md`, `docs/workflows.md` | Full message flow, command list, test patterns, workflow steps |
@@ -99,7 +100,7 @@ cd packages/ai-api && uv run pytest tests/mocked/test_model_chain_fallback.py -k
 ## Database
 
 - **PostgreSQL + pgvector** (3072-dim vectors via `gemini-embedding-001`)
-- **11 tables**, models in `database.py` and `kb_models.py` (list in `docs/architecture.md`)
+- **13 tables**, models in `database.py` and `kb_models.py` (list in `docs/architecture.md`)
 - **No Alembic migrations.** SQLAlchemy `create_all()` only creates missing *tables*, never new columns. Column/index changes ship as hand-written, idempotent (`IF NOT EXISTS`) SQL in `packages/ai-api/docs/migrations/<YYYY-MM-DD>-<name>.sql`, named so they match what `create_all()` emits on a fresh DB. Apply them to an existing Docker deployment BEFORE rolling out the code that needs them (safe to re-run):
   ```bash
   docker compose exec -T postgres psql -U aiagent -d aiagent \
