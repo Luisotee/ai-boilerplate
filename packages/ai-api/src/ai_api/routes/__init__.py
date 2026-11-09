@@ -10,6 +10,7 @@ from .chat import router as chat_router
 from .contact import router as contact_router
 from .health import router as health_router
 from .knowledge_base import router as knowledge_base_router
+from .openai_compat import router as openai_router
 from .preferences import router as preferences_router
 from .speech import router as speech_router
 
@@ -21,6 +22,7 @@ __all__ = [
     "contact_router",
     "health_router",
     "knowledge_base_router",
+    "openai_router",
     "preferences_router",
     "speech_router",
 ]
