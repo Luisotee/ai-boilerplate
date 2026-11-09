@@ -12,7 +12,12 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-vi.mock('../../src/api-client.js', () => ({
+vi.mock('../../src/api-client.js', async (importOriginal) => ({
+  // Real error class + notice: the handler tells a poll timeout from a failure.
+  PollTimeoutError: (await importOriginal<typeof import('../../src/api-client.js')>())
+    .PollTimeoutError,
+  LATE_REPLY_NOTICE: (await importOriginal<typeof import('../../src/api-client.js')>())
+    .LATE_REPLY_NOTICE,
   sendMessageToAI: vi.fn(),
   getUserPreferences: vi.fn(),
   textToSpeech: vi.fn(),
@@ -251,5 +256,36 @@ describe('handleTextMessage', () => {
     expect(ctx.replyWithVoice).not.toHaveBeenCalled();
     // Text reply still happens
     expect(ctx.reply).toHaveBeenCalledWith('Text only', expect.anything());
+  });
+});
+
+describe('handleTextMessage — reply outlives the polling window', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetUserPreferences.mockResolvedValue({ tts_enabled: false });
+  });
+
+  it('replies with the late-reply notice and no 👎 reaction', async () => {
+    mockSendMessageToAI.mockRejectedValueOnce(
+      new apiClient.PollTimeoutError('job-1', '120000ms')
+    );
+    const ctx = makeCtx();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await handleTextMessage(ctx as any, 'hi');
+
+    expect(ctx.reply).toHaveBeenCalledTimes(1);
+    expect(ctx.reply.mock.calls[0][0]).toBe(apiClient.LATE_REPLY_NOTICE);
+    expect(mockSendReaction).not.toHaveBeenCalled();
+  });
+
+  it('sends nothing when the reply was delivered elsewhere (null)', async () => {
+    mockSendMessageToAI.mockResolvedValueOnce(null);
+    const ctx = makeCtx();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await handleTextMessage(ctx as any, 'hi');
+
+    expect(ctx.reply).not.toHaveBeenCalled();
   });
 });

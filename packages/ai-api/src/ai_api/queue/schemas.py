@@ -59,6 +59,14 @@ class JobStatusResponse(BaseModel):
         description="Complete assembled response (only present when status=complete)",
     )
     error: str | None = Field(default=None, description="Error message if status=failed")
+    silent: bool = Field(
+        default=False,
+        description=(
+            "Finished, but the client must send nothing: the reply was delivered "
+            "another way (pushed after the polling window, or merged into another "
+            "job's reply)"
+        ),
+    )
 
 
 class JobMetadata(BaseModel):

@@ -19,7 +19,12 @@ vi.mock('../../src/config.js', async (importOriginal) => {
   };
 });
 
-vi.mock('../../src/api-client.js', () => ({
+vi.mock('../../src/api-client.js', async (importOriginal) => ({
+  // Real error class + notice: the handler tells a poll timeout from a failure.
+  PollTimeoutError: (await importOriginal<typeof import('../../src/api-client.js')>())
+    .PollTimeoutError,
+  LATE_REPLY_NOTICE: (await importOriginal<typeof import('../../src/api-client.js')>())
+    .LATE_REPLY_NOTICE,
   sendMessageToAI: vi.fn(),
   getUserPreferences: vi.fn().mockResolvedValue({ tts_enabled: false }),
   textToSpeech: vi.fn(),
@@ -244,6 +249,35 @@ describe('handleTextMessage — burst sending', () => {
       ([, message]) => message === 'Sent AI response'
     );
     expect(successInfo).toBeUndefined();
+  });
+});
+
+describe('handleTextMessage — reply outlives the polling window', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('sends the late-reply notice instead of the error text and ❌', async () => {
+    const { PollTimeoutError, LATE_REPLY_NOTICE } = await import('../../src/api-client.js');
+    const sock = makeMockSocket();
+    mockSendMessageToAI.mockRejectedValueOnce(new PollTimeoutError('job-1', '120000ms'));
+
+    await handleTextMessage(sock as never, makeTextMsg('hi') as never, 'hi');
+
+    const texts = sock.sendMessage.mock.calls.map(([, p]) => (p as { text?: string }).text);
+    expect(texts).toEqual([LATE_REPLY_NOTICE]);
+    const reactions = sock.sendMessage.mock.calls.filter(([, p]) => 'react' in (p as object));
+    expect(reactions).toHaveLength(0);
+  });
+
+  it('sends nothing when the reply was delivered elsewhere (null)', async () => {
+    const sock = makeMockSocket();
+    mockSendMessageToAI.mockResolvedValueOnce(null);
+
+    await handleTextMessage(sock as never, makeTextMsg('hi') as never, 'hi');
+
+    const texts = sock.sendMessage.mock.calls.filter(([, p]) => 'text' in (p as object));
+    expect(texts).toHaveLength(0);
   });
 });
 

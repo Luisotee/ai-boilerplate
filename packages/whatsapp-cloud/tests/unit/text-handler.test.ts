@@ -18,7 +18,12 @@ vi.mock('../../src/config.js', async (importOriginal) => {
   };
 });
 
-vi.mock('../../src/api-client.js', () => ({
+vi.mock('../../src/api-client.js', async (importOriginal) => ({
+  // Real error class + notice: the handler tells a poll timeout from a failure.
+  PollTimeoutError: (await importOriginal<typeof import('../../src/api-client.js')>())
+    .PollTimeoutError,
+  LATE_REPLY_NOTICE: (await importOriginal<typeof import('../../src/api-client.js')>())
+    .LATE_REPLY_NOTICE,
   sendMessageToAI: vi.fn(),
   getUserPreferences: vi.fn().mockResolvedValue({ tts_enabled: false }),
   textToSpeech: vi.fn(),
@@ -220,5 +225,22 @@ describe('handleTextMessage (Cloud) — burst sending', () => {
       ([, message]) => message === 'Sent AI response'
     );
     expect(successInfo).toBeUndefined();
+  });
+});
+
+describe('handleTextMessage (Cloud) — reply outlives the polling window', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('sends the late-reply notice and no ❌', async () => {
+    const { PollTimeoutError, LATE_REPLY_NOTICE } = await import('../../src/api-client.js');
+    mockSendMessageToAI.mockRejectedValueOnce(new PollTimeoutError('job-1', '120000ms'));
+
+    await handleTextMessage('16505551234', 'wamid.abc', 'hi', 'Test User');
+
+    expect(mockSendText).toHaveBeenCalledTimes(1);
+    expect(mockSendText.mock.calls[0][1]).toBe(LATE_REPLY_NOTICE);
+    expect(mockReaction).not.toHaveBeenCalled();
   });
 });

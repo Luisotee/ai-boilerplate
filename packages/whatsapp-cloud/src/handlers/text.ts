@@ -1,5 +1,11 @@
 import * as graphApi from '../services/graph-api.js';
-import { sendMessageToAI, getUserPreferences, textToSpeech } from '../api-client.js';
+import {
+  sendMessageToAI,
+  getUserPreferences,
+  textToSpeech,
+  LATE_REPLY_NOTICE,
+  PollTimeoutError,
+} from '../api-client.js';
 import { config } from '../config.js';
 import { phoneToJid, isGroupChat, phoneFromJid } from '../utils/jid.js';
 import { logger } from '../logger.js';
@@ -144,6 +150,16 @@ export async function handleTextMessage(
       logger.warn({ error: ttsError, whatsappJid }, 'TTS delivery failed, text-only sent');
     }
   } catch (error) {
+    if (error instanceof PollTimeoutError) {
+      // The AI API pushes the reply when it is ready: no ❌, just a notice.
+      logger.warn({ to, messageId }, 'Reply not ready within the polling window');
+      try {
+        await graphApi.sendText(to, LATE_REPLY_NOTICE);
+      } catch (noticeError) {
+        logger.warn({ error: noticeError, to }, 'Failed to send the late-reply notice');
+      }
+      return;
+    }
     logger.error({ error, to, messageId }, 'Error handling text message');
     try {
       await graphApi.sendReaction(to, messageId, '\u274c');

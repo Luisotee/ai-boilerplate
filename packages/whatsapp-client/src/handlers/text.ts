@@ -1,6 +1,12 @@
 import type { WASocket, WAMessage } from '@whiskeysockets/baileys';
 import { logger } from '../logger.js';
-import { getUserPreferences, sendMessageToAI, textToSpeech } from '../api-client.js';
+import {
+  getUserPreferences,
+  LATE_REPLY_NOTICE,
+  PollTimeoutError,
+  sendMessageToAI,
+  textToSpeech,
+} from '../api-client.js';
 import { config } from '../config.js';
 import { stripDeviceSuffix, isGroupChat, resolveParticipantJid } from '../utils/jid.js';
 import { getPushName, getSenderName } from '../utils/message.js';
@@ -175,6 +181,12 @@ export async function handleTextMessage(
       }
     }
   } catch (error) {
+    if (error instanceof PollTimeoutError) {
+      // The AI API pushes the reply when it is ready: no ❌, no error text.
+      logger.warn({ whatsappJid }, 'Reply not ready within the polling window');
+      await sock.sendMessage(whatsappJid, { text: LATE_REPLY_NOTICE });
+      return;
+    }
     logger.error({ error, whatsappJid }, 'Error processing message');
     await sendFailureReaction(sock, msg);
     await sock.sendMessage(whatsappJid, {

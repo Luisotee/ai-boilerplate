@@ -95,6 +95,12 @@ class Settings(BaseSettings):
     arq_keep_result: int = 3600
     queue_chunk_ttl: int = 3600
     queue_per_user_max_jobs: int = 1
+    # The clients' polling budget for one reply (root .env POLL_MAX_DURATION_MS,
+    # shared with them). A job that finishes after it is delivered by push.
+    poll_max_duration_ms: int = 120000
+    # A chat job older than this when the worker gets to it is not run; the
+    # user gets a short "send it again" notice instead (an outage backlog).
+    chat_job_max_age_seconds: int = 3600
 
     # History
     history_limit_private: int = 20

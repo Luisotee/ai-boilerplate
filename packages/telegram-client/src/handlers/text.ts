@@ -1,6 +1,12 @@
 import { InputFile } from 'grammy';
 import type { TelegramContext } from '../bot.js';
-import { sendMessageToAI, getUserPreferences, textToSpeech } from '../api-client.js';
+import {
+  sendMessageToAI,
+  getUserPreferences,
+  textToSpeech,
+  LATE_REPLY_NOTICE,
+  PollTimeoutError,
+} from '../api-client.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { sleep, splitResponseIntoBursts, stripSplitDelimiters } from '../utils/message-split.js';
@@ -184,6 +190,16 @@ export async function handleTextMessage(
       logger.warn({ error: ttsError, jid }, 'TTS delivery failed, text-only sent');
     }
   } catch (error) {
+    if (error instanceof PollTimeoutError) {
+      // The AI API pushes the reply when it is ready: no reaction, just a notice.
+      logger.warn({ jid, messageId }, 'Reply not ready within the polling window');
+      try {
+        await ctx.reply(LATE_REPLY_NOTICE);
+      } catch (noticeError) {
+        logger.warn({ error: noticeError, jid }, 'Failed to send the late-reply notice');
+      }
+      return;
+    }
     logger.error({ error, jid, messageId }, 'Error handling text message');
     try {
       await telegramApi.sendReaction(chatId, messageId, '❌');

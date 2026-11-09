@@ -17,6 +17,7 @@ from ..queue.connection import get_redis_client
 from ..queue.utils import delete_job_image, get_job_image, save_job_chunk, set_job_metadata
 from ..services.bug_reports import record_auto_report
 from ..whatsapp import WhatsAppClient, create_whatsapp_client
+from .delivery import deliver_if_late
 from .manager import enqueue_pdf_processing
 
 #: Reply delivered when the model chain fails. English, like every user-facing
@@ -44,6 +45,7 @@ async def process_chat_job_direct(
     client_id: str | None = None,
     is_group_admin: bool | None = None,
     run_user_message_ids: list[str] | None = None,
+    enqueued_at_ms: int | None = None,
 ) -> dict:
     """
     Process a chat message asynchronously (one Redis Streams job).
@@ -74,6 +76,8 @@ async def process_chat_job_direct(
         sender_name: Sender's display name for group messages (optional)
         run_user_message_ids: Every saved user message this run answers, oldest
             first (several for a merged burst); defaults to [user_message_id]
+        enqueued_at_ms: When the job entered the stream (unix ms). A reply ready
+            after the clients' polling window is pushed (streams/delivery.py)
 
     Returns:
         Dict with processing result including success status, job_id, chunk count
@@ -186,6 +190,9 @@ async def process_chat_job_direct(
                             "error": "document_enqueue_failed",
                         },
                     )
+                    await deliver_if_late(
+                        redis, whatsapp_client, job_id, whatsapp_jid, full_response, enqueued_at_ms
+                    )
 
                     return {
                         "success": False,
@@ -283,6 +290,14 @@ async def process_chat_job_direct(
                         "model_error": True,
                     },
                 )
+                await deliver_if_late(
+                    redis,
+                    whatsapp_client,
+                    job_id,
+                    whatsapp_jid,
+                    MODEL_ERROR_FALLBACK_TEXT,
+                    enqueued_at_ms,
+                )
                 # After the user-facing steps, and off the event loop: it opens
                 # its own DB connection, which can stall while the DB is in trouble.
                 await asyncio.to_thread(
@@ -360,6 +375,9 @@ async def process_chat_job_direct(
                     "user_message_id": user_message_id,
                 },
             )
+            await deliver_if_late(
+                redis, whatsapp_client, job_id, whatsapp_jid, full_response, enqueued_at_ms
+            )
 
             logger.info(f"[Job {job_id}] ✅ Completed successfully")
 
@@ -410,6 +428,15 @@ async def process_chat_job_direct(
                     },
                 )
                 logger.info(f"[Job {job_id}] Wrote failed-status metadata")
+                # Nobody polls a job this old any more: tell the user it failed.
+                await deliver_if_late(
+                    redis,
+                    whatsapp_client,
+                    job_id,
+                    whatsapp_jid,
+                    MODEL_ERROR_FALLBACK_TEXT,
+                    enqueued_at_ms,
+                )
             except Exception as meta_err:
                 logger.error(f"[Job {job_id}] Failed to write failure metadata: {meta_err}")
 

@@ -44,6 +44,7 @@ from ..services.link import (
     platform_for_jid,
     unlink,
 )
+from ..streams.delivery import claim_delivery
 from ..streams.manager import add_message_to_stream
 from ..whatsapp import create_whatsapp_client
 from ..whitelist import Whitelist, is_whitelisted, parse_whitelist
@@ -633,6 +634,15 @@ async def get_job_status(request: Request, job_id: str):
         async with get_redis_client() as redis_client:
             # Infer status from Redis data (job metadata + chunks)
             status = await get_stream_job_status(redis_client, job_id)
+
+            # A finished job's reply is delivered once: by this poll, or by the
+            # worker's push when the job outlived the clients' polling window
+            # (streams/delivery.py). If the push won, the client sends nothing.
+            if status in ("complete", "failed"):
+                if await claim_delivery(redis_client, job_id, "poll") == "push":
+                    return JobStatusResponse(
+                        job_id=job_id, status="complete", complete=True, silent=True
+                    )
 
             # Get chunks
             chunks = await get_job_chunks(redis_client, job_id)

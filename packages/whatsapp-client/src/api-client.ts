@@ -8,6 +8,22 @@ function aiApiHeaders(contentType?: string): Record<string, string> {
   return headers;
 }
 
+/**
+ * Thrown when a reply is not ready within POLL_MAX_DURATION_MS. Not a failure:
+ * the AI API pushes the reply through /whatsapp/send-text once it is ready, so
+ * handlers tell the user to wait instead of reporting an error.
+ */
+export class PollTimeoutError extends Error {
+  constructor(jobId: string, limit: string) {
+    super(`Polling timeout: job ${jobId} exceeded ${limit}`);
+    this.name = 'PollTimeoutError';
+  }
+}
+
+/** Sent when the reply outlives the polling window (it arrives later by push). */
+export const LATE_REPLY_NOTICE =
+  "This is taking longer than usual. I'll send the answer here as soon as it's ready.";
+
 interface ImagePayload {
   data: string; // base64 encoded
   mimetype: string;
@@ -40,6 +56,8 @@ interface JobStatus {
   complete: boolean;
   full_response?: string;
   error?: string;
+  // Finished, but delivered another way (pushed late, or merged into another job's reply)
+  silent?: boolean;
 }
 
 interface EnqueueResponse {
@@ -194,7 +212,7 @@ export async function sendMessageToAI(
   while (iterations < config.polling.maxIterations) {
     const elapsedMs = Date.now() - startTime;
     if (elapsedMs >= config.polling.maxDurationMs) {
-      throw new Error(`Polling timeout: job ${job_id} exceeded ${config.polling.maxDurationMs}ms`);
+      throw new PollTimeoutError(job_id, `${config.polling.maxDurationMs}ms`);
     }
 
     const statusResponse = await fetchWithTimeout(
@@ -208,6 +226,11 @@ export async function sendMessageToAI(
     }
 
     const status: JobStatus = await statusResponse.json();
+
+    if (status.silent) {
+      logger.info({ job_id, iterations, elapsedMs }, 'Job finished; reply delivered elsewhere');
+      return null;
+    }
 
     if (status.complete) {
       logger.info({ job_id, iterations, elapsedMs }, 'Job completed');
@@ -225,9 +248,7 @@ export async function sendMessageToAI(
     await new Promise((resolve) => setTimeout(resolve, config.polling.intervalMs));
   }
 
-  throw new Error(
-    `Polling timeout: job ${job_id} exceeded ${config.polling.maxIterations} iterations`
-  );
+  throw new PollTimeoutError(job_id, `${config.polling.maxIterations} iterations`);
 }
 
 export async function getUserPreferences(whatsappJid: string): Promise<UserPreferences | null> {

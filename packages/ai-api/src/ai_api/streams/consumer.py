@@ -10,7 +10,8 @@ import asyncio
 from redis.asyncio import Redis
 
 from ..logger import logger
-from ..queue.utils import get_job_metadata
+from ..queue.utils import delete_job_image, get_job_metadata, save_job_chunk, set_job_metadata
+from .delivery import EXPIRED_JOB_NOTICE, is_expired, push_text_once
 from .manager import (
     GROUP_NAME,
     HEARTBEAT_INTERVAL_SECONDS,
@@ -18,6 +19,7 @@ from .manager import (
     claim_orphaned_chat_entries,
     read_stream_messages,
     refresh_heartbeat,
+    stream_entry_time_ms,
 )
 from .processor import process_chat_job_direct
 
@@ -148,6 +150,8 @@ async def _process_entry(redis: Redis, user_id: str, message_id: str, data: dict
     try:
         if not is_scheduled_entry(data) and await _already_finished(redis, data):
             logger.info(f"Chat job in entry {message_id} already finished; acking only")
+        elif not is_scheduled_entry(data) and is_expired(stream_entry_time_ms(message_id)):
+            await _expire_entry(redis, message_id, data)
         else:
             await process_single_message(user_id, message_id, data)
     except Exception as msg_error:
@@ -160,6 +164,43 @@ async def _process_entry(redis: Redis, user_id: str, message_id: str, data: dict
             await acknowledge_message(redis, user_id, message_id)
         except Exception as ack_error:
             logger.error(f"Failed to acknowledge message {message_id}: {ack_error}")
+
+
+async def _expire_entry(redis: Redis, message_id: str, data: dict) -> None:
+    """Close a chat job that waited past CHAT_JOB_MAX_AGE_SECONDS without
+    running it (an outage backlog): the user gets a short notice instead."""
+
+    def field(name: bytes) -> str | None:
+        value = data.get(name)
+        return value.decode("utf-8", "replace") if value is not None else None
+
+    job_id = field(b"job_id") or message_id
+    whatsapp_jid = field(b"whatsapp_jid")
+    logger.warning(f"[Job {job_id}] Expired before it could run; not running it")
+    await save_job_chunk(redis, job_id, 0, EXPIRED_JOB_NOTICE)
+    await set_job_metadata(
+        redis,
+        job_id,
+        {
+            "user_id": field(b"user_id"),
+            "whatsapp_jid": whatsapp_jid,
+            "conversation_type": field(b"conversation_type"),
+            "total_chunks": 1,
+            "user_message_id": field(b"user_message_id"),
+            "expired": True,
+        },
+    )
+    if field(b"has_image") == "true":
+        await delete_job_image(redis, job_id)
+    if whatsapp_jid:
+        await push_text_once(
+            redis,
+            field(b"client_id"),
+            job_id,
+            whatsapp_jid,
+            EXPIRED_JOB_NOTICE,
+            stream_entry_time_ms(message_id),
+        )
 
 
 async def process_single_message(user_id: str, message_id: str, data: dict):
@@ -243,6 +284,7 @@ async def process_single_message(user_id: str, message_id: str, data: dict):
             sender_name=sender_name,
             client_id=client_id,
             is_group_admin=is_group_admin,
+            enqueued_at_ms=stream_entry_time_ms(message_id),
         )
 
     except Exception as e:
