@@ -903,3 +903,96 @@ class TestWhitelistEnforcement:
                 }
             )
         assert response.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Reply images: media on GET /chat/job/{id} and GET /chat/job/{id}/media/{i}
+# ---------------------------------------------------------------------------
+
+_MEDIA_META = {
+    "user_id": "u",
+    "whatsapp_jid": TEST_JID,
+    "message": "Hi",
+    "conversation_type": "private",
+    "media": [
+        {
+            "index": 0,
+            "caption": "Fire map",
+            "mimetype": "image/png",
+            "url": "https://maps.example.com/fire.png",
+        }
+    ],
+}
+_PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 10
+
+
+def _media_redis(metadata: dict | None, media: dict[str, bytes]):
+    import json
+
+    async def get(key):
+        if key.startswith("job:meta:"):
+            return json.dumps(metadata) if metadata is not None else None
+        return media.get(key)
+
+    mock_redis = AsyncMock()
+    mock_redis.get = AsyncMock(side_effect=get)
+    mock_redis.lrange = AsyncMock(
+        return_value=[
+            json.dumps({"index": 0, "content": "", "timestamp": "2026-01-01T00:00:00"}).encode()
+        ]
+    )
+
+    @asynccontextmanager
+    async def mock_get_redis_client():
+        yield mock_redis
+
+    return mock_get_redis_client
+
+
+@patch("ai_api.main.init_db")
+@patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+@patch("ai_api.main.cleanup_expired_documents")
+class TestJobMedia:
+    async def _get(self, path, metadata, media, headers=AUTH_HEADERS):
+        with patch("ai_api.routes.chat.get_redis_client", _media_redis(metadata, media)):
+            from ai_api.main import app
+
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                return await client.get(path, headers=headers)
+
+    async def test_status_lists_media_when_complete(self, *_mocks):
+        response = await self._get("/chat/job/j1", _MEDIA_META, {})
+        data = response.json()
+        assert data["complete"] is True
+        assert data["full_response"] == ""
+        assert data["media"] == _MEDIA_META["media"]
+
+    async def test_status_without_media_has_null_media(self, *_mocks):
+        meta = {k: v for k, v in _MEDIA_META.items() if k != "media"}
+        response = await self._get("/chat/job/j1", meta, {})
+        assert response.json()["media"] is None
+
+    async def test_media_route_returns_bytes(self, *_mocks):
+        response = await self._get("/chat/job/j1/media/0", _MEDIA_META, {"job:media:j1:0": _PNG})
+        assert response.status_code == 200
+        assert response.content == _PNG
+        assert response.headers["content-type"] == "image/png"
+
+    async def test_media_route_404_for_unknown_index(self, *_mocks):
+        response = await self._get("/chat/job/j1/media/3", _MEDIA_META, {"job:media:j1:0": _PNG})
+        assert response.status_code == 404
+
+    async def test_media_route_404_when_bytes_expired(self, *_mocks):
+        response = await self._get("/chat/job/j1/media/0", _MEDIA_META, {})
+        assert response.status_code == 404
+
+    async def test_media_route_404_for_unknown_job(self, *_mocks):
+        response = await self._get("/chat/job/nope/media/0", None, {})
+        assert response.status_code == 404
+
+    async def test_media_route_requires_api_key(self, *_mocks):
+        response = await self._get(
+            "/chat/job/j1/media/0", _MEDIA_META, {"job:media:j1:0": _PNG}, headers={}
+        )
+        assert response.status_code == 401

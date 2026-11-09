@@ -143,8 +143,9 @@ async def delete_job_data(redis: Redis, job_id: str) -> None:
     meta_key = f"job:meta:{job_id}"
     result_key = f"job:result:{job_id}"
     image_key = f"job:image:{job_id}"
+    media_keys = [_media_key(job_id, i) for i in range(MAX_JOB_MEDIA)]
 
-    await redis.delete(chunk_key, meta_key, result_key, image_key)
+    await redis.delete(chunk_key, meta_key, result_key, image_key, *media_keys)
     logger.info(f"Deleted all data for job {job_id}")
 
 
@@ -198,3 +199,24 @@ async def delete_job_image(redis: Redis, job_id: str) -> None:
     image_key = f"job:image:{job_id}"
     await redis.delete(image_key)
     logger.debug(f"Deleted image for job {job_id}")
+
+
+#: Most images one reply may carry (see reply_media.py).
+MAX_JOB_MEDIA = 4
+
+
+def _media_key(job_id: str, index: int) -> str:
+    return f"job:media:{job_id}:{index}"
+
+
+async def save_job_media(redis: Redis, job_id: str, index: int, data: bytes) -> None:
+    """Store one reply image's raw bytes, for the client to fetch and send."""
+    await redis.set(_media_key(job_id, index), data, ex=settings.queue_chunk_ttl)
+
+
+async def get_job_media(redis: Redis, job_id: str, index: int) -> bytes | None:
+    """Raw bytes of reply image `index` of `job_id`, or None once expired."""
+    data = await redis.get(_media_key(job_id, index))
+    if data is None:
+        return None
+    return data if isinstance(data, bytes) else data.encode("latin-1")

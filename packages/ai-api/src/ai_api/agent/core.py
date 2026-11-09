@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import httpx
 from pydantic_ai import Agent, RunContext
@@ -41,6 +41,11 @@ class AgentDeps:
     is_group_admin: bool | None = None
     #: Stream job id of the message being answered (recorded on bug reports).
     job_id: str | None = None
+    #: Images to send after this run's text, in the current chat only
+    #: (`reply_media.ReplyImage`). The processor merges them with the
+    #: `![caption](https://…)` directives in the reply; a tool that produces an
+    #: image URL can append here instead of relying on the model to repeat it.
+    reply_media: list = field(default_factory=list)
 
 
 # Startup default: DeepSeek -> Gemini when DEEPSEEK_API_KEY is set, else Gemini
@@ -232,6 +237,9 @@ _FORMATTING_GUIDANCE = (
     "- Wrong: [text](https://site.com) → Right: paste the bare link, https://site.com\n"
     "- No # headings and no tables; to highlight a title, put it in *bold* on its own line\n"
     "- A line containing only --- is still how you split a reply into separate messages\n"
+    "- To send an image, put ![short caption](https://...) on its own line: it is delivered "
+    "as a photo. Only use a real JPEG or PNG link you got from a tool or the user, never a "
+    "guessed one\n"
     "== END FORMATTING =="
 )
 

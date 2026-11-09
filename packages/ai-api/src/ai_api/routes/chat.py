@@ -4,7 +4,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 from starlette.requests import Request
 
@@ -25,8 +25,8 @@ from ..formatting import markdown_to_whatsapp
 from ..kb_models import KnowledgeBaseDocument
 from ..logger import logger
 from ..queue.connection import get_redis_client
-from ..queue.schemas import ChunkData, EnqueueResponse, JobStatusResponse
-from ..queue.utils import get_job_chunks, get_job_metadata, save_job_image
+from ..queue.schemas import ChunkData, EnqueueResponse, JobMedia, JobStatusResponse
+from ..queue.utils import get_job_chunks, get_job_media, get_job_metadata, save_job_image
 from ..runtime_config import runtime_config
 from ..schemas import (
     ChatRequest,
@@ -633,6 +633,12 @@ async def get_job_status(request: Request, job_id: str):
             if status == "complete" and chunks:
                 response.full_response = "".join(chunk["content"] for chunk in chunks)
 
+            # Images to send after the text (reply_media.py).
+            if status == "complete":
+                metadata = await get_job_metadata(redis_client, job_id)
+                if metadata and metadata.get("media"):
+                    response.media = [JobMedia(**item) for item in metadata["media"]]
+
             # Surface the agent error from metadata so the client can log it.
             if status == "failed":
                 metadata = await get_job_metadata(redis_client, job_id)
@@ -644,6 +650,40 @@ async def get_job_status(request: Request, job_id: str):
     except Exception as e:
         logger.error(f"Error getting job status for {job_id}: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get(
+    "/chat/job/{job_id}/media/{index}",
+    tags=["Chat"],
+    response_class=Response,
+    responses={200: {"content": {"image/jpeg": {}, "image/png": {}}}, 404: {}},
+)
+@limiter.exempt
+async def get_job_media_file(request: Request, job_id: str, index: int):
+    """
+    Raw bytes of reply image `index` of a completed job.
+
+    The chat clients call this for each entry of the job's `media` list and
+    send the image to the chat the job came from. The bytes were downloaded
+    by the SSRF-hardened `safe_fetch.fetch_public_image`, so no client ever
+    fetches a model-chosen URL itself. 404 once the job's data has expired.
+    """
+    try:
+        async with get_redis_client() as redis_client:
+            metadata = await get_job_metadata(redis_client, job_id)
+            items = (metadata or {}).get("media") or []
+            item = next((m for m in items if m.get("index") == index), None)
+            if item is None:
+                raise HTTPException(status_code=404, detail="Media not found")
+            data = await get_job_media(redis_client, job_id, index)
+            if data is None:
+                raise HTTPException(status_code=404, detail="Media not found")
+            return Response(content=data, media_type=item["mimetype"])
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting media {index} for job {job_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error") from e
 
 
 @router.post("/chat", response_model=ChatResponse, tags=["Chat"])
