@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 
 import httpx
 
+from ..safe_fetch import ImageFetchError, fetch_public_image
 from .exceptions import (
     WhatsAppClientError,
     WhatsAppNotConnectedError,
@@ -435,33 +436,26 @@ class WhatsAppClient:
             phone_number: WhatsApp JID or phone number
             image_url: HTTPS URL of the image to download
             caption: Optional caption for the image
-            max_size_mb: Maximum file size in MB (default 16)
+            max_size_mb: Maximum file size in MB (capped at 5, the WhatsApp image limit)
 
         Returns:
             SendMessageResponse with success status and message_id
 
         Raises:
-            WhatsAppClientError: If URL is invalid, download fails, or file too large
+            WhatsAppClientError: If the URL is not a public https JPEG/PNG,
+                the download fails, or the file is too large (see safe_fetch.py)
         """
-        if not image_url.startswith("https://"):
-            raise WhatsAppClientError("Only HTTPS URLs are allowed for security")
-
         logger.info(f"Downloading image from {image_url[:50]}...")
 
         try:
-            img_response = await self._client.get(image_url, follow_redirects=True)
-            img_response.raise_for_status()
-        except httpx.HTTPError as e:
-            raise WhatsAppClientError(f"Failed to download image: {e}")
+            fetched = await fetch_public_image(
+                image_url, max_bytes=min(max_size_mb, 5) * 1024 * 1024
+            )
+        except ImageFetchError as e:
+            raise WhatsAppClientError(f"Could not download image: {e}") from e
 
-        content_type = img_response.headers.get("content-type", "")
-        if not content_type.startswith("image/"):
-            raise WhatsAppClientError(f"URL does not point to an image: {content_type}")
-
-        image_data = img_response.content
-        size_mb = len(image_data) / (1024 * 1024)
-        if size_mb > max_size_mb:
-            raise WhatsAppClientError(f"Image too large: {size_mb:.1f}MB (max {max_size_mb}MB)")
+        image_data = fetched.data
+        content_type = fetched.mimetype
 
         return await self.send_image(
             phone_number=phone_number,
