@@ -33,6 +33,7 @@ import { handleTextMessage } from './handlers/text.js';
 import { transcribeAudioMessage } from './handlers/audio.js';
 import { extractImageData } from './handlers/image.js';
 import { extractDocumentData } from './handlers/document.js';
+import { handleMessageUpdate } from './handlers/message-events.js';
 import { sendFailureReaction } from './utils/reactions.js';
 import {
   stripDeviceSuffix,
@@ -421,6 +422,14 @@ export async function initializeWhatsApp(): Promise<void> {
 
   sock.ev.on('group-participants.update', ({ id }) => {
     invalidateGroup(id);
+  });
+
+  // Deleted-for-everyone and edited messages: keep saved history in step
+  // (handlers/message-events.ts). Silent, never throws.
+  sock.ev.on('messages.update', async (updates) => {
+    for (const entry of updates) {
+      await handleMessageUpdate(sock, entry, async () => config.whitelistPhones);
+    }
   });
 
   // Message handler

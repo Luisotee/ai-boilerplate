@@ -15,6 +15,16 @@ How a WhatsApp message traverses the system:
 9. `api-client.ts` polls GET `/chat/job/{id}` (500ms interval, max 120s) until complete
 10. WhatsApp client sends text reply; optionally generates TTS audio if user preference enabled
 
+## Deleted and edited messages
+
+Every saved user message keeps the platform's own id in `conversation_messages.whatsapp_message_id` (all three clients send it as `whatsapp_message_id`). When a sender deletes a message for everyone or edits it, the client calls `POST /chat/revoke` or `POST /chat/edit` (`routes/message_events.py`, logic in `services/message_events.py`), which deletes the row or rewrites its content and re-embeds it, so the old text leaves history, `get_chat_history`, `search_conversation_history` and `get_group_context`.
+
+- **Baileys**: `messages.update` (`handlers/message-events.ts`). Revoke and text edits; caption edits are skipped.
+- **Telegram**: `edited_message:text` in `updates.ts`. The Bot API delivers no deletions.
+- **Cloud API**: neither; Meta's webhook has no inbound edit or revoke.
+- **Who may change a row**: in a private chat, the contact. In a group, the row's own sender; a revoke of someone else's message also needs `is_group_admin: true` (fails closed). `/chat/edit` checks the whitelist; `/chat/revoke` doesn't, because it only removes rows saved while the chat was in scope.
+- Rows saved before the column existed have no id, so their revoke or edit is a no-op. Migration: `packages/ai-api/docs/migrations/2026-11-09-message-id.sql`.
+
 ## Database tables
 
 11 tables: models in `database.py` (users, conversation_messages, conversation_preferences, core_memories, bot_prompt, runtime_settings, broadcasts, broadcast_recipients, bug_reports) and `kb_models.py` (knowledge_base_documents, knowledge_base_chunks).

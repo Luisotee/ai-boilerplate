@@ -15,6 +15,7 @@ vi.mock('../../src/api-client.js', () => ({
   sendMessageToAI: vi.fn(async () => 'reply'),
   getUserPreferences: vi.fn(async () => ({ tts_enabled: false })),
   textToSpeech: vi.fn(async () => null),
+  editMessage: vi.fn(async () => 1),
 }));
 
 vi.mock('../../src/services/telegram-api.js', () => ({
@@ -75,7 +76,11 @@ async function boot(mode: 'jid' | 'membership', whitelist: string) {
   bot.botInfo = BOT_INFO;
   bot.api.config.use(async () => ({ ok: true, result: { message_id: 1 } }) as unknown as never);
   registerUpdateHandlers();
-  return { bot, sendMessageToAI: api.sendMessageToAI as unknown as ReturnType<typeof vi.fn> };
+  return {
+    bot,
+    sendMessageToAI: api.sendMessageToAI as unknown as ReturnType<typeof vi.fn>,
+    editMessage: api.editMessage as unknown as ReturnType<typeof vi.fn>,
+  };
 }
 
 beforeEach(() => vi.clearAllMocks());
@@ -161,5 +166,45 @@ describe('"@bot, then the question" window', () => {
     await bot.handleUpdate(groupText(STRANGER, 'the question', false));
     expect(saveOnly(sendMessageToAI, 0)).toBe(true);
     expect(saveOnly(sendMessageToAI, 1)).toBe(true);
+  });
+});
+
+describe('edited_message', () => {
+  function groupEdit(from: number, text: string): Update {
+    return {
+      update_id: 2,
+      edited_message: {
+        message_id: 100,
+        date: 0,
+        edit_date: 1,
+        chat: { id: GROUP_ID, type: 'supergroup', title: 'Team chat' },
+        from: { id: from, is_bot: false, first_name: 'X' },
+        text,
+      },
+    } as Update;
+  }
+
+  it('forwards an edit with the chat, message id and editor, and never replies', async () => {
+    const { bot, sendMessageToAI, editMessage } = await boot('jid', `tg:${GROUP_ID}`);
+    await bot.handleUpdate(groupEdit(MEMBER, 'fixed'));
+    expect(editMessage).toHaveBeenCalledWith(
+      { whatsappJid: `tg:${GROUP_ID}`, messageId: '100', senderJid: `tg:${MEMBER}` },
+      'fixed'
+    );
+    expect(sendMessageToAI).not.toHaveBeenCalled();
+  });
+
+  it('drops an edit in a chat outside the whitelist', async () => {
+    const { bot, editMessage } = await boot('jid', `tg:${MEMBER}`);
+    await bot.handleUpdate(groupEdit(MEMBER, 'fixed'));
+    expect(editMessage).not.toHaveBeenCalled();
+  });
+
+  it('an edit neither opens nor consumes the mention window', async () => {
+    const { bot, sendMessageToAI } = await boot('jid', `tg:${GROUP_ID}`);
+    await bot.handleUpdate(groupText(MEMBER, '@MyBot', true));
+    await bot.handleUpdate(groupEdit(MEMBER, '@MyBot now with a question'));
+    await bot.handleUpdate(groupText(MEMBER, 'the question', false));
+    expect(sendMessageToAI.mock.calls[1][2].saveOnly ?? false).toBe(false);
   });
 });

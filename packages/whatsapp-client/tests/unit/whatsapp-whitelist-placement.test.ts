@@ -380,6 +380,25 @@ describe('mention window (GROUP_GATING=membership)', () => {
     expect(saveOnlyOf(1)).toBe(true);
   });
 
+  it('the protocol-message upsert of an edit or revoke is not handled as a new message', async () => {
+    const protocol = (type: number, extra = {}) => ({
+      key: { remoteJid: GROUP, participant: MEMBER, fromMe: false, id: 'E1' },
+      message: { protocolMessage: { type, key: { id: 'M1' }, ...extra } },
+      pushName: 'Someone',
+    });
+    await drive(protocol(14, { editedMessage: { conversation: '@Curupira edited' } })); // MESSAGE_EDIT
+    await drive({
+      ...protocol(14),
+      message: {
+        editedMessage: {
+          message: { protocolMessage: { type: 14, editedMessage: { conversation: 'x' } } },
+        },
+      },
+    });
+    await drive(protocol(0)); // REVOKE
+    expect(handleTextMessage).not.toHaveBeenCalled();
+  });
+
   it('PRIVACY: a non-whitelisted sender stays save-only inside the window', async () => {
     await drive(makeGroupMsg(STRANGER, true));
     await drive(plain(STRANGER));

@@ -29,6 +29,7 @@ from .routes import (
     contact_router,
     health_router,
     knowledge_base_router,
+    message_events_router,
     preferences_router,
     speech_router,
 )
@@ -230,6 +231,7 @@ app.include_router(health_router)
 app.include_router(contact_router)
 app.include_router(knowledge_base_router)
 app.include_router(chat_router)
+app.include_router(message_events_router)
 app.include_router(speech_router)
 app.include_router(preferences_router)
 app.include_router(admin_router)

@@ -7,6 +7,7 @@ import type { Message } from 'grammy/types';
 import { bot, type TelegramContext } from './bot.js';
 import { config } from './config.js';
 import { handleTextMessage } from './handlers/text.js';
+import { editMessage } from './api-client.js';
 import { extractAndTranscribeVoice } from './handlers/voice.js';
 import { extractPhotoData } from './handlers/photo.js';
 import { extractDocumentData } from './handlers/document.js';
@@ -67,6 +68,28 @@ export function registerUpdateHandlers(): void {
       saveOnly,
       isGroupAdmin,
     });
+  });
+
+  // ---------------- Edited text ----------------
+  // Keep the saved copy in step with an edit (the AI API re-embeds it). The Bot
+  // API delivers no deletions, so there is no revoke here. Silent: no reply,
+  // no reaction, and the mention window is neither opened nor consumed.
+  // Caption edits are skipped (the row holds an `[Image: …]` marker).
+  bot.on('edited_message:text', async (ctx) => {
+    const { skip, isGroup } = resolveGate(ctx, { mentionWindow: false });
+    if (skip || !ctx.chat) return;
+    const changed = await editMessage(
+      {
+        whatsappJid: chatIdToJid(ctx.chat.id),
+        messageId: String(ctx.editedMessage.message_id),
+        senderJid: isGroup && ctx.from ? chatIdToJid(ctx.from.id) : undefined,
+      },
+      ctx.editedMessage.text
+    );
+    logger.info(
+      { chatId: ctx.chat.id, messageId: ctx.editedMessage.message_id, changed },
+      'Applied message edit'
+    );
   });
 
   // ---------------- Voice / Audio ----------------

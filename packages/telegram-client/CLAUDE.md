@@ -11,7 +11,8 @@ Loaded on demand when working in this folder. The root `CLAUDE.md` holds the arc
 5. Funnel into `handleTextMessage(ctx, text, options)` → `sendMessageToAI()` with `client_id: "telegram"`
 6. AI API processes → result polled back → split (`---` bursts, then the 4096-char cap) → converted from WhatsApp markup to Telegram HTML → delivered via `ctx.reply()` / `ctx.replyWithVoice()` inside the grammY handler
 7. Typing indicator is maintained via `@grammyjs/auto-chat-action` (set `ctx.chatAction = 'typing'`, middleware refreshes every ~5s until the handler returns)
-8. The synthetic JID `tg:<chat_id>` is stored in `users.whatsapp_jid`; chat IDs are integers (supergroup IDs are negative, e.g. `tg:-1001234567890`)
+8. `edited_message:text` → `/chat/edit` (no reply; the Bot API sends no deletions)
+9. The synthetic JID `tg:<chat_id>` is stored in `users.whatsapp_jid`; chat IDs are integers (supergroup IDs are negative, e.g. `tg:-1001234567890`)
 
 ## Gotchas
 
