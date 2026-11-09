@@ -14,7 +14,8 @@
 --
 -- CONCURRENTLY keeps the bot saving messages while the index builds, which can
 -- take minutes on a long history. It can't run inside a transaction, so apply
--- this file with plain `psql < file` (no -1 / --single-transaction). Safe to
+-- this file with plain `psql < file` (no -1 / --single-transaction, and no
+-- migration runner that wraps files in a transaction). Safe to
 -- re-run: an index left INVALID by an interrupted build is dropped and rebuilt.
 
 DO $$

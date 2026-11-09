@@ -53,7 +53,7 @@ _PENDING_SQL = """
       AND c.embedding IS NOT NULL
       AND d.status IN ('completed', 'partial')
       AND (d.expires_at IS NULL OR d.expires_at > NOW())
-      AND NOT (c.id::text = ANY(:skip))
+      AND NOT (c.id::text = ANY(CAST(:skip AS text[])))
 """
 
 
@@ -87,7 +87,7 @@ def next_batch(db, batch_size: int, skip: list[str]) -> list:
                     AND c2.embedding IS NOT NULL
                     AND d2.status IN ('completed', 'partial')
                     AND (d2.expires_at IS NULL OR d2.expires_at > NOW())
-                    AND NOT (c2.id::text = ANY(:skip))
+                    AND NOT (c2.id::text = ANY(CAST(:skip AS text[])))
                   ORDER BY c2.document_id
                   LIMIT 1
               )

@@ -110,6 +110,22 @@ async def test_conversation_search_orders_by_halfvec_distance():
     assert any("hnsw.ef_search" in s for s in calls[:-1])
 
 
+async def test_conversation_search_ef_search_covers_large_limits():
+    # ef_search below the LIMIT would cap HNSW results short of it.
+    db = _db_with_version("0.8.0")
+    await search_conversation_history(
+        db,
+        [0.1] * 3072,
+        "user-1",
+        limit=250,
+        similarity_threshold=0.5,
+        include_context=False,
+        context_window=0,
+    )
+    ef_call = next(c for c in db.execute.call_args_list if "hnsw.ef_search" in str(c.args[0]))
+    assert ef_call.args[1] == {"ef": "250"}
+
+
 async def test_kb_vector_query_orders_by_halfvec_distance():
     db = _db_with_version("0.8.0")
     await search_knowledge_base(db, [0.1] * 3072, limit=5, similarity_threshold=0.5)
