@@ -36,11 +36,12 @@ Baileys `messages.upsert` (`whatsapp.ts`) → a handler in `handlers/` → `hand
 
 ## Subsystem docs (load on demand)
 
-Claude Code loads a folder's `CLAUDE.md` when it works there. **These subsystems cross folders, so read the file before changing any part of one**, even from another folder:
+**These subsystems cross folders, so read the file before changing any part of one**:
 
 | File | Covers |
 |------|--------|
-| `packages/ai-api/src/ai_api/services/CLAUDE.md` | Broadcasts (`/admin/broadcasts`), bug reports (`/admin/bug-reports`), cross-platform identity (`/link`, `/linkphone`) |
+| `packages/ai-api/src/ai_api/services/CLAUDE.md` | Broadcasts (`/admin/broadcasts`), bug reports (`/admin/bug-reports`), cross-platform identity (`/link`, `/linkphone`, `web:` keys) |
+| `packages/ai-api/docs/openai-api.md` | OpenAI-compatible `/v1` API (keys, web Markdown), terminal chat |
 | `packages/ai-api/src/ai_api/agent/CLAUDE.md` | DeepSeek → Gemini model chain, `GuardedModel`, fallback reply, chat-history and shared-group tools |
 | `packages/ai-api/src/ai_api/streams/CLAUDE.md` | PDF processing queue (concurrency, retry, dead letter, crash recovery) |
 | `packages/whatsapp-client/CLAUDE.md` | Baileys gotchas (WA version, LID vs phone, whitelist placement), handler + multipart route workflows |
@@ -82,7 +83,7 @@ cd packages/ai-api && uv run pytest tests/mocked/test_model_chain_fallback.py -k
 
 ## Security
 
-- **API key auth**: every server requires `X-API-Key` on all routes except `/health`, `/contact` (AI API only), and `/docs*`: `AI_API_KEY` (AI API; it fails to start without it), `WHATSAPP_API_KEY` (Baileys, required), `WHATSAPP_CLOUD_API_KEY` and `TELEGRAM_API_KEY` (both fall back to `WHATSAPP_API_KEY`). Inter-service calls include the key automatically
+- **API key auth**: every server requires `X-API-Key` on all routes except `/health`, `/contact` (AI API only), `/docs*` and the AI API's `/v1/*` (per-user `Bearer` keys, never `AI_API_KEY`): `AI_API_KEY` (AI API; it fails to start without it), `WHATSAPP_API_KEY` (Baileys, required), `WHATSAPP_CLOUD_API_KEY` and `TELEGRAM_API_KEY` (both fall back to `WHATSAPP_API_KEY`). Inter-service calls include the key automatically
 - **Webhook verification**: `/webhook` on the Cloud and Telegram clients skips API-key auth for platform-native checks: `x-hub-signature-256` HMAC-SHA256 with `META_APP_SECRET` (Cloud), `X-Telegram-Bot-Api-Secret-Token` against `TELEGRAM_WEBHOOK_SECRET` (Telegram; grammY's `webhookCallback` validates it when `secretToken` is set)
 - **CORS**: `CORS_ORIGINS` (comma-separated). Empty blocks all cross-origin requests
 - **Rate limiting**: `RATE_LIMIT_GLOBAL` (default 30/min), `RATE_LIMIT_EXPENSIVE` (default 5/min). A valid `X-API-Key` exempts a request on the TS clients, because all inter-service traffic comes from one IP. The auth hook runs before the limiter, so the limiter does **not** throttle API-key guessing. `/health*` is exempt from both. Details: `docs/access-control.md`
@@ -99,7 +100,7 @@ cd packages/ai-api && uv run pytest tests/mocked/test_model_chain_fallback.py -k
 ## Database
 
 - **PostgreSQL + pgvector** (3072-dim vectors via `gemini-embedding-001`)
-- **11 tables**, models in `database.py` and `kb_models.py` (list in `docs/architecture.md`)
+- **12 tables**, models in `database.py` and `kb_models.py` (list in `docs/architecture.md`)
 - **No Alembic migrations.** SQLAlchemy `create_all()` only creates missing *tables*, never new columns. Column/index changes ship as hand-written, idempotent (`IF NOT EXISTS`) SQL in `packages/ai-api/docs/migrations/<YYYY-MM-DD>-<name>.sql`, named so they match what `create_all()` emits on a fresh DB. Apply them to an existing Docker deployment BEFORE rolling out the code that needs them (safe to re-run):
   ```bash
   docker compose exec -T postgres psql -U aiagent -d aiagent \

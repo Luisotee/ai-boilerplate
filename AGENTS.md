@@ -47,7 +47,8 @@ Deep detail lives in `AGENTS.md` (symlinked to `CLAUDE.md`) next to the code. **
 
 | File | Covers |
 |------|--------|
-| `packages/ai-api/src/ai_api/services/AGENTS.md` | Broadcasts (`/admin/broadcasts`: audience, routing, opt-out, claims, lease, Baileys pacing, FleetView enums), bug reports (`/admin/bug-reports`: dedup, privacy scrub), cross-platform identity (`/link`, `/linkphone`) |
+| `packages/ai-api/src/ai_api/services/AGENTS.md` | Broadcasts (`/admin/broadcasts`: audience, routing, opt-out, claims, lease, Baileys pacing, FleetView enums), bug reports (`/admin/bug-reports`: dedup, privacy scrub), cross-platform identity (`/link`, `/linkphone`, `web:` keys) |
+| `packages/ai-api/docs/openai-api.md` | OpenAI-compatible `/v1` API (keys, web Markdown), terminal chat |
 | `packages/ai-api/src/ai_api/agent/AGENTS.md` | DeepSeek → Gemini model chain, `GuardedModel`, fallback rules, model-error fallback reply, shared-group tools |
 | `packages/ai-api/src/ai_api/streams/AGENTS.md` | PDF processing queue (concurrency, retry, dead letter, crash recovery) |
 | `packages/whatsapp-client/AGENTS.md` | Baileys gotchas (WA version, LID vs phone, whitelist placement), handler + multipart route workflows |
@@ -106,7 +107,7 @@ cd packages/ai-api && uv run pytest tests/mocked/test_model_chain_fallback.py -k
 
 ## Security
 
-- **API Key Auth**: All servers require `X-API-Key` header on all routes except `/health*`, `/contact` (AI API only), and `/docs*` (`AI_API_KEY`, `WHATSAPP_API_KEY`, `WHATSAPP_CLOUD_API_KEY` falling back to `WHATSAPP_API_KEY`, `TELEGRAM_API_KEY` falling back to `WHATSAPP_API_KEY`).
+- **API Key Auth**: All servers require `X-API-Key` header on all routes except `/health*`, `/contact` (AI API only), `/docs*` and the AI API's `/v1/*` (per-user `Bearer` keys, never `AI_API_KEY`) (`AI_API_KEY`, `WHATSAPP_API_KEY`, `WHATSAPP_CLOUD_API_KEY` falling back to `WHATSAPP_API_KEY`, `TELEGRAM_API_KEY` falling back to `WHATSAPP_API_KEY`).
 - **Webhook verification**: `/webhook` on Cloud (`x-hub-signature-256` HMAC-SHA256 via `META_APP_SECRET`) and Telegram (`X-Telegram-Bot-Api-Secret-Token` via `TELEGRAM_WEBHOOK_SECRET`) skip API-key auth and use platform-native verification.
 - **CORS**: `CORS_ORIGINS` (comma-separated; empty = block all cross-origin).
 - **Rate Limiting**: `RATE_LIMIT_GLOBAL` (default 30/min), `RATE_LIMIT_EXPENSIVE` (default 5/min). On TS clients, requests with a valid `X-API-Key` are exempt (`utils/api-key.ts` `hasValidApiKey`, which compares **byte** lengths before `timingSafeEqual` so multibyte headers get 401 instead of 500). Auth hook runs BEFORE the rate limiter.
@@ -125,7 +126,7 @@ cd packages/ai-api && uv run pytest tests/mocked/test_model_chain_fallback.py -k
 ## Database
 
 - **PostgreSQL + pgvector** (3072-dim vectors via `gemini-embedding-001`).
-- **11 tables**: `users`, `conversation_messages`, `conversation_preferences`, `core_memories`, `bot_prompt`, `runtime_settings`, `broadcasts`, `broadcast_recipients`, `bug_reports` (`database.py`) + `knowledge_base_documents`, `knowledge_base_chunks` (`kb_models.py`).
+- **12 tables**: `users`, `conversation_messages`, `conversation_preferences`, `core_memories`, `bot_prompt`, `runtime_settings`, `broadcasts`, `broadcast_recipients`, `bug_reports`, `api_keys` (`database.py`) + `knowledge_base_documents`, `knowledge_base_chunks` (`kb_models.py`).
 - **No Alembic migrations**: `create_all()` only creates missing tables, never new columns/indexes. Ship column/index changes as idempotent (`IF NOT EXISTS`) SQL in `packages/ai-api/docs/migrations/<YYYY-MM-DD>-<name>.sql` (use `/db-migration` skill) and apply before rollout:
   ```bash
   docker compose exec -T postgres psql -U aiagent -d aiagent < packages/ai-api/docs/migrations/<file>.sql
