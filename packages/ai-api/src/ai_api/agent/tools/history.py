@@ -44,9 +44,6 @@ async def get_chat_history(
         ctx: Run context with db and the current conversation's user_id.
         limit: Optional flat cap on how many recent messages to return.
         since_hours: Optional time window — only messages from the last N hours.
-
-    Returns:
-        A chronological transcript of this chat, or an explanatory message.
     """
     logger.info(
         f"TOOL CALLED: get_chat_history limit={limit!r} since_hours={since_hours!r} "

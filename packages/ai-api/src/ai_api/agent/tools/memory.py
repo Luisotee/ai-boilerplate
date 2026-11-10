@@ -1,3 +1,7 @@
+import re
+from typing import Literal
+
+from pydantic import BaseModel
 from pydantic_ai import RunContext
 
 from ...database import get_or_create_core_memory
@@ -62,43 +66,113 @@ def backup_after_save(
     return backup, trusted
 
 
-@agent.tool
-async def update_core_memory(ctx: RunContext[AgentDeps], content: str) -> str:
+class MemoryOperation(BaseModel):
+    """One edit to the notes: add a line, patch a span, or remove a line."""
+
+    action: Literal["add", "patch", "remove"]
+    text: str = ""
+    old_text: str = ""
+
+
+class MemoryOperationError(ValueError):
+    """An operation that can't be applied; the message is shown to the model."""
+
+
+def apply_operations(document: str, operations: list[MemoryOperation]) -> str:
+    """Apply ``operations`` in order to ``document`` and return the result.
+
+    - add: append ``text`` (one or more lines) at the end;
+    - patch: replace ``old_text``, which must occur exactly once, with ``text``;
+    - remove: delete the one line that contains ``old_text``.
+    Raises ``MemoryOperationError`` naming the failed operation; the caller
+    saves nothing then, so a batch is all or nothing. Pure.
     """
-    Rewrite your persistent notes about this user.
+    for number, op in enumerate(operations, start=1):
+        where = f"operation {number} ({op.action})"
+        if op.action == "add":
+            text = op.text.strip()
+            if not text:
+                raise MemoryOperationError(f"{where}: text is empty")
+            document = f"{document.rstrip()}\n{text}" if document.strip() else text
+        elif not op.old_text.strip():
+            raise MemoryOperationError(f"{where}: old_text is empty")
+        elif op.action == "patch":
+            count = document.count(op.old_text)
+            if count != 1:
+                raise MemoryOperationError(f"{where}: {_match_problem(count, 'places')}")
+            document = document.replace(op.old_text, op.text, 1)
+        else:  # remove
+            lines = document.splitlines()
+            # A line copied with its line break still names that one line.
+            target = op.old_text.strip("\r\n")
+            hits = [i for i, line in enumerate(lines) if target in line]
+            if len(hits) != 1:
+                raise MemoryOperationError(f"{where}: {_match_problem(len(hits), 'lines')}")
+            del lines[hits[0]]
+            document = "\n".join(lines)
+    return _tidy(document)
 
-    This REPLACES the entire core memory document with the new content.
-    Anything not included in the new content will be lost. Your current
-    core memory is shown in the system prompt — use it as the base when
-    adding or modifying notes.
 
-    Use markdown formatting for organization (headings, bullets, etc.).
-    Keep it concise — max ~2000 characters.
+def _match_problem(count: int, unit: str) -> str:
+    if count == 0:
+        return "old_text was not found; copy it exactly from your notes"
+    return f"old_text matches {count} {unit}; include more of the line so it matches one"
+
+
+def _tidy(document: str) -> str:
+    """Strip trailing spaces, collapse runs of blank lines, trim the ends."""
+    lines = [line.rstrip() for line in document.splitlines()]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+
+
+@agent.tool
+async def memory(ctx: RunContext[AgentDeps], operations: list[MemoryOperation]) -> str:
+    """
+    Edit your persistent notes about this chat (shown under CORE MEMORY, with their size).
+
+    Operations apply in order, all or none:
+    - add: append text as a new line, e.g. "- allergic to shrimp".
+    - patch: replace old_text (exact, found once in the notes) with text; use it to
+      update a fact in place instead of adding a second version.
+    - remove: delete the line containing old_text.
+
+    Keep lasting facts: name, place, work, family, how they want you to answer.
+    Skip one-off requests, task progress, temporary state, secrets, and what the chat
+    history can tell you again. Remember the preference, not the instance ("prefers
+    short answers", not "asked for a short answer today"). One fact per short line,
+    no headings. Near the size limit, merge or drop old lines in the same call.
+    Don't announce saving unless they asked you to remember. In a group the notes are
+    the group's. To forget everything, remove every line (in a group only an admin
+    may); the user can also send /memories clear.
 
     Args:
-        ctx: Run context with database and user info
-        content: The full new markdown content for the core memory document.
-            Must include ALL information you want to preserve.
-
-    Returns:
-        A short confirmation with the new size and the limit
+        operations: The edits, each with action and text and/or old_text
     """
-    logger.info("=" * 80)
-    logger.info("TOOL CALLED: update_core_memory")
-    logger.info(f"   User ID: {ctx.deps.user_id}")
-    logger.info(f"   Content length: {len(content)} characters")
-    logger.info("=" * 80)
+    actions = ",".join(op.action for op in operations)
+    logger.info(f"TOOL CALLED: memory user={ctx.deps.user_id} operations=[{actions}]")
+
+    if not operations:
+        return "No operations given; nothing saved."
 
     try:
         max_length = runtime_config.get("core_memory_max_length")
-        if len(content) > max_length:
-            return (
-                f"Content too long ({len(content)} characters). "
-                f"Maximum is {max_length} characters. Please shorten your notes."
-            )
-
         mem = get_or_create_core_memory(ctx.deps.db, ctx.deps.user_id)
         previous = mem.content or ""
+
+        try:
+            content = apply_operations(previous, operations)
+        except MemoryOperationError as e:
+            return f"Nothing saved: {e}."
+
+        # Over the limit only when the edit grows past it: if the limit was
+        # lowered below the current notes, a shrinking edit still saves.
+        # Tidied on both sides, so tidying a legacy document frees no room.
+        if len(content) > max(len(_tidy(previous)), max_length):
+            return (
+                f"Nothing saved: the notes would be {len(content)}/{max_length} chars. "
+                "In the same call, patch or remove lines to make room (merge related "
+                "facts, drop outdated ones), then add."
+            )
 
         # In a group, dropping most of the document (a wipe included) is what
         # /memories clear reserves for admins; additive and small edits stay
@@ -110,7 +184,9 @@ async def update_core_memory(ctx: RunContext[AgentDeps], content: str) -> str:
             if refusal:
                 return refusal
 
-        if content != previous:
+        # Compare tidied: tidying a legacy document alone is not a change, and
+        # must not replace the /memories undo backup with a near-copy.
+        if content != _tidy(previous):
             mem.previous_content, mem.content_trusted = backup_after_save(
                 previous,
                 mem.previous_content,
@@ -120,19 +196,11 @@ async def update_core_memory(ctx: RunContext[AgentDeps], content: str) -> str:
             mem.content = content
             ctx.deps.db.commit()
 
-        logger.info("TOOL RETURNING: update_core_memory")
-        logger.info(f"   Saved {len(content)} characters")
-        logger.info("=" * 80)
-
-        # Never echo the old document back: it costs up to max_length tokens on
-        # every save, and the current one is already in the instructions.
+        logger.info(f"memory saved: {len(content)}/{max_length} chars")
+        # Never echo the document: it is already in the instructions.
         return f"Core memory saved ({len(content)}/{max_length} chars)."
 
     except Exception as e:
         safe_rollback(ctx.deps.db)
         logger.error(f"Error updating core memory: {str(e)}", exc_info=True)
-        logger.info("=" * 80)
-        logger.info("TOOL ERROR: update_core_memory")
-        logger.info(f"   Error: {str(e)}")
-        logger.info("=" * 80)
         return "Failed to update core memory. Please try again."

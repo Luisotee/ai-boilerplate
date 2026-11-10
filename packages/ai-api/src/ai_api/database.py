@@ -548,9 +548,38 @@ def get_conversation_history(
     if excluded:
         query = query.filter(ConversationMessage.id.notin_(excluded))
 
-    messages = query.order_by(ConversationMessage.timestamp.desc()).limit(limit).all()
-
+    # Stepped window (see stepped_window_start): a start that only moves every
+    # `history_window_step` messages, so the history prefix is identical across
+    # runs and the provider's prompt cache can serve it. Either way the fetch is
+    # newest-first with a LIMIT (a bounded top-N sort), reversed to oldest first;
+    # a message saved after count() only shifts the window by one.
+    step = settings.history_window_step
+    size = limit
+    if step > 1:
+        total = query.count()
+        size = total - stepped_window_start(total, limit, step)
+    messages = (
+        query.order_by(ConversationMessage.timestamp.desc(), ConversationMessage.id.desc())
+        .limit(size)
+        .all()
+    )
     return list(reversed(messages))
+
+
+def stepped_window_start(total: int, limit: int, step: int) -> int:
+    """Index of the first history message to send, out of ``total``.
+
+    A plain last-``limit`` window starts one message later on every turn, so
+    the history the model sees never repeats and the provider's prompt cache
+    can only reuse the instructions. Here the start moves in jumps of ``step``:
+    the window holds ``limit`` to ``limit + step - 1`` messages and keeps the
+    same first message for ``step`` new messages (about step/2 private turns).
+    Never fewer messages than ``limit``. ``step`` <= 1 is the plain window.
+    """
+    if total <= limit:
+        return 0
+    step = max(step, 1)
+    return ((total - limit) // step) * step
 
 
 def _as_uuid(value) -> uuid.UUID | None:

@@ -1,20 +1,41 @@
-"""update_core_memory is also the agent's way to forget: the default prompt tells
-it to pass an empty string to clear everything (the /memories command covers the
-user-driven path, and the current document is always injected into the prompt,
-so no separate show/clear tool is needed)."""
+"""The operation-based memory tool (agent/tools/memory.py).
 
+The agent edits its notes with add / patch / remove operations instead of
+re-sending the whole document, so it can't drop neighbouring facts by
+accident. The group guard (is_destructive_rewrite + group_admin_refusal) and
+the /memories undo backup (backup_after_save) apply to the before/after
+documents exactly as they did for the whole-document rewrite.
+"""
+
+import re
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from ai_api.agent.tools.memory import (
+    MemoryOperation,
+    MemoryOperationError,
+    apply_operations,
     backup_after_save,
     is_destructive_rewrite,
-    update_core_memory,
+    memory,
 )
 from ai_api.commands import _handle_memories_command
 
 MODULE = "ai_api.agent.tools.memory"
+
+
+def _ops(previous: str, content: str) -> list[MemoryOperation]:
+    """The remove/add operations that turn ``previous`` into ``content``.
+
+    Lets the guard and backup tests below state a before/after document, as
+    they did for the whole-document tool, through the real operations path.
+    """
+    old = [line for line in previous.splitlines() if line.strip()]
+    new = [line for line in content.splitlines() if line.strip()]
+    ops = [MemoryOperation(action="remove", old_text=line) for line in old if line not in new]
+    ops += [MemoryOperation(action="add", text=line) for line in new if line not in old]
+    return ops
 
 
 def _ctx():
@@ -26,7 +47,7 @@ def _ctx():
     return ctx
 
 
-async def test_empty_content_clears_the_document():
+async def test_removing_every_line_clears_the_document():
     ctx = _ctx()
     mem = MagicMock(content="## Facts\n- likes tea")
     with (
@@ -34,7 +55,7 @@ async def test_empty_content_clears_the_document():
         patch(f"{MODULE}.runtime_config") as mock_rc,
     ):
         mock_rc.get.return_value = 2000
-        result = await update_core_memory(ctx, "")
+        result = await memory(ctx, _ops(mem.content, ""))
 
     assert mem.content == ""
     assert mem.previous_content == "## Facts\n- likes tea"
@@ -49,13 +70,13 @@ async def test_a_group_member_cannot_clear_the_groups_memory(is_admin):
     ctx.deps.is_group_admin = is_admin
     mem = MagicMock(content="## Facts")
     with patch(f"{MODULE}.get_or_create_core_memory", return_value=mem):
-        result = await update_core_memory(ctx, "  ")
+        result = await memory(ctx, _ops(mem.content, "  "))
     assert "Only a group admin" in result
     assert mem.content == "## Facts"
     ctx.deps.db.commit.assert_not_called()
 
 
-async def test_a_group_member_can_still_rewrite_the_memory():
+async def test_a_group_member_can_still_add_to_the_memory():
     ctx = _ctx()
     ctx.deps.whatsapp_jid = "tg:-1001234567890"
     mem = MagicMock(content="## Facts")
@@ -64,7 +85,7 @@ async def test_a_group_member_can_still_rewrite_the_memory():
         patch(f"{MODULE}.runtime_config") as mock_rc,
     ):
         mock_rc.get.return_value = 2000
-        result = await update_core_memory(ctx, "## Facts\n- meets on Fridays")
+        result = await memory(ctx, _ops(mem.content, "## Facts\n- meets on Fridays"))
     assert result == "Core memory saved (27/2000 chars)."
 
 
@@ -78,15 +99,16 @@ async def test_a_group_admin_can_clear_the_memory():
         patch(f"{MODULE}.runtime_config") as mock_rc,
     ):
         mock_rc.get.return_value = 2000
-        await update_core_memory(ctx, "")
+        await memory(ctx, _ops(mem.content, ""))
     assert mem.content == ""
 
 
-async def test_prompt_documents_the_clear_path():
-    from ai_api.agent.core import DEFAULT_SYSTEM_PROMPT
+async def test_tool_documents_the_clear_path():
+    from ai_api.agent.core import agent
 
-    prompt = " ".join(DEFAULT_SYSTEM_PROMPT.split())
-    assert "to forget everything, pass an empty string" in prompt
+    description = agent._function_toolset.tools["memory"].tool_def.description
+    assert "To forget everything, remove every line" in " ".join(description.split())
+    assert "Remember the preference, not the instance" in " ".join(description.split())
 
 
 GROUP_DOC = "## Group\n- meets on Fridays at 18h\n- treasurer is Ana\n- dues are R$10"
@@ -106,7 +128,7 @@ async def _run(ctx, previous, content):
         patch(f"{MODULE}.runtime_config") as mock_rc,
     ):
         mock_rc.get.return_value = 2000
-        result = await update_core_memory(ctx, content)
+        result = await memory(ctx, _ops(mem.content, content))
     return mem, result
 
 
@@ -141,7 +163,7 @@ async def _save(ctx, mem, content):
         patch(f"{MODULE}.runtime_config") as mock_rc,
     ):
         mock_rc.get.return_value = 2000
-        return await update_core_memory(ctx, content)
+        return await memory(ctx, _ops(mem.content, content))
 
 
 async def test_two_step_erosion_by_a_member_leaves_the_original_as_the_backup():
@@ -282,3 +304,149 @@ async def test_an_unchanged_document_is_not_rewritten():
 )
 def test_is_destructive_rewrite(previous, new, expected):
     assert is_destructive_rewrite(previous, new) is expected
+
+
+# --- operations ---------------------------------------------------------------
+
+
+def _op(action, text="", old_text=""):
+    return MemoryOperation(action=action, text=text, old_text=old_text)
+
+
+DOC = "- name: Ana\n- lives in Belém\n- likes tea\n- likes coffee"
+
+
+@pytest.mark.parametrize(
+    ("ops", "expected"),
+    [
+        ([_op("add", "- has a dog")], DOC + "\n- has a dog"),
+        ([_op("add", "  - trailing spaces  ")], DOC + "\n- trailing spaces"),
+        ([_op("patch", "Santarém", "Belém")], DOC.replace("Belém", "Santarém")),
+        ([_op("remove", old_text="tea")], "- name: Ana\n- lives in Belém\n- likes coffee"),
+        # In order: a later op sees the earlier ones' result.
+        (
+            [_op("add", "- likes mate"), _op("remove", old_text="mate")],
+            DOC,
+        ),
+        # A patch to "" removes the span; blank lines left behind are tidied.
+        ([_op("patch", "", "- likes tea\n")], "- name: Ana\n- lives in Belém\n- likes coffee"),
+    ],
+)
+def test_apply_operations(ops, expected):
+    assert apply_operations(DOC, ops) == expected
+
+
+def test_add_to_an_empty_document():
+    assert apply_operations("", [_op("add", "- first fact")]) == "- first fact"
+
+
+@pytest.mark.parametrize(
+    ("op", "message"),
+    [
+        (_op("add", "   "), "operation 1 (add): text is empty"),
+        (_op("patch", "x"), "operation 1 (patch): old_text is empty"),
+        (_op("patch", "x", "Recife"), "was not found"),
+        (_op("patch", "x", "likes"), "matches 2 places"),
+        (_op("remove", old_text="likes"), "matches 2 lines"),
+        (_op("remove", old_text="Recife"), "was not found"),
+    ],
+)
+def test_an_operation_that_cannot_apply_is_named(op, message):
+    with pytest.raises(MemoryOperationError, match=re.escape(message)):
+        apply_operations(DOC, [op])
+
+
+async def _call(ctx, previous, ops, max_length=2000):
+    mem = MagicMock(content=previous, previous_content=None, content_trusted=True)
+    with (
+        patch(f"{MODULE}.get_or_create_core_memory", return_value=mem),
+        patch(f"{MODULE}.runtime_config") as mock_rc,
+    ):
+        mock_rc.get.return_value = max_length
+        result = await memory(ctx, ops)
+    return mem, result
+
+
+async def test_a_batch_is_all_or_nothing():
+    ctx = _ctx()
+    mem, result = await _call(ctx, DOC, [_op("add", "- has a dog"), _op("remove", old_text="x")])
+    assert result.startswith("Nothing saved: operation 2 (remove)")
+    assert mem.content == DOC
+    ctx.deps.db.commit.assert_not_called()
+
+
+async def test_over_the_limit_nothing_is_saved_and_the_model_is_told_to_make_room():
+    ctx = _ctx()
+    mem, result = await _call(ctx, DOC, [_op("add", "- " + "x" * 50)], max_length=len(DOC) + 10)
+    assert "Nothing saved: the notes would be" in result
+    assert "make room" in result
+    assert mem.content == DOC
+
+
+async def test_a_patch_saves_and_reports_the_size():
+    ctx = _ctx()
+    mem, result = await _call(ctx, DOC, [_op("patch", "Santarém", "Belém")])
+    assert mem.content == DOC.replace("Belém", "Santarém")
+    assert mem.previous_content == DOC
+    assert result == f"Core memory saved ({len(mem.content)}/2000 chars)."
+
+
+async def test_no_operations_saves_nothing():
+    ctx = _ctx()
+    mem, result = await _call(ctx, DOC, [])
+    assert "nothing saved" in result
+    ctx.deps.db.commit.assert_not_called()
+
+
+async def test_core_memory_header_shows_the_size():
+    from ai_api.agent.core import inject_core_memory
+
+    ctx = MagicMock()
+    with (
+        patch("ai_api.agent.core.get_or_create_core_memory", return_value=MagicMock(content=DOC)),
+        patch("ai_api.agent.core.runtime_config") as mock_rc,
+    ):
+        mock_rc.get.return_value = 2000
+        text = await inject_core_memory(ctx)
+    assert f"{len(DOC)}/2000 chars" in text
+    assert DOC in text
+
+
+@pytest.mark.parametrize("old_text", ["- likes tea\n", "- likes tea\r\n", "\n- likes tea"])
+def test_remove_matches_a_line_copied_with_its_line_break(old_text):
+    assert "- likes tea" not in apply_operations(DOC, [_op("remove", old_text=old_text)])
+
+
+async def test_a_shrinking_edit_saves_when_the_limit_was_lowered_below_the_notes():
+    previous = "\n".join(f"- fact number {i:03d}" for i in range(100))  # ~1.9k chars
+    mem, result = await _call(
+        _ctx(), previous, [_op("remove", old_text="fact number 000")], max_length=1000
+    )
+    assert "fact number 000" not in mem.content
+    assert result.startswith("Core memory saved")
+
+
+async def test_an_edit_that_grows_past_the_limit_is_refused():
+    mem, result = await _call(_ctx(), "- a", [_op("add", "- " + "x" * 50)], max_length=20)
+    assert mem.content == "- a"
+    assert result.startswith("Nothing saved")
+
+
+async def test_tidying_a_legacy_document_alone_is_not_a_change():
+    ctx = _ctx()
+    legacy = "- likes tea   \n\n\n\n- likes coffee"
+    # Patch a span to itself: the result differs from `legacy` only by tidying.
+    mem, _ = await _call(ctx, legacy, [_op("patch", "likes tea", "likes tea")])
+    assert mem.previous_content is None
+    ctx.deps.db.commit.assert_not_called()
+
+
+async def test_tidying_does_not_make_room_over_a_lowered_limit():
+    # 1900 raw chars, ~1500 tidied: an add back up to the raw size is growth.
+    lines = [f"- fact {i:03d}" for i in range(125)]
+    legacy = "   \n\n\n".join(lines)
+    assert len(legacy) > len(apply_operations(legacy, [])) + 300
+    grow = "- " + "y" * (len(legacy) - len(apply_operations(legacy, [])) - 10)
+    mem, result = await _call(_ctx(), legacy, [_op("add", grow)], max_length=1000)
+    assert mem.content == legacy
+    assert result.startswith("Nothing saved")

@@ -81,6 +81,17 @@ def is_command(message: str) -> bool:
     return cleaned.startswith("/")
 
 
+def settings_view(db: Session, user_id: str, prefs: ConversationPreferences) -> str:
+    """The settings text shown by /settings and the agent's settings(action="show").
+
+    Adds the announcements line from the user row (broadcast_opt_out lives
+    there, not on the preferences); omitted when the row doesn't exist.
+    """
+    user = db.get(User, user_id)
+    opt_out = bool(user.broadcast_opt_out) if user is not None else None
+    return format_settings(prefs, opt_out)
+
+
 def format_settings(prefs: ConversationPreferences, broadcast_opt_out: bool | None = None) -> str:
     """Format current settings for display.
 
@@ -338,7 +349,7 @@ def handle_clean_command(
 def set_broadcast_opt_out(db: Session, user_id: str, opt_out: bool) -> bool | None:
     """Set a chat's broadcast opt-out flag; returns the previous value (None = no user).
 
-    Shared by `/broadcast` and the `set_broadcast_subscription` agent tool. On a
+    Shared by `/broadcast` and the `settings` agent tool (`announcements`). On a
     group row it is the group's flag — callers enforce the admin check.
     """
     user = db.get(User, user_id)
@@ -517,9 +528,7 @@ def parse_and_execute(
     prefs = get_or_create_preferences(db, user_id)
 
     if command == "/settings":
-        user = db.get(User, user_id)
-        opt_out = bool(user.broadcast_opt_out) if user is not None else None
-        return CommandResult(is_command=True, response_text=format_settings(prefs, opt_out))
+        return CommandResult(is_command=True, response_text=settings_view(db, user_id, prefs))
 
     elif command == "/tts":
         response = _handle_tts_command(db, prefs, parts)

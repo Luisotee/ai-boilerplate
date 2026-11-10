@@ -31,7 +31,12 @@ from ...logger import logger
 from ...rag.conversation import format_conversation_results, format_transcript
 from ...rag.conversation import search_conversation_history as search_conversation_fn
 from ...runtime_config import runtime_config
-from ...services.shared_groups import platform_of, resolve_shared_groups, telegram_identity
+from ...services.shared_groups import (
+    platform_of,
+    resolve_shared_groups,
+    shared_group_tools_available,
+    telegram_identity,
+)
 from ...whatsapp import WhatsAppNotConnectedError
 from ...whatsapp.client import SharedGroup
 from ..core import AgentDeps, agent
@@ -51,8 +56,9 @@ CLOUD_UNSUPPORTED = (
 async def shared_group_tools_enabled(
     ctx: RunContext[AgentDeps], tool_def: ToolDefinition
 ) -> ToolDefinition | None:
-    """`prepare` hook: hide both tools unless SHARED_GROUP_TOOLS_ENABLED is on."""
-    return tool_def if runtime_config.get("shared_group_tools_enabled") else None
+    """`prepare` hook: show both tools only where they can work
+    (`shared_group_tools_available`)."""
+    return tool_def if shared_group_tools_available(ctx.deps) else None
 
 
 def _match_shared_group(
@@ -147,10 +153,6 @@ async def get_group_context(
         search_query: Optional topic to semantically search within the group.
         limit: Optional cap on how many recent messages to return (transcript mode).
         since_hours: Optional window — only messages from the last N hours.
-
-    Returns:
-        A list of shared groups, a group transcript, search results, or an
-        explanatory message.
     """
     deps = ctx.deps
     logger.info(
@@ -287,9 +289,6 @@ async def send_group_message(
         message: The message text to relay into the group.
         sender_name: The requester's name for the attribution line (from memory or
             this conversation). If you don't know it, ask before sending.
-
-    Returns:
-        A confirmation that the message was sent, or an explanatory message.
     """
     deps = ctx.deps
     logger.info(

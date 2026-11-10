@@ -6,12 +6,7 @@ state and poisons subsequent tool calls that share the session.
 
 from unittest.mock import MagicMock, patch
 
-from ai_api.agent.tools.settings import (
-    clean_user_data,
-    get_user_settings,
-    update_stt_settings,
-    update_tts_settings,
-)
+from ai_api.agent.tools.settings import clean_user_data, settings
 
 
 def _make_ctx():
@@ -29,7 +24,7 @@ class TestUpdateTtsSettingsRollback:
 
         with patch("ai_api.agent.tools.settings.get_or_create_preferences") as mock_prefs:
             mock_prefs.return_value = MagicMock(tts_enabled=False, tts_language="en")
-            result = await update_tts_settings(ctx, enabled=True)
+            result = await settings(ctx, "tts", enabled=True)
 
         ctx.deps.db.rollback.assert_called_once()
         assert result == "Failed to update TTS settings. Please try again."
@@ -39,7 +34,7 @@ class TestUpdateTtsSettingsRollback:
         ctx = _make_ctx()
         with patch("ai_api.agent.tools.settings.get_or_create_preferences") as mock_prefs:
             mock_prefs.return_value = MagicMock(tts_enabled=False, tts_language="en")
-            result = await update_tts_settings(ctx, enabled=True)
+            result = await settings(ctx, "tts", enabled=True)
 
         ctx.deps.db.commit.assert_called_once()
         ctx.deps.db.rollback.assert_not_called()
@@ -53,7 +48,7 @@ class TestUpdateSttSettingsRollback:
 
         with patch("ai_api.agent.tools.settings.get_or_create_preferences") as mock_prefs:
             mock_prefs.return_value = MagicMock(stt_language=None)
-            result = await update_stt_settings(ctx, language="en")
+            result = await settings(ctx, "stt", language="en")
 
         ctx.deps.db.rollback.assert_called_once()
         assert result == "Failed to update STT settings. Please try again."
@@ -66,7 +61,7 @@ class TestUpdateSttSettingsRollback:
 
         with patch("ai_api.agent.tools.settings.get_or_create_preferences") as mock_prefs:
             mock_prefs.return_value = MagicMock(stt_language="en")
-            result = await update_stt_settings(ctx, language="auto")
+            result = await settings(ctx, "stt", language="auto")
 
         ctx.deps.db.rollback.assert_called_once()
         assert result == "Failed to update STT settings. Please try again."
@@ -81,7 +76,7 @@ class TestGetUserSettingsRollback:
 
         with patch("ai_api.agent.tools.settings.get_or_create_preferences") as mock_prefs:
             mock_prefs.side_effect = RuntimeError("integrity error")
-            result = await get_user_settings(ctx)
+            result = await settings(ctx, "show")
 
         ctx.deps.db.rollback.assert_called_once()
         assert result == "Failed to retrieve settings. Please try again."
@@ -90,11 +85,11 @@ class TestGetUserSettingsRollback:
         ctx = _make_ctx()
         with (
             patch("ai_api.agent.tools.settings.get_or_create_preferences") as mock_prefs,
-            patch("ai_api.agent.tools.settings.format_settings") as mock_fmt,
+            patch("ai_api.agent.tools.settings.settings_view") as mock_fmt,
         ):
             mock_prefs.return_value = MagicMock()
             mock_fmt.return_value = "settings-blob"
-            result = await get_user_settings(ctx)
+            result = await settings(ctx, "show")
 
         ctx.deps.db.rollback.assert_not_called()
         assert result == "settings-blob"
@@ -121,3 +116,37 @@ class TestCleanUserDataRollback:
 
         ctx.deps.db.rollback.assert_not_called()
         assert result == "Cleared 42 messages."
+
+
+class TestSttWithoutLanguage:
+    async def test_no_language_changes_nothing(self):
+        # "stop transcribing" arrives as enabled=false with no language; it
+        # must not reset a configured language to auto-detect.
+        ctx = _make_ctx()
+        prefs = MagicMock(stt_language="pt")
+        with patch("ai_api.agent.tools.settings.get_or_create_preferences", return_value=prefs):
+            result = await settings(ctx, "stt", enabled=False)
+
+        assert prefs.stt_language == "pt"
+        ctx.deps.db.commit.assert_not_called()
+        assert "can't be turned off" in result
+
+    async def test_auto_must_be_explicit(self):
+        ctx = _make_ctx()
+        prefs = MagicMock(stt_language="pt")
+        with patch("ai_api.agent.tools.settings.get_or_create_preferences", return_value=prefs):
+            result = await settings(ctx, "stt", language="auto")
+
+        assert prefs.stt_language is None
+        assert result == "STT language set to auto-detect."
+
+
+class TestShowIncludesAnnouncements:
+    async def test_show_reports_the_announcements_flag(self):
+        ctx = _make_ctx()
+        ctx.deps.db.get.return_value = MagicMock(broadcast_opt_out=True)
+        prefs = MagicMock(tts_enabled=False, tts_language="en", stt_language=None)
+        with patch("ai_api.agent.tools.settings.get_or_create_preferences", return_value=prefs):
+            result = await settings(ctx, "show")
+
+        assert "Update announcements: off" in result

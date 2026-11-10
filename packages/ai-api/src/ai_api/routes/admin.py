@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, nullslast, or_
 from sqlalchemy.orm import Session
 
-from ..agent.core import DEFAULT_SYSTEM_PROMPT
+from ..agent.core import DEFAULT_SYSTEM_PROMPT, warn_on_removed_tools
 from ..broadcast_pacing import SETTING_MAXIMA, parse_send_window, parse_timezone
 from ..config import get_whatsapp_api_key, get_whatsapp_client_url, settings
 from ..database import (
@@ -90,6 +90,7 @@ async def put_prompt(request: UpdatePromptRequest, db: Session = Depends(get_db)
         db.rollback()
         raise HTTPException(status_code=500, detail="Internal server error") from e
     logger.info("System prompt override updated (%d chars)", len(request.content))
+    warn_on_removed_tools(request.content)
     return _prompt_payload(db)
 
 
