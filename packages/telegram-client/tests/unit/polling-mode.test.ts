@@ -120,9 +120,22 @@ describe('startLongPolling', () => {
     expect(deleteWebhook).toHaveBeenCalledWith({ drop_pending_updates: true });
     const [runBot, options] = runMock.mock.calls[0];
     expect(runBot).toBe(bot);
-    expect(options.runner.fetch.allowed_updates).toEqual(['message']);
+    // edited_message is load-bearing: without it Telegram never sends edits
+    // and saved history keeps the old text.
+    expect(options.runner.fetch.allowed_updates).toEqual(['message', 'edited_message']);
     expect(options.runner.maxRetryTime).toBeGreaterThan(0);
     expect(options.runner.maxRetryTime).toBeLessThan(60 * 60_000);
+  });
+});
+
+describe('webhook subscription', () => {
+  it('setWebhook subscribes to the same update types as polling', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const main = await readFile(new URL('../../src/main.ts', import.meta.url), 'utf8');
+    const setWebhook = main.slice(main.indexOf('bot.api.setWebhook('));
+    expect(setWebhook.slice(0, setWebhook.indexOf('});'))).toContain(
+      'allowed_updates: [...ALLOWED_UPDATES]'
+    );
   });
 });
 

@@ -68,26 +68,26 @@ async def manage_scheduled_tasks(
     task_id: str | None = None,
 ) -> str:
     """
-    Create, list or cancel reminders and recurring messages in this chat.
+    Create, list or cancel reminders and recurring messages in this chat, when the
+    user wants to be reminded or wants a message at a set time or on a schedule.
+    In a group only a group admin may create or cancel.
 
     Never compute dates yourself: pass the user's timing in `schedule`, as one of
-    - once: "in 30m", "in 2h", "in 1d", "at 18:30", "tomorrow at 9:00",
-      "monday at 9:00", "next monday at 9:00", "2026-11-20 09:00"
+    - once: "in 30m", "in 2h", "tomorrow at 9:00", "monday at 9:00",
+      "next monday at 9:00", "2026-11-20 09:00"
     - repeating: "every 2h", "every day at 9:00", "every weekday at 8:30",
-      "every monday,friday at 9:00", or a 5-field cron like "0 9 * * 1"
-    Times are the bot's local time. After creating, tell the user the schedule
-    and next run exactly as returned.
+      "every monday,friday at 9:00", or a cron like "0 9 * * 1"
+    Times are the bot's local time. After creating, restate the schedule and
+    next run exactly as returned.
 
     Args:
-        action: "create", "list" (this chat's tasks) or "cancel".
-        schedule: For create: when, in the grammar above.
-        text: For create: the reminder text to send, or for kind "agent" the
-            instruction to carry out at each run (e.g. "check the news on X and
-            tell me only if something changed").
-        kind: "reminder" sends `text` as is; "agent" runs `text` as a task and
-            sends the result (use only when the user wants something looked up
-            or produced at run time).
-        task_id: For cancel: the id shown by list (like "ab12cd34").
+        action: "list" shows this chat's tasks
+        schedule: For create: when
+        text: For create: the reminder text, or for kind "agent" the instruction
+            to carry out at each run
+        kind: "reminder" sends `text` as is; "agent" runs it and sends the result
+            (only when something must be looked up or produced at run time)
+        task_id: For cancel: the id shown by list, like "ab12cd34"
     """
     logger.info(f"⏰ TOOL CALLED: manage_scheduled_tasks (action={action}, kind={kind})")
     deps = ctx.deps

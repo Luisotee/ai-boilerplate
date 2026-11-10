@@ -143,7 +143,7 @@ describe('SendLocationSchema', () => {
   it('should accept decimal precision coordinates', () => {
     const input = {
       phoneNumber: '5511999999999',
-      latitude: -23.550520,
+      latitude: -23.55052,
       longitude: -46.633308,
     };
     const result = SendLocationSchema.safeParse(input);

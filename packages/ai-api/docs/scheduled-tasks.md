@@ -9,8 +9,7 @@ Users can ask the bot, in plain words, for a one-time or recurring message in th
 | `database.py` `ScheduledTask`, `TaskRun` | `scheduled_tasks` holds one row per task, with `next_run_at` armed. `task_runs` holds one row per fired slot, with `UNIQUE(task_id, scheduled_for)` and the text to send in `message`. Both are new tables, so `create_all()` creates them and there is no migration SQL (see below). |
 | `services/schedule.py` | Pure code: the schedule grammar, compiling it to cron (via `croniter`), `next_fire`, the catch-up window and the frequency checks. |
 | `services/scheduled_tasks.py` | `create_task` (applies the limits), `list_tasks`, `find_task` / `cancel_task` (scoped to the chat), `cancel_chat_tasks` (used by `/clean all`), `bot_timezone()` and `rearm`. |
-| `agent/tools/scheduled_tasks.py` | The `manage_scheduled_tasks` tool, whose `action` is create, list or cancel. |
-| `agent/core.py` `scheduled_tasks_guidance` | The tool's guidance, written as an instructions hook so that a `bot_prompt` override keeps it. It is present only while `SCHEDULED_TASKS_ENABLED` is on, and never in a scheduled run. |
+| `agent/tools/scheduled_tasks.py` | The `manage_scheduled_tasks` tool, whose `action` is create, list or cancel. Its description carries the guidance (no instructions hook, no prompt entry), so a `bot_prompt` override keeps it; its `prepare` hook hides it while `SCHEDULED_TASKS_ENABLED` is off and in scheduled runs. |
 | `streams/scheduler.py` | The fourth stream-worker task. It claims due rows, advances them, hands each run over, and sweeps orphans. |
 | `streams/scheduled_runner.py` | The run rules (send-time checks, outcomes, auto-disable) and the agent phase of an agent task. |
 | `streams/scheduled_sender.py` | The fifth stream-worker task. It sends `ready` runs on a paced Baileys lane and a Telegram/Cloud lane. |
@@ -26,6 +25,7 @@ Users can ask the bot, in plain words, for a one-time or recurring message in th
   - **Nothing to send:** a reply that contains the token, or an empty reply, sends nothing and records `silent`.
   - **Tools:** `AgentDeps.scheduled_run=True` makes the agent-wide `prepare_tools` (`agent/core.py` `scheduled_run_tools`) keep only the read-only `SCHEDULED_RUN_TOOLS`. That excludes anything that sends (it would bypass the run's checks), changes settings or memory, or schedules more tasks; the last is a recursion guard that the prompt also states.
   - **Group tools:** `is_group_admin` is None, so group-changing tools would refuse anyway.
+  - **Images:** a `![caption](https://…)` in the reply is not sent as a photo (the sender sends text only); `markdown_to_whatsapp` flattens it to `caption: url`, as for an image that failed in a chat reply.
   - **Model errors:** a model error records `failed/model_error` and sends nothing, so there is no unsolicited "Sorry".
   - **Formatting:** `---` burst lines become blank lines, because send-text doesn't split them.
   - **Frequency:** an agent schedule may fire at most 4 times a day (`AGENT_MAX_DAILY_FIRES`).

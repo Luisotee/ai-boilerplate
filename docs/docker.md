@@ -10,7 +10,7 @@ Detail behind the Docker and logging rules in the root `CLAUDE.md` / `AGENTS.md`
 
 ## Logging and shutdown (TS)
 
-pino-pretty is used only when `NODE_ENV !== 'production'` (the Dockerfiles set `production`, so containers emit plain JSON). All three clients handle SIGTERM/SIGINT with `app.close()` in try/catch, flush Sentry and exit 0; startup failures and `unhandledRejection` still go through `shutdownWithError` (Sentry flush, exit 1).
+pino-pretty is used only when `NODE_ENV !== 'production'` (the Dockerfiles set `production`, so containers emit plain JSON). All three clients handle SIGTERM/SIGINT with `app.close()` in try/catch, flush Sentry and exit 0 (the Baileys client gives `app.close()` a 4s head start so in-flight sends finish, then ends its socket, fails queued sends and waits up to 3s for a pending `creds.json` write, which is atomic, then gives `app.close()` at most 8s more; its service has `stop_grace_period: 20s`); startup failures and `unhandledRejection` still go through `shutdownWithError` (Sentry flush, exit 1).
 
 ## Build-context ignore files
 

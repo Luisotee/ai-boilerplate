@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ai_api.agent.core import SCHEDULED_RUN_TOOLS, scheduled_run_tools, scheduled_tasks_guidance
+from ai_api.agent.core import SCHEDULED_RUN_TOOLS, scheduled_run_tools
 from ai_api.agent.tools.scheduled_tasks import manage_scheduled_tasks, scheduled_tasks_enabled
 from ai_api.database import ConversationMessage, ScheduledTask
 from ai_api.services import scheduled_tasks as svc
@@ -339,20 +339,15 @@ class TestRecursionGuard:
         assert agent._prepare_tools is scheduled_run_tools
 
 
-class TestGuidance:
-    """The tool's guidance is an instructions hook, so a bot_prompt override keeps it."""
+class TestDescription:
+    """The tool carries its own guidance: no instructions hook, no prompt entry."""
 
-    async def test_present_when_enabled(self):
-        with patch("ai_api.agent.core.runtime_config.get", return_value=True):
-            text = await scheduled_tasks_guidance(_ctx())
-        assert "manage_scheduled_tasks" in text
-        assert "Never compute dates yourself" in text
+    def test_description_has_the_rules(self):
+        from ai_api.agent.core import agent
 
-    async def test_absent_when_disabled_or_in_a_scheduled_run(self):
-        with patch("ai_api.agent.core.runtime_config.get", return_value=False):
-            assert await scheduled_tasks_guidance(_ctx()) == ""
-        with patch("ai_api.agent.core.runtime_config.get", return_value=True):
-            assert await scheduled_tasks_guidance(_ctx(scheduled_run=True)) == ""
+        desc = agent._function_toolset.tools["manage_scheduled_tasks"].tool_def.description
+        assert "Never compute dates yourself" in desc
+        assert "group admin" in desc
 
     def test_not_in_the_default_prompt(self):
         from ai_api.agent.core import DEFAULT_SYSTEM_PROMPT

@@ -48,3 +48,49 @@ describe('gating.ts copies', () => {
     ).toBe(reference);
   });
 });
+
+// The typed-mention matcher and the "@bot, then the question" window are shared
+// the same way by whatsapp-client and telegram-client.
+describe.each(['typed-mention.ts', 'mention-window.ts'])('%s copies', (file) => {
+  it(`packages/telegram-client/src/utils/${file} is byte-identical to the reference`, () => {
+    const reference = readFileSync(
+      resolve(REPO_ROOT, `packages/whatsapp-client/src/utils/${file}`),
+      'utf8'
+    );
+    expect(
+      readFileSync(resolve(REPO_ROOT, `packages/telegram-client/src/utils/${file}`), 'utf8')
+    ).toBe(reference);
+  });
+});
+
+// services/live-whitelist.ts (the AI API's effective whitelist, fail closed) is
+// shared by all three clients.
+describe('live-whitelist.ts copies', () => {
+  const reference = readFileSync(
+    resolve(REPO_ROOT, 'packages/whatsapp-client/src/services/live-whitelist.ts'),
+    'utf8'
+  );
+
+  it.each([
+    'packages/whatsapp-cloud/src/services/live-whitelist.ts',
+    'packages/telegram-client/src/services/live-whitelist.ts',
+  ])('%s is byte-identical to the reference', (copy) => {
+    expect(readFileSync(resolve(REPO_ROOT, copy), 'utf8')).toBe(reference);
+  });
+});
+
+// utils/reply-media.ts (sending reply images, with the link fallback) is shared
+// the same way by all three clients.
+describe('reply-media.ts copies', () => {
+  const reference = readFileSync(
+    resolve(REPO_ROOT, 'packages/whatsapp-client/src/utils/reply-media.ts'),
+    'utf8'
+  );
+
+  it.each([
+    'packages/whatsapp-cloud/src/utils/reply-media.ts',
+    'packages/telegram-client/src/utils/reply-media.ts',
+  ])('%s is byte-identical to the reference', (copy) => {
+    expect(readFileSync(resolve(REPO_ROOT, copy), 'utf8')).toBe(reference);
+  });
+});

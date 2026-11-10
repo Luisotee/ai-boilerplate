@@ -165,16 +165,45 @@ export async function sendChatAction(
   await bot.api.sendChatAction(chatId, action);
 }
 
+/** Telegram's photo caption limit, counted after entity parsing. */
+const MAX_CAPTION_CHARS = 1024;
+
+/**
+ * Send a photo. `caption` is WhatsApp markup (like reply text) and goes out
+ * as Telegram HTML, falling back to the plain caption when Telegram rejects
+ * the entities or the HTML would pass the caption limit.
+ */
 export async function sendImage(
   chatId: number,
   buffer: Buffer,
   filename: string,
-  caption?: string
+  caption?: string,
+  replyToMessageId?: number
 ): Promise<number> {
-  const message = await bot.api.sendPhoto(chatId, new InputFile(buffer, filename), {
-    ...(caption && { caption }),
-  });
-  return message.message_id;
+  const replyParams = replyToMessageId
+    ? { reply_parameters: { message_id: replyToMessageId, allow_sending_without_reply: true } }
+    : {};
+  const send = async (options: Record<string, unknown>) =>
+    (
+      await bot.api.sendPhoto(chatId, new InputFile(buffer, filename), {
+        ...replyParams,
+        ...options,
+      })
+    ).message_id;
+
+  if (!caption) return send({});
+  const html = waMarkupToHtml(caption);
+  if (html.length > MAX_CAPTION_CHARS) return send({ caption });
+  try {
+    return await send({ caption: html, parse_mode: 'HTML' });
+  } catch (error) {
+    if (!isParseEntitiesError(error)) throw error;
+    logger.warn(
+      { err: error, chatId },
+      'Caption HTML rejected — resending photo with plain caption'
+    );
+    return send({ caption });
+  }
 }
 
 export async function sendDocument(

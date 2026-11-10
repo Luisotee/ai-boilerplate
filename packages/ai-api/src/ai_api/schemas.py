@@ -4,6 +4,11 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
+class ImageInput(BaseModel):
+    data: str = Field(..., description="Base64-encoded image data")
+    mimetype: str = Field(..., description="Image MIME type (e.g., image/jpeg)")
+
+
 class ChatRequest(BaseModel):
     whatsapp_jid: str = Field(..., description="User's WhatsApp JID")
     message: str = Field(..., description="User's message text")
@@ -19,6 +24,12 @@ class ChatRequest(BaseModel):
     whatsapp_message_id: str | None = Field(None, description="WhatsApp message ID for reactions")
     image_data: str | None = Field(None, description="Base64-encoded image data for vision")
     image_mimetype: str | None = Field(None, description="Image MIME type (e.g., image/jpeg)")
+    images: list[ImageInput] | None = Field(
+        None,
+        max_length=10,
+        description="Several images sent together (an album), answered in one run; "
+        "added after image_data when both are set",
+    )
     document_data: str | None = Field(None, description="Base64-encoded PDF document data")
     document_mimetype: str | None = Field(
         None, description="Document MIME type (e.g., application/pdf)"
@@ -56,6 +67,46 @@ class SaveMessageRequest(BaseModel):
     whatsapp_message_id: str | None = Field(None, description="WhatsApp message ID for reactions")
     phone: str | None = Field(None, description="E.164 phone number (e.g., +5491126726818)")
     whatsapp_lid: str | None = Field(None, description="WhatsApp LID if known")
+
+
+class RevokeMessageRequest(BaseModel):
+    """A message was deleted for everyone on the platform: forget the saved copy."""
+
+    whatsapp_jid: str = Field(..., description="Conversation JID (group or private)")
+    whatsapp_message_id: str = Field(..., description="Platform id of the deleted message")
+    sender_jid: str | None = Field(
+        None, description="Who deleted it (group participant JID, resolved like on save)"
+    )
+    is_group_admin: bool | None = Field(
+        None, description="Whether the deleter is a group admin (may delete others' messages)"
+    )
+    phone: str | None = Field(None, description="E.164 phone of a private chat, if known")
+
+
+class EditMessageRequest(BaseModel):
+    """A message was edited on the platform: update the saved copy and its embedding."""
+
+    whatsapp_jid: str = Field(..., description="Conversation JID (group or private)")
+    whatsapp_message_id: str = Field(..., description="Platform id of the edited message")
+    message: str = Field(..., min_length=1, description="The new text")
+    sender_jid: str | None = Field(
+        None, description="Who edited it (group participant JID, resolved like on save)"
+    )
+    phone: str | None = Field(None, description="E.164 phone of a private chat, if known")
+
+
+class MessageEventResponse(BaseModel):
+    """How many saved rows a revoke or edit changed (0 = not found or not allowed)."""
+
+    changed: int
+
+
+class WhitelistResponse(BaseModel):
+    """The effective whitelist, unparsed (GET /chat/whitelist)."""
+
+    whitelist_phones: str = Field(
+        ..., description="Comma-separated entries, as WHITELIST_PHONES; empty = disabled"
+    )
 
 
 class UploadPDFResponse(BaseModel):

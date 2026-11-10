@@ -398,3 +398,28 @@ class TestProcess:
     async def test_never_raises(self):
         with patch.object(runner, "_claim", side_effect=RuntimeError("db down")):
             await runner.process_scheduled_run(str(uuid.uuid4()))
+
+
+async def test_agent_reply_image_goes_out_as_a_link():
+    # The sender sends text only: an image directive is flattened, never a photo.
+    job = runner._Job(
+        run_id=uuid.uuid4(),
+        user_id=uuid.uuid4(),
+        text="send me a cat",
+        schedule="every day at 09:00",
+        timezone="UTC",
+        client_id=None,
+        chat_jid="5511@s.whatsapp.net",
+    )
+
+    async def reply(*_a, **_kw):
+        yield "Here it is:\n![a cat](https://example.com/cat.png)"
+
+    with (
+        patch("ai_api.agent.get_ai_response", reply),
+        patch.object(runner, "SessionLocal", return_value=MagicMock()),
+        patch("ai_api.embeddings.create_embedding_service", return_value=None),
+    ):
+        text = await runner._agent_reply(job, NOW)
+    assert "https://example.com/cat.png" in text
+    assert "![" not in text

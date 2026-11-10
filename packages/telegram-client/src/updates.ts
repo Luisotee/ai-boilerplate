@@ -7,18 +7,104 @@ import type { Message } from 'grammy/types';
 import { bot, type TelegramContext } from './bot.js';
 import { config } from './config.js';
 import { handleTextMessage } from './handlers/text.js';
+import { editMessage } from './api-client.js';
 import { extractAndTranscribeVoice } from './handlers/voice.js';
-import { extractPhotoData } from './handlers/photo.js';
+import { extractPhotoData, type PhotoExtraction } from './handlers/photo.js';
+import { collectAlbumItem } from './utils/album-buffer.js';
 import { extractDocumentData } from './handlers/document.js';
 import { handleSharedContact, offerPhoneLink } from './handlers/link-prompt.js';
 import { logger } from './logger.js';
 import * as telegramApi from './services/telegram-api.js';
 import { chatIdToJid, chatTypeToConversationType } from './utils/telegram-id.js';
-import { isAddressedToBot, stripBotMention } from './utils/mention.js';
+import { addressingOf, stripBotMention, type BotIdentity } from './utils/mention.js';
+import { createMentionWindow } from './utils/mention-window.js';
 import { documentMarker, imageMarker } from './utils/group-media-marker.js';
-import { isWhitelisted } from './utils/whitelist.js';
+import { isWhitelisted, type Whitelist } from './utils/whitelist.js';
+import { getLiveWhitelist } from './services/live-whitelist.js';
 import { decideGroupGating } from './utils/gating.js';
 import { isSenderGroupAdmin } from './services/group-admin.js';
+
+// "@bot, then the question": the sender's next group message after a mention
+// counts as addressed (utils/mention-window.ts). Keyed `<chat id>|<sender id>`.
+const mentionWindow = createMentionWindow(config.mentionWindowMs);
+
+interface AlbumItem {
+  ctx: TelegramContext;
+  messageId: number;
+  caption: string;
+  /** Not addressed to the bot (an un-mentioned group photo): history only. */
+  saveOnly: boolean;
+  /** Started at once for an addressed photo; lazily otherwise. */
+  photo?: Promise<PhotoExtraction>;
+}
+
+/**
+ * One photo of an album. The first one to arrive (the leader) waits for the
+ * album to settle, then decides for the whole album: in a group only the
+ * captioned photo mentions the bot, so the album is answered when ANY photo is
+ * addressed (all photos in one request), and otherwise each photo is saved as
+ * a history marker. The others return.
+ */
+async function handleAlbumPhoto(
+  ctx: TelegramContext,
+  albumId: string,
+  caption: string,
+  saveOnly: boolean
+): Promise<void> {
+  const items = await collectAlbumItem<AlbumItem>(
+    `${ctx.chat?.id}:${albumId}`,
+    {
+      ctx,
+      messageId: ctx.msg?.message_id ?? 0,
+      caption,
+      saveOnly,
+      photo: saveOnly ? undefined : extractPhotoData(ctx),
+    },
+    config.album
+  );
+  if (!items) return; // another photo of this album leads it
+
+  items.sort((a, b) => a.messageId - b.messageId);
+  if (items.every((item) => item.saveOnly)) {
+    for (const item of items) {
+      await handleTextMessage(item.ctx, imageMarker(item.caption), {
+        senderJid: item.ctx.from ? chatIdToJid(item.ctx.from.id) : undefined,
+        saveOnly: true,
+      });
+    }
+    return;
+  }
+
+  ctx.chatAction = 'typing';
+  const results = await Promise.all(items.map((item) => item.photo ?? extractPhotoData(item.ctx)));
+  const images = results.flatMap((r) =>
+    r.kind === 'ok' ? [{ data: r.data, mimetype: r.mimetype }] : []
+  );
+  if (images.length < results.length) {
+    logger.warn(
+      { albumId, received: results.length, downloaded: images.length },
+      'Some album photos could not be downloaded'
+    );
+  }
+  if (images.length === 0) {
+    await ctx.reply(
+      results.some((r) => r.kind === 'too-large')
+        ? "Sorry, that image is larger than Telegram's 20 MB bot download limit. Please send a smaller file."
+        : "Sorry, I couldn't download that image. Please try again."
+    );
+    return;
+  }
+
+  const isGroup = chatTypeToConversationType(ctx.chat?.type ?? 'private') === 'group';
+  const rawCaption = items.find((item) => item.caption)?.caption ?? '';
+  const albumCaption = isGroup ? stripBotMentionFromCtx(ctx, rawCaption) : rawCaption;
+  await handleTextMessage(ctx, albumCaption || 'Image received', {
+    senderJid: ctx.from ? chatIdToJid(ctx.from.id) : undefined,
+    images,
+    // Same fail-closed admin rule as text: resolve it for an answered group album.
+    isGroupAdmin: isGroup ? await isSenderGroupAdmin(ctx) : undefined,
+  });
+}
 
 export function registerUpdateHandlers(): void {
   // ---------------- Account linking (phone share) ----------------
@@ -29,19 +115,20 @@ export function registerUpdateHandlers(): void {
   bot.command('linkphone', async (ctx) => {
     // saveOnly: an un-addressed or (GROUP_GATING=membership) non-whitelisted
     // group sender gets no reply at all, not even the "private only" hint.
-    const { skip, saveOnly } = resolveGate(ctx);
+    const { skip, saveOnly } = await resolveGate(ctx);
     if (skip || saveOnly) return;
     await offerPhoneLink(ctx);
   });
 
   bot.on('message:contact', async (ctx) => {
-    if (resolveGate(ctx).skip) return;
+    // A shared contact is not a question: it must not consume the window.
+    if ((await resolveGate(ctx, { mentionWindow: false })).skip) return;
     await handleSharedContact(ctx);
   });
 
   // ---------------- Text ----------------
   bot.on('message:text', async (ctx) => {
-    const { skip, isGroup, saveOnly } = resolveGate(ctx);
+    const { skip, isGroup, saveOnly } = await resolveGate(ctx);
     if (skip) return;
 
     const text = ctx.msg.text;
@@ -64,9 +151,37 @@ export function registerUpdateHandlers(): void {
     });
   });
 
+  // ---------------- Edited text ----------------
+  // Keep the saved copy in step with an edit (the AI API re-embeds it). The Bot
+  // API delivers no deletions, so there is no revoke here. Silent: no reply,
+  // no reaction, and the mention window is neither opened nor consumed.
+  // Caption edits are skipped (the row holds an `[Image: …]` marker).
+  bot.on('edited_message:text', async (ctx) => {
+    const { skip, isGroup } = await resolveGate(ctx, { mentionWindow: false });
+    if (skip || !ctx.chat) return;
+    // In a group, always strip a leading bot mention (the save path strips it
+    // from addressed messages), so the stored form doesn't depend on whether
+    // the edit added or removed it. An edit down to just "@bot" keeps the raw
+    // text: an empty edit is refused (422) and the old text would stay.
+    const text = ctx.editedMessage.text;
+    const cleanText = (isGroup && stripBotMentionFromCtx(ctx, text)) || text;
+    const changed = await editMessage(
+      {
+        whatsappJid: chatIdToJid(ctx.chat.id),
+        messageId: String(ctx.editedMessage.message_id),
+        senderJid: isGroup && ctx.from ? chatIdToJid(ctx.from.id) : undefined,
+      },
+      cleanText
+    );
+    logger.info(
+      { chatId: ctx.chat.id, messageId: ctx.editedMessage.message_id, changed },
+      'Applied message edit'
+    );
+  });
+
   // ---------------- Voice / Audio ----------------
   bot.on(['message:voice', 'message:audio'], async (ctx) => {
-    const { skip, saveOnly } = resolveGate(ctx);
+    const { skip, isGroup, saveOnly } = await resolveGate(ctx);
     if (skip) return;
 
     if (saveOnly) {
@@ -81,6 +196,7 @@ export function registerUpdateHandlers(): void {
     if (result.kind === 'ok') {
       await handleTextMessage(ctx, result.transcription, {
         senderJid: ctx.from ? chatIdToJid(ctx.from.id) : undefined,
+        isGroupAdmin: isGroup ? await isSenderGroupAdmin(ctx) : undefined,
       });
       return;
     }
@@ -123,10 +239,18 @@ export function registerUpdateHandlers(): void {
 
   // ---------------- Photo ----------------
   bot.on('message:photo', async (ctx) => {
-    const { skip, saveOnly } = resolveGate(ctx);
+    const { skip, isGroup, saveOnly } = await resolveGate(ctx);
     if (skip) return;
 
     const caption = ctx.msg.caption ?? '';
+
+    // An album arrives as one update per photo, and in a group only the
+    // captioned one mentions the bot: group it first, then gate the album.
+    const albumId = ctx.msg.media_group_id;
+    if (albumId) {
+      await handleAlbumPhoto(ctx, albumId, caption, saveOnly);
+      return;
+    }
 
     // Group non-mention: save an [Image] / [Image: caption] marker to history
     // without downloading the binary. Matches Baileys (whatsapp.ts:226-234) so
@@ -141,13 +265,14 @@ export function registerUpdateHandlers(): void {
 
     ctx.chatAction = 'typing';
     const result = await extractPhotoData(ctx);
-    const text = caption || 'Image received';
+    const text = (isGroup ? stripBotMentionFromCtx(ctx, caption) : caption) || 'Image received';
 
     switch (result.kind) {
       case 'ok':
         await handleTextMessage(ctx, text, {
           senderJid: ctx.from ? chatIdToJid(ctx.from.id) : undefined,
           image: { data: result.data, mimetype: result.mimetype },
+          isGroupAdmin: isGroup ? await isSenderGroupAdmin(ctx) : undefined,
         });
         break;
       case 'too-large':
@@ -163,7 +288,7 @@ export function registerUpdateHandlers(): void {
 
   // ---------------- Document ----------------
   bot.on('message:document', async (ctx) => {
-    const { skip, saveOnly } = resolveGate(ctx);
+    const { skip, isGroup, saveOnly } = await resolveGate(ctx);
     if (skip) return;
 
     const caption = ctx.msg.caption ?? '';
@@ -181,13 +306,15 @@ export function registerUpdateHandlers(): void {
 
     ctx.chatAction = 'typing';
     const result = await extractDocumentData(ctx);
-    const text = caption || `Document: ${filename}`;
+    const text =
+      (isGroup ? stripBotMentionFromCtx(ctx, caption) : caption) || `Document: ${filename}`;
 
     switch (result.kind) {
       case 'ok':
         await handleTextMessage(ctx, text, {
           senderJid: ctx.from ? chatIdToJid(ctx.from.id) : undefined,
           document: { data: result.data, mimetype: result.mimetype, filename: result.filename },
+          isGroupAdmin: isGroup ? await isSenderGroupAdmin(ctx) : undefined,
         });
         break;
       case 'wrong-type':
@@ -215,10 +342,10 @@ export function registerUpdateHandlers(): void {
  * whitelist live in a separate set the matcher never consults here, so a bare
  * number can never accidentally admit a Telegram chat with the same digits.
  */
-function passesWhitelist(chatId: number | undefined): boolean {
-  if (config.whitelistPhones.size === 0) return true;
+function chatListedIn(wl: Whitelist, chatId: number | undefined): boolean {
+  if (wl.size === 0) return true;
   if (chatId === undefined) return false;
-  return isWhitelisted(config.whitelistPhones, chatIdToJid(chatId));
+  return isWhitelisted(wl, chatIdToJid(chatId));
 }
 
 interface GateResult {
@@ -244,14 +371,29 @@ interface GateResult {
  * client's decision is the only gate there is for Telegram groups in that
  * mode: the AI API admits every group JID then.
  */
-function resolveGate(ctx: TelegramContext): GateResult {
+interface GateOptions {
+  /**
+   * Use (and arm) the "@bot, then the question" window. True for new messages;
+   * false for events that must not open or consume it (edits).
+   */
+  mentionWindow?: boolean;
+}
+
+async function resolveGate(ctx: TelegramContext, options: GateOptions = {}): Promise<GateResult> {
   const conversationType = chatTypeToConversationType(ctx.chat?.type ?? 'private');
   const isGroup = conversationType === 'group';
-  const whitelistEnabled = config.whitelistPhones.size > 0;
-  const chatListed = passesWhitelist(ctx.chat?.id);
+  // The AI API's effective whitelist (services/live-whitelist.ts). Unavailable
+  // → drop the update: the gate fails closed.
+  const wl = await getLiveWhitelist();
+  if (!wl) {
+    logger.debug({ chatId: ctx.chat?.id }, 'Skipping update: whitelist unavailable');
+    return { skip: true, isGroup, saveOnly: true };
+  }
+  const whitelistEnabled = wl.size > 0;
+  const chatListed = chatListedIn(wl, ctx.chat?.id);
   const membership = isGroup && config.groupGating === 'membership';
   const senderWhitelisted = membership
-    ? ctx.from !== undefined && isWhitelisted(config.whitelistPhones, chatIdToJid(ctx.from.id))
+    ? ctx.from !== undefined && isWhitelisted(wl, chatIdToJid(ctx.from.id))
     : chatListed;
 
   const decision = decideGroupGating({
@@ -260,7 +402,7 @@ function resolveGate(ctx: TelegramContext): GateResult {
     senderWhitelisted,
     groupExplicit: chatListed,
     groupAllowed: membership ? true : chatListed,
-    respondInGroup: isGroup && isAddressed(ctx),
+    respondInGroup: isGroup && isAddressed(ctx, options),
   });
   if (decision.skip) {
     logger.debug(
@@ -272,7 +414,7 @@ function resolveGate(ctx: TelegramContext): GateResult {
 }
 
 // Exported for unit tests only.
-export const _internals = { passesWhitelist, resolveGate };
+export const _internals = { resolveGate };
 
 /**
  * `bot.botInfo` THROWS when the bot has not been initialized (grammY >= 1.4x) —
@@ -282,21 +424,43 @@ export const _internals = { passesWhitelist, resolveGate };
  * bootstrap degrades to "does not answer in groups" instead of throwing on
  * every single update.
  */
-function botIdentity(): { id: number; username: string } | undefined {
+function botIdentity(): BotIdentity | undefined {
   if (!bot.isInited()) {
     logger.error(
       'bot.botInfo unavailable — bot.init() has not completed. Group @-mentions cannot be detected.'
     );
     return undefined;
   }
-  return { id: bot.botInfo.id, username: bot.botInfo.username };
+  return {
+    id: bot.botInfo.id,
+    username: bot.botInfo.username,
+    typedNames: [config.botName, bot.botInfo.first_name],
+  };
 }
 
-function isAddressed(ctx: TelegramContext): boolean {
+/**
+ * Whether this group message is for the bot: a mention, a reply to the bot, a
+ * command, or (with `options.mentionWindow`, the default) the sender's next
+ * message after a mention. Only decides `respondInGroup`; the whitelist gate in
+ * `resolveGate` still runs around it, so the window can never admit a sender
+ * the gate keeps save-only.
+ */
+function isAddressed(ctx: TelegramContext, options: GateOptions = {}): boolean {
   const message = ctx.msg as Message | undefined;
   const me = botIdentity();
   if (!message || !me) return false;
-  return isAddressedToBot(message, me);
+  const addressing = addressingOf(message, me);
+  // Anonymous admins all share `from` = GroupAnonymousBot, so a window keyed
+  // on it would let one admin's mention open it for another: skip it for them.
+  if (options.mentionWindow === false || message.sender_chat) return addressing !== null;
+
+  const windowKey = `${ctx.chat?.id}|${ctx.from?.id}`;
+  if (addressing === 'mention') {
+    mentionWindow.arm(windowKey, Date.now());
+    return true;
+  }
+  if (addressing !== null) return true;
+  return ctx.from !== undefined && mentionWindow.consume(windowKey, Date.now());
 }
 
 function stripBotMentionFromCtx(ctx: TelegramContext, text: string): string {

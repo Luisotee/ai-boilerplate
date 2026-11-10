@@ -17,7 +17,7 @@ import {
 import { bot } from './bot.js';
 import { logger } from './logger.js';
 import { markBotDisconnected, markBotReady } from './services/bot-state.js';
-import { startLongPolling, stopLongPolling } from './polling.js';
+import { ALLOWED_UPDATES, startLongPolling, stopLongPolling } from './polling.js';
 import type { RunnerHandle } from '@grammyjs/runner';
 import { registerUpdateHandlers } from './updates.js';
 import { registerHealthRoutes } from './routes/health.js';
@@ -178,7 +178,7 @@ async function start() {
     try {
       await bot.api.setWebhook(config.telegram.publicWebhookUrl, {
         secret_token: config.telegram.webhookSecret || undefined,
-        allowed_updates: ['message'],
+        allowed_updates: [...ALLOWED_UPDATES],
         drop_pending_updates: config.telegram.dropPendingUpdates,
       });
       app.log.info(
@@ -210,11 +210,9 @@ async function start() {
   } else {
     app.log.info(`Webhook URL: http://localhost:${config.server.port}/webhook`);
   }
-  if (config.whitelistPhones.size > 0) {
-    app.log.info({ count: config.whitelistPhones.size }, 'User whitelist ENABLED');
-  } else {
-    app.log.info('User whitelist DISABLED (all users allowed)');
-  }
+  // The whitelist is read live from the AI API (services/live-whitelist.ts),
+  // not from this client's env; it is logged when first fetched.
+  app.log.info('User whitelist: read live from the AI API (GET /chat/whitelist)');
   app.log.info('='.repeat(60));
 
   // Graceful shutdown. Webhook mode just closes the server. Polling mode first

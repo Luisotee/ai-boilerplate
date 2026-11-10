@@ -8,6 +8,11 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
+// The whitelist comes from the AI API now; serve WHITELIST_PHONES from the env.
+vi.mock('../../src/services/live-whitelist.js', async () =>
+  (await import('../helpers/live-whitelist-env.js')).envWhitelistMock()
+);
+
 const PHONE = '4915755945319';
 
 describe('passesWhitelist (Cloud API)', () => {
@@ -25,15 +30,21 @@ describe('passesWhitelist (Cloud API)', () => {
     return mod._internals.passesWhitelist;
   }
 
+  it('FAILS CLOSED when the whitelist is unavailable from the AI API', async () => {
+    vi.stubEnv('WHITELIST_UNAVAILABLE', '1');
+    const passesWhitelist = await loadWithWhitelist('');
+    expect(await passesWhitelist(PHONE)).toBe(false);
+  });
+
   it('allows everything when the whitelist is empty', async () => {
     const passesWhitelist = await loadWithWhitelist('');
-    expect(passesWhitelist(PHONE)).toBe(true);
-    expect(passesWhitelist('123')).toBe(true);
+    expect(await passesWhitelist(PHONE)).toBe(true);
+    expect(await passesWhitelist('123')).toBe(true);
   });
 
   it('allows a whitelisted bare phone', async () => {
     const passesWhitelist = await loadWithWhitelist(PHONE);
-    expect(passesWhitelist(PHONE)).toBe(true);
+    expect(await passesWhitelist(PHONE)).toBe(true);
   });
 
   it('accepts cosmetic entry formats for the same number', async () => {
@@ -44,19 +55,19 @@ describe('passesWhitelist (Cloud API)', () => {
       `${PHONE}@s.whatsapp.net`,
     ]) {
       const passesWhitelist = await loadWithWhitelist(entry);
-      expect(passesWhitelist(PHONE), entry).toBe(true);
+      expect(await passesWhitelist(PHONE), entry).toBe(true);
       vi.resetModules();
     }
   });
 
   it('blocks a phone that is not listed', async () => {
     const passesWhitelist = await loadWithWhitelist(PHONE);
-    expect(passesWhitelist('4915700000000')).toBe(false);
+    expect(await passesWhitelist('4915700000000')).toBe(false);
   });
 
   it('group JID entries have no effect on Cloud (no group context in the payload)', async () => {
     const passesWhitelist = await loadWithWhitelist('120363000000000000@g.us');
-    expect(passesWhitelist(PHONE)).toBe(false);
-    expect(passesWhitelist('120363000000000000')).toBe(false);
+    expect(await passesWhitelist(PHONE)).toBe(false);
+    expect(await passesWhitelist('120363000000000000')).toBe(false);
   });
 });

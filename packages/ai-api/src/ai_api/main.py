@@ -16,12 +16,14 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from .agent.core import warn_on_removed_tools
 from .config import settings
-from .database import init_db
+from .database import SessionLocal, get_active_prompt, init_db
 from .deps import limiter
 from .logger import logger
 from .queue.connection import close_arq_redis, get_arq_redis
 from .routes import (
+    access_router,
     admin_router,
     broadcasts_router,
     bug_reports_router,
@@ -29,6 +31,7 @@ from .routes import (
     contact_router,
     health_router,
     knowledge_base_router,
+    message_events_router,
     preferences_router,
     scheduled_tasks_router,
     speech_router,
@@ -48,6 +51,15 @@ async def _cleanup_loop():
         await asyncio.sleep(interval)
 
 
+def _warn_on_stale_prompt() -> None:
+    """Warn when the stored /admin prompt names tools that were removed."""
+    try:
+        with SessionLocal() as db:
+            warn_on_removed_tools(get_active_prompt(db))
+    except Exception as e:  # a startup check, never a reason not to start
+        logger.warning(f"Could not check the stored system prompt: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize database and Redis on startup"""
@@ -55,6 +67,7 @@ async def lifespan(app: FastAPI):
 
     # Initialize PostgreSQL
     init_db()
+    _warn_on_stale_prompt()
 
     # Initialize Redis connection pool
     try:
@@ -231,6 +244,8 @@ app.include_router(health_router)
 app.include_router(contact_router)
 app.include_router(knowledge_base_router)
 app.include_router(chat_router)
+app.include_router(message_events_router)
+app.include_router(access_router)
 app.include_router(speech_router)
 app.include_router(preferences_router)
 app.include_router(admin_router)
