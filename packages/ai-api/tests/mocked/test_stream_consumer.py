@@ -305,3 +305,22 @@ class TestErrorPropagation:
 
         with pytest.raises(RuntimeError, match="DB connection lost"):
             await process_single_message("user-123", "stream-msg-1", data)
+
+
+class TestScheduledTrigger:
+    """A fired scheduled task shares the chat's stream but is not a chat message."""
+
+    @patch("ai_api.streams.consumer.process_scheduled_run", new_callable=AsyncMock)
+    @patch("ai_api.streams.consumer.process_chat_job_direct", new_callable=AsyncMock)
+    async def test_scheduled_job_goes_to_the_runner(self, mock_processor, mock_runner):
+        data = {b"trigger": b"scheduled", b"run_id": b"run-1", b"user_id": b"u-1"}
+        await process_single_message("u-1", "1-0", data)
+        mock_runner.assert_awaited_once_with("run-1")
+        mock_processor.assert_not_awaited()
+
+    @patch("ai_api.streams.consumer.process_scheduled_run", new_callable=AsyncMock)
+    @patch("ai_api.streams.consumer.process_chat_job_direct", new_callable=AsyncMock)
+    async def test_chat_job_never_reaches_the_runner(self, mock_processor, mock_runner):
+        await process_single_message("user-uuid-456", "1-0", _make_stream_data())
+        mock_runner.assert_not_awaited()
+        mock_processor.assert_awaited_once()

@@ -806,6 +806,7 @@ class TestConversationViewer:
                 "messages": 10,
                 "knowledge_base_documents": 2,
                 "open_bug_reports": 4,
+                "disabled_scheduled_tasks": 4,
             }
         finally:
             _cleanup()

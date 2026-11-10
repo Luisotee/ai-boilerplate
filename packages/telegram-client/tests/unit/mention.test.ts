@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { Message } from 'grammy/types';
-import { isAddressedToBot, stripBotMention } from '../../src/utils/mention.js';
+import { addressingOf, isAddressedToBot, stripBotMention } from '../../src/utils/mention.js';
 
 const bot = { id: 42, username: 'my_bot' };
 
@@ -153,5 +153,62 @@ describe('isAddressedToBot — commands and casing', () => {
       entities: [{ type: 'mention', offset: 0, length: 12 }],
     } as Message;
     expect(isAddressedToBot(message, BOT)).toBe(false);
+  });
+});
+
+describe('typed @Name mentions', () => {
+  const named = { ...bot, typedNames: ['Curupira'] };
+
+  it('matches a typed @Name with no entities', () => {
+    expect(isAddressedToBot(makeTextMessage('@Curupira bom dia'), named)).toBe(true);
+  });
+
+  it('matches a typed @Name that Telegram tagged as a mention entity', () => {
+    const msg = makeTextMessage('@Curupira bom dia', {
+      entities: [{ type: 'mention', offset: 0, length: 9 }],
+    });
+    expect(addressingOf(msg, named)).toBe('mention');
+  });
+
+  it('does not match when another user is mentioned too', () => {
+    const msg = makeTextMessage('@alice @Curupira', {
+      entities: [
+        { type: 'mention', offset: 0, length: 6 },
+        { type: 'mention', offset: 7, length: 9 },
+      ],
+    });
+    expect(isAddressedToBot(msg, named)).toBe(false);
+  });
+
+  it('does not match a text_mention of another user', () => {
+    const msg = makeTextMessage('Bob @Curupira', {
+      entities: [
+        {
+          type: 'text_mention',
+          offset: 0,
+          length: 3,
+          user: { id: 9, is_bot: false, first_name: 'Bob' },
+        },
+      ],
+    });
+    expect(isAddressedToBot(msg, named)).toBe(false);
+  });
+
+  it('does not match e-mail addresses or without typed names', () => {
+    expect(isAddressedToBot(makeTextMessage('ana@Curupira.org'), named)).toBe(false);
+    expect(isAddressedToBot(makeTextMessage('@Curupira'), bot)).toBe(false);
+  });
+
+  it('classifies reply, command and mention', () => {
+    expect(
+      addressingOf(makeTextMessage('x', { reply_to_message: { from: { id: 42 } } } as never), bot)
+    ).toBe('reply');
+    expect(
+      addressingOf(
+        makeTextMessage('/help', { entities: [{ type: 'bot_command', offset: 0, length: 5 }] }),
+        bot
+      )
+    ).toBe('command');
+    expect(addressingOf(makeTextMessage('hello'), bot)).toBeNull();
   });
 });

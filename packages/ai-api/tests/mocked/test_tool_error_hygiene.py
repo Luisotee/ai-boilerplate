@@ -35,21 +35,21 @@ class TestSafeRollback:
         db.rollback.assert_called_once()
 
     async def test_tool_still_returns_generic_message_when_rollback_fails(self):
-        from ai_api.agent.tools.settings import update_tts_settings
+        from ai_api.agent.tools.settings import settings
 
         ctx = _ctx()
         ctx.deps.db.commit.side_effect = RuntimeError(SECRET)
         ctx.deps.db.rollback.side_effect = RuntimeError("connection is closed")
         with patch("ai_api.agent.tools.settings.get_or_create_preferences") as mock_prefs:
             mock_prefs.return_value = MagicMock(tts_enabled=False, tts_language="en")
-            result = await update_tts_settings(ctx, enabled=True)
+            result = await settings(ctx, "tts", enabled=True)
 
         assert result == "Failed to update TTS settings. Please try again."
 
 
 class TestMemoryTool:
     async def test_commit_failure_rolls_back_without_leaking(self):
-        from ai_api.agent.tools.memory import update_core_memory
+        from ai_api.agent.tools.memory import MemoryOperation, memory
 
         ctx = _ctx()
         ctx.deps.db.commit.side_effect = RuntimeError(SECRET)
@@ -59,7 +59,7 @@ class TestMemoryTool:
         ):
             mock_mem.return_value = MagicMock(content="")
             mock_rc.get.return_value = 10_000
-            result = await update_core_memory(ctx, "likes tea")
+            result = await memory(ctx, [MemoryOperation(action="add", text="likes tea")])
 
         ctx.deps.db.rollback.assert_called_once()
         assert SECRET not in result
@@ -132,3 +132,30 @@ class TestNetworkTools:
 
         assert SECRET not in result
         assert result.startswith("Failed to send")
+
+
+class TestScheduledTasksTool:
+    @pytest.mark.parametrize("action", ["create", "list", "cancel"])
+    async def test_db_failure_rolls_back_without_leaking(self, action):
+        from ai_api.agent.tools.scheduled_tasks import manage_scheduled_tasks
+
+        ctx = _ctx()
+        ctx.deps.is_group_admin = None
+        with (
+            patch(
+                "ai_api.agent.tools.scheduled_tasks.create_task", side_effect=RuntimeError(SECRET)
+            ),
+            patch(
+                "ai_api.agent.tools.scheduled_tasks.list_tasks", side_effect=RuntimeError(SECRET)
+            ),
+            patch(
+                "ai_api.agent.tools.scheduled_tasks.cancel_task", side_effect=RuntimeError(SECRET)
+            ),
+        ):
+            result = await manage_scheduled_tasks(
+                ctx, action, schedule="in 5m", text="x", task_id="abcd1234"
+            )
+
+        assert SECRET not in result
+        assert result == "Failed to manage scheduled tasks. Please try again."
+        ctx.deps.db.rollback.assert_called_once()

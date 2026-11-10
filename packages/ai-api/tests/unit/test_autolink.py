@@ -204,6 +204,24 @@ class TestAutolinkHappyPath:
             try_autolink(db, caller, "5511987654321", SENDER_ID, SENDER_ID)
         assert order == ["tg-uuid", "delete"]
 
+    def test_moves_the_orphans_api_keys_before_deleting_it(self):
+        """A web key linked to the Telegram row must follow it, not be cascade-deleted."""
+        from ai_api.services import autolink
+
+        caller = _tg_user()
+        wa = _wa_user()
+        db = _db([wa])
+        order = []
+        db.delete.side_effect = lambda _row: order.append("delete")
+        with (
+            patch.object(autolink, "scrub_user_reports"),
+            patch.object(
+                autolink, "move_api_keys", side_effect=lambda _db, a, b: order.append((a, b))
+            ),
+        ):
+            try_autolink(db, caller, "5511987654321", SENDER_ID, SENDER_ID)
+        assert order == [(caller.id, wa.id), "delete"]
+
     @pytest.mark.parametrize(
         "wa_out,tg_out,expected", [(False, True, True), (True, False, True), (False, False, False)]
     )

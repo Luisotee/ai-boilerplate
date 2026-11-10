@@ -13,12 +13,15 @@ vi.mock('../../src/services/baileys.js', () => ({
   getBaileysSocket: vi.fn(),
   isBaileysReady: vi.fn(),
   setBaileysSocket: vi.fn(),
+  getConnectionHealth: vi.fn(),
 }));
 
 import { buildTestApp } from '../helpers/fastify.js';
-import { isBaileysReady } from '../../src/services/baileys.js';
+import { getConnectionHealth, isBaileysReady } from '../../src/services/baileys.js';
 
 const mockIsBaileysReady = isBaileysReady as ReturnType<typeof vi.fn>;
+const mockGetConnectionHealth = getConnectionHealth as ReturnType<typeof vi.fn>;
+const NO_HEALTH = { lastInboundAt: null, lastDisconnect: null, reconnectAttempts: 0 };
 
 describe('Health routes', () => {
   let app: FastifyInstance;
@@ -33,6 +36,7 @@ describe('Health routes', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockGetConnectionHealth.mockReturnValue(NO_HEALTH);
   });
 
   describe('GET /health', () => {
@@ -42,7 +46,7 @@ describe('Health routes', () => {
       const res = await app.inject({ method: 'GET', url: '/health' });
 
       expect(res.statusCode).toBe(200);
-      expect(res.json()).toEqual({ status: 'healthy', whatsapp_connected: false });
+      expect(res.json()).toEqual({ status: 'healthy', whatsapp_connected: false, ...NO_HEALTH });
     });
 
     it('reports whatsapp_connected=true when Baileys is ready', async () => {
@@ -51,8 +55,22 @@ describe('Health routes', () => {
       const res = await app.inject({ method: 'GET', url: '/health' });
 
       expect(res.statusCode).toBe(200);
-      expect(res.json()).toEqual({ status: 'healthy', whatsapp_connected: true });
+      expect(res.json()).toEqual({ status: 'healthy', whatsapp_connected: true, ...NO_HEALTH });
     });
+  });
+
+  it('GET /health reports the last inbound message, last disconnect and reconnect attempts', async () => {
+    mockIsBaileysReady.mockReturnValue(false);
+    const health = {
+      lastInboundAt: '2026-11-09T12:00:00.000Z',
+      lastDisconnect: { at: '2026-11-09T12:05:00.000Z', statusCode: 440, reason: 'replaced' },
+      reconnectAttempts: 2,
+    };
+    mockGetConnectionHealth.mockReturnValue(health);
+
+    const res = await app.inject({ method: 'GET', url: '/health' });
+
+    expect(res.json()).toEqual({ status: 'healthy', whatsapp_connected: false, ...health });
   });
 
   describe('GET /health/ready', () => {

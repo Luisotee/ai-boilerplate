@@ -16,12 +16,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, nullslast, or_
 from sqlalchemy.orm import Session
 
-from ..agent.core import DEFAULT_SYSTEM_PROMPT
+from ..agent.core import DEFAULT_SYSTEM_PROMPT, warn_on_removed_tools
 from ..broadcast_pacing import SETTING_MAXIMA, parse_send_window, parse_timezone
 from ..config import get_whatsapp_api_key, get_whatsapp_client_url, settings
 from ..database import (
     BugReport,
     ConversationMessage,
+    ScheduledTask,
     User,
     clear_active_prompt,
     delete_setting_override,
@@ -90,6 +91,7 @@ async def put_prompt(request: UpdatePromptRequest, db: Session = Depends(get_db)
         db.rollback()
         raise HTTPException(status_code=500, detail="Internal server error") from e
     logger.info("System prompt override updated (%d chars)", len(request.content))
+    warn_on_removed_tools(request.content)
     return _prompt_payload(db)
 
 
@@ -209,6 +211,25 @@ def _validate_broadcast_settings(coerced: dict[str, object], effective) -> None:
         )
 
 
+#: Same bounds as config.py: an emptied number box must not mean "no limit".
+_SCHEDULED_TASK_BOUNDS = {
+    "scheduled_tasks_max_per_chat": (1, 1000),
+    "scheduled_tasks_min_interval_minutes": (1, 10080),
+    "scheduled_tasks_max_runs_per_day": (1, 1000),
+}
+
+
+def _validate_scheduled_task_settings(coerced: dict[str, object]) -> None:
+    for key, (low, high) in _SCHEDULED_TASK_BOUNDS.items():
+        if key in coerced and not low <= coerced[key] <= high:
+            raise HTTPException(status_code=400, detail=f"{key} must be between {low} and {high}")
+    if coerced.get("bot_timezone"):
+        try:
+            parse_timezone(coerced["bot_timezone"])
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+
+
 def _validate_cross_constraints(coerced: dict[str, object]) -> None:
     """Reject overrides that would violate invariants Settings checks at boot.
 
@@ -253,6 +274,7 @@ def _validate_cross_constraints(coerced: dict[str, object]) -> None:
     # (bug_reports_enabled is the off switch).
     if coerced.get("bug_reports_per_user_per_hour", 1) < 1:
         raise HTTPException(status_code=400, detail="bug_reports_per_user_per_hour must be >= 1")
+    _validate_scheduled_task_settings(coerced)
     if "whitelist_phones" in coerced:
         # Deliberately no *format* check: entry shapes are forward-compatible
         # (future JID schemes land in the id set and simply never match), and
@@ -466,6 +488,9 @@ async def overview(db: Session = Depends(get_db)):
         messages=db.query(ConversationMessage).count(),
         knowledge_base_documents=db.query(KnowledgeBaseDocument).count(),
         open_bug_reports=db.query(BugReport).filter(BugReport.status == "open").count(),
+        disabled_scheduled_tasks=db.query(ScheduledTask)
+        .filter(ScheduledTask.status == "disabled")
+        .count(),
     )
 
 

@@ -139,3 +139,26 @@ def is_whitelisted(wl: Whitelist, chat_jid: str, phone: str | None = None) -> bo
             return True
 
     return False
+
+
+def chat_in_scope(
+    wl: Whitelist,
+    chat_jid: str,
+    phone: str | None = None,
+    *,
+    is_group: bool,
+    group_gating: str,
+) -> bool:
+    """Whether the bot may talk in a conversation: the chat rule of the AI API.
+
+    Shared by ``routes/chat.py`` ``_is_whitelisted`` and the scheduled-task
+    sender, so the rule lives in one place. Under ``GROUP_GATING=membership``
+    every group is in scope here (the client, which sees the members, is
+    authoritative for groups in that mode); otherwise a group matches like any
+    chat id. ``phone`` is the conversation's own number, never a participant's.
+    """
+    if wl.size == 0:
+        return True
+    if group_gating == "membership" and is_group:
+        return True
+    return is_whitelisted(wl, chat_jid, phone)

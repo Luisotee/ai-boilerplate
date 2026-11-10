@@ -2,7 +2,6 @@ import { config as dotenvConfig, parse as dotenvParse } from 'dotenv';
 import { existsSync, readFileSync } from 'fs';
 import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
-import { parseWhitelist } from './utils/whitelist.js';
 import { parseGroupGating } from './utils/gating.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -31,8 +30,6 @@ if (existsSync(localEnvPath)) {
   dotenvConfig({ path: localEnvPath, override: true });
 }
 
-const whitelistPhones = parseWhitelist(process.env.WHITELIST_PHONES || '');
-
 // GROUP_GATING=jid|membership — see utils/gating.ts. An unknown value falls back
 // to the stricter `jid` rather than failing startup.
 const groupGating = parseGroupGating(process.env.GROUP_GATING);
@@ -52,7 +49,13 @@ function parseNonNegativeInt(name: string, defaultValue: number): number {
 }
 
 export const config = {
-  whitelistPhones,
+  // The bot's name, shared with the AI API. Here it is one of the names a typed
+  // `@Name` group mention is matched against (utils/typed-mention.ts).
+  botName: (process.env.BOT_NAME || '').trim(),
+  // GROUP_MENTION_WINDOW_SECONDS: after a group message mentions the bot, the
+  // same sender's next message within this window counts as addressed (e.g. a
+  // voice note after "@bot"). 0 disables it.
+  mentionWindowMs: parseNonNegativeInt('GROUP_MENTION_WINDOW_SECONDS', 60) * 1000,
   groupGating: groupGating.mode,
   aiApiUrl: process.env.AI_API_URL || 'http://localhost:8000',
   logLevel: process.env.LOG_LEVEL || 'info',
@@ -85,7 +88,19 @@ export const config = {
     maxDelayMs: parseInt(process.env.RECONNECT_MAX_DELAY_MS || '30000', 10),
     maxAttempts: parseInt(process.env.RECONNECT_MAX_ATTEMPTS || '10', 10),
     jitterMs: parseInt(process.env.RECONNECT_JITTER_MS || '500', 10),
+    // After maxAttempts failures in a row, retry at this long interval instead
+    longDelayMs: parseNonNegativeInt('RECONNECT_LONG_DELAY_MS', 300000),
+    // A connection counts as healthy (attempt counter reset) after staying open this long
+    stableMs: parseNonNegativeInt('RECONNECT_STABLE_MS', 60000),
+    // Wait after a 440 session conflict (another client took over this session)
+    conflictDelayMs: parseNonNegativeInt('RECONNECT_CONFLICT_DELAY_MS', 900000),
   },
+  // Baileys sends: per-attempt timeout (a send on a dead socket can hang forever)
+  sendTimeoutMs: parseNonNegativeInt('SEND_TIMEOUT_MS', 60000),
+  // Reply sent when processing a message fails (forks set their own language)
+  errorReplyText:
+    process.env.ERROR_REPLY_TEXT ||
+    'Sorry, I encountered an error processing your message. Please try again.',
   messageSplit: {
     enabled: process.env.MESSAGE_SPLIT_ENABLED !== 'false',
     baseDelayMs: parseNonNegativeInt('MESSAGE_SPLIT_BASE_DELAY_MS', 600),

@@ -22,6 +22,7 @@ from .database import (
 from .kb_models import KnowledgeBaseDocument
 from .logger import logger
 from .services.bug_reports import scrub_user_reports
+from .services.scheduled_tasks import cancel_chat_tasks
 
 # Supported language codes
 SUPPORTED_LANGUAGES = {"en", "es", "pt", "fr", "de"}
@@ -81,6 +82,17 @@ def is_command(message: str) -> bool:
     return cleaned.startswith("/")
 
 
+def settings_view(db: Session, user_id: str, prefs: ConversationPreferences) -> str:
+    """The settings text shown by /settings and the agent's settings(action="show").
+
+    Adds the announcements line from the user row (broadcast_opt_out lives
+    there, not on the preferences); omitted when the row doesn't exist.
+    """
+    user = db.get(User, user_id)
+    opt_out = bool(user.broadcast_opt_out) if user is not None else None
+    return format_settings(prefs, opt_out)
+
+
 def format_settings(prefs: ConversationPreferences, broadcast_opt_out: bool | None = None) -> str:
     """Format current settings for display.
 
@@ -120,9 +132,10 @@ def _get_help_text() -> str:
 /stt lang auto - Use auto-detection for STT
 /clean - Delete conversation messages
 /clean data - Delete messages + conversation documents
-/clean all - Full reset (messages, documents, memories, preferences)
+/clean all - Full reset (messages, documents, memories, preferences, scheduled tasks)
 /memories - Show saved core memories
 /memories clear - Delete all core memories
+/memories undo - Undo the last change to core memories
 /broadcast - Show whether update announcements are on
 /broadcast off - Stop receiving update announcements (groups: admins only)
 /broadcast on - Receive update announcements again (groups: admins only)
@@ -131,6 +144,8 @@ def _get_help_text() -> str:
 /linkphone - (Telegram) Link by sharing your phone number instead of a code
 /unlink - Unlink your accounts
 /help - Show this message
+
+Reminders: just ask, e.g. "remind me tomorrow at 9:00 to call Ana" or "list my reminders".
 
 Language codes: {lang_codes}"""
 
@@ -278,11 +293,15 @@ def handle_clean_command(
 
     had_memories = False
     had_prefs_changes = False
+    cancelled_tasks = 0
     if level == "all":
         mem = get_or_create_core_memory(db, user_id)
         had_memories = bool(mem.content)
         if mem.content:
             mem.content = ""
+        # A full reset leaves nothing for /memories undo to bring back.
+        mem.previous_content = None
+        mem.content_trusted = True
 
         prefs = get_or_create_preferences(db, user_id)
         had_prefs_changes = (
@@ -291,6 +310,9 @@ def handle_clean_command(
         prefs.tts_enabled = False
         prefs.tts_language = "en"
         prefs.stt_language = None
+
+        # A full reset also stops everything this chat scheduled.
+        cancelled_tasks = cancel_chat_tasks(db, user_id)
 
     db.commit()
 
@@ -323,18 +345,25 @@ def handle_clean_command(
         return f"Deleted {summary}. Conversation data cleared."
 
     # level == "all"
-    if message_count == 0 and doc_count == 0 and not had_memories and not had_prefs_changes:
+    if (
+        message_count == 0
+        and doc_count == 0
+        and not had_memories
+        and not had_prefs_changes
+        and not cancelled_tasks
+    ):
         return "Nothing to reset. Your account is already clean."
     logger.info(f"Clean [all] for user {user_id}: full reset")
     return (
-        "Full reset complete. All messages, documents, memories, and preferences have been cleared."
+        "Full reset complete. All messages, documents, memories, preferences and "
+        "scheduled tasks have been cleared."
     )
 
 
 def set_broadcast_opt_out(db: Session, user_id: str, opt_out: bool) -> bool | None:
     """Set a chat's broadcast opt-out flag; returns the previous value (None = no user).
 
-    Shared by `/broadcast` and the `set_broadcast_subscription` agent tool. On a
+    Shared by `/broadcast` and the `settings` agent tool (`announcements`). On a
     group row it is the group's flag — callers enforce the admin check.
     """
     user = db.get(User, user_id)
@@ -391,14 +420,32 @@ def _handle_broadcast_command(
 
 def _handle_memories_command(db: Session, user_id: str, parts: list[str]) -> str:
     """Handle /memories commands."""
-    if len(parts) >= 2 and parts[1].lower() == "clear":
+    sub = parts[1].lower() if len(parts) >= 2 else ""
+    if sub == "clear":
         mem = get_or_create_core_memory(db, user_id)
         if not mem.content:
             return "No core memories to clear."
+        mem.previous_content = mem.content
         mem.content = ""
+        mem.content_trusted = True  # an admin chose this state
         db.commit()
         logger.info(f"Cleared core memory for user {user_id}")
-        return "Core memories cleared."
+        return "Core memories cleared. Send /memories undo to bring them back."
+
+    if sub == "undo":
+        # One level: swap the document with its backup, so a second undo
+        # re-applies it. In a group the backup is the last trusted state
+        # (agent/tools/memory.py backup_after_save).
+        mem = get_or_create_core_memory(db, user_id)
+        if mem.previous_content is None or mem.previous_content == mem.content:
+            return "Nothing to undo."
+        mem.content, mem.previous_content = mem.previous_content, mem.content
+        mem.content_trusted = True  # an admin chose this state
+        db.commit()
+        logger.info(f"Undid the last core memory change for user {user_id}")
+        if not mem.content:
+            return "Undone. Core memories are now empty."
+        return f"Undone. Your core memories are now:\n\n{mem.content}"
 
     mem = get_or_create_core_memory(db, user_id)
     if not mem.content:
@@ -495,9 +542,7 @@ def parse_and_execute(
     prefs = get_or_create_preferences(db, user_id)
 
     if command == "/settings":
-        user = db.get(User, user_id)
-        opt_out = bool(user.broadcast_opt_out) if user is not None else None
-        return CommandResult(is_command=True, response_text=format_settings(prefs, opt_out))
+        return CommandResult(is_command=True, response_text=settings_view(db, user_id, prefs))
 
     elif command == "/tts":
         response = _handle_tts_command(db, prefs, parts)

@@ -7,7 +7,12 @@ from ai_api.routes.chat import _record_client
 
 
 def _user(**kw):
-    base = dict(last_client_id=None, whatsapp_client_id=None, cloud_last_inbound_at=None)
+    base = dict(
+        whatsapp_jid="5511999999999@s.whatsapp.net",
+        last_client_id=None,
+        whatsapp_client_id=None,
+        cloud_last_inbound_at=None,
+    )
     base.update(kw)
     return SimpleNamespace(**base)
 
@@ -48,3 +53,13 @@ def test_commit_failure_is_swallowed_and_rolled_back():
     db.commit.side_effect = RuntimeError("db down")
     _record_client(db, user, "cloud")  # must not raise: the reply matters more
     db.rollback.assert_called_once()
+
+
+def test_app_rows_are_never_given_a_chat_client():
+    """web:/cli: rows have no chat client; the columns keep baileys|cloud|telegram."""
+    for jid in ("web:abc", "cli:luis"):
+        user, db = _user(whatsapp_jid=jid), MagicMock()
+        _record_client(db, user, None)
+        assert user.last_client_id is None
+        assert user.whatsapp_client_id is None
+        db.commit.assert_not_called()

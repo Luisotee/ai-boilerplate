@@ -9,12 +9,18 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+// The whitelist comes from the AI API now; serve WHITELIST_PHONES from the env.
+vi.mock('../../src/services/live-whitelist.js', async () =>
+  (await import('../helpers/live-whitelist-env.js')).envWhitelistMock()
+);
 import type { Update, UserFromGetMe } from 'grammy/types';
 
 vi.mock('../../src/api-client.js', () => ({
   sendMessageToAI: vi.fn(async () => 'reply'),
   getUserPreferences: vi.fn(async () => ({ tts_enabled: false })),
   textToSpeech: vi.fn(async () => null),
+  editMessage: vi.fn(async () => 1),
 }));
 
 vi.mock('../../src/services/telegram-api.js', () => ({
@@ -75,7 +81,11 @@ async function boot(mode: 'jid' | 'membership', whitelist: string) {
   bot.botInfo = BOT_INFO;
   bot.api.config.use(async () => ({ ok: true, result: { message_id: 1 } }) as unknown as never);
   registerUpdateHandlers();
-  return { bot, sendMessageToAI: api.sendMessageToAI as unknown as ReturnType<typeof vi.fn> };
+  return {
+    bot,
+    sendMessageToAI: api.sendMessageToAI as unknown as ReturnType<typeof vi.fn>,
+    editMessage: api.editMessage as unknown as ReturnType<typeof vi.fn>,
+  };
 }
 
 beforeEach(() => vi.clearAllMocks());
@@ -128,5 +138,149 @@ describe('GROUP_GATING=membership', () => {
     expect(sendMessageToAI).not.toHaveBeenCalled();
     await bot.handleUpdate(privateText(MEMBER));
     expect(sendMessageToAI).toHaveBeenCalledOnce();
+  });
+});
+
+describe('"@bot, then the question" window', () => {
+  const saveOnly = (fn: ReturnType<typeof vi.fn>, i: number) =>
+    fn.mock.calls[i][2].saveOnly === true;
+
+  it("answers the mentioning sender's next message once, and nobody else's", async () => {
+    const { bot, sendMessageToAI } = await boot('jid', `tg:${GROUP_ID}`);
+    await bot.handleUpdate(groupText(MEMBER, '@MyBot', true));
+    await bot.handleUpdate(groupText(STRANGER, 'unrelated', false));
+    await bot.handleUpdate(groupText(MEMBER, 'the question', false));
+    await bot.handleUpdate(groupText(MEMBER, 'thanks', false));
+
+    expect(saveOnly(sendMessageToAI, 0)).toBe(false);
+    expect(saveOnly(sendMessageToAI, 1)).toBe(true);
+    expect(saveOnly(sendMessageToAI, 2)).toBe(false);
+    expect(saveOnly(sendMessageToAI, 3)).toBe(true);
+  });
+
+  it('a typed @first_name with no other mention addresses the bot', async () => {
+    const { bot, sendMessageToAI } = await boot('jid', `tg:${GROUP_ID}`);
+    // (The entity-tagged form is covered in mention.test.ts.)
+    await bot.handleUpdate(groupText(MEMBER, '@Assistant oi', false));
+    expect(saveOnly(sendMessageToAI, 0)).toBe(false);
+  });
+
+  it('PRIVACY: a non-whitelisted sender stays save-only inside the window (membership)', async () => {
+    const { bot, sendMessageToAI } = await boot('membership', `tg:${MEMBER}`);
+    await bot.handleUpdate(groupText(STRANGER, '@MyBot', true));
+    await bot.handleUpdate(groupText(STRANGER, 'the question', false));
+    expect(saveOnly(sendMessageToAI, 0)).toBe(true);
+    expect(saveOnly(sendMessageToAI, 1)).toBe(true);
+  });
+});
+
+describe('edited_message', () => {
+  function groupEdit(from: number, text: string): Update {
+    return {
+      update_id: 2,
+      edited_message: {
+        message_id: 100,
+        date: 0,
+        edit_date: 1,
+        chat: { id: GROUP_ID, type: 'supergroup', title: 'Team chat' },
+        from: { id: from, is_bot: false, first_name: 'X' },
+        text,
+      },
+    } as Update;
+  }
+
+  it('forwards an edit with the chat, message id and editor, and never replies', async () => {
+    const { bot, sendMessageToAI, editMessage } = await boot('jid', `tg:${GROUP_ID}`);
+    await bot.handleUpdate(groupEdit(MEMBER, 'fixed'));
+    expect(editMessage).toHaveBeenCalledWith(
+      { whatsappJid: `tg:${GROUP_ID}`, messageId: '100', senderJid: `tg:${MEMBER}` },
+      'fixed'
+    );
+    expect(sendMessageToAI).not.toHaveBeenCalled();
+  });
+
+  it('strips the bot mention from an addressed edit, as the save path does', async () => {
+    const { bot, editMessage } = await boot('jid', `tg:${GROUP_ID}`);
+    const update = groupEdit(MEMBER, '@MyBot what is Y');
+    update.edited_message!.entities = [{ type: 'mention', offset: 0, length: 6 }];
+    await bot.handleUpdate(update);
+    expect(editMessage.mock.calls[0][1]).toBe('what is Y');
+  });
+
+  it('an edit down to just the bot mention keeps the raw text (an empty edit is refused)', async () => {
+    const { bot, editMessage } = await boot('jid', `tg:${GROUP_ID}`);
+    const update = groupEdit(MEMBER, '@MyBot');
+    update.edited_message!.entities = [{ type: 'mention', offset: 0, length: 6 }];
+    await bot.handleUpdate(update);
+    expect(editMessage.mock.calls[0][1]).toBe('@MyBot');
+  });
+
+  it('strips the bot mention from a save-only sender too, so the stored form is stable', async () => {
+    // membership: STRANGER is saved but never answered, so the edit is not addressed.
+    const { bot, editMessage } = await boot('membership', `tg:${MEMBER}`);
+    const update = groupEdit(STRANGER, '@MyBot hello all');
+    update.edited_message!.entities = [{ type: 'mention', offset: 0, length: 6 }];
+    await bot.handleUpdate(update);
+    expect(editMessage.mock.calls[0][1]).toBe('hello all');
+  });
+
+  it('drops an edit in a chat outside the whitelist', async () => {
+    const { bot, editMessage } = await boot('jid', `tg:${MEMBER}`);
+    await bot.handleUpdate(groupEdit(MEMBER, 'fixed'));
+    expect(editMessage).not.toHaveBeenCalled();
+  });
+
+  it('an edit neither opens nor consumes the mention window', async () => {
+    const { bot, sendMessageToAI } = await boot('jid', `tg:${GROUP_ID}`);
+    await bot.handleUpdate(groupText(MEMBER, '@MyBot', true));
+    await bot.handleUpdate(groupEdit(MEMBER, '@MyBot now with a question'));
+    await bot.handleUpdate(groupText(MEMBER, 'the question', false));
+    expect(sendMessageToAI.mock.calls[1][2].saveOnly ?? false).toBe(false);
+  });
+});
+
+describe('mention window exclusions', () => {
+  it('a shared contact does not consume the window', async () => {
+    const { bot, sendMessageToAI } = await boot('jid', `tg:${GROUP_ID}`);
+    await bot.handleUpdate(groupText(MEMBER, '@MyBot', true));
+    const contact = groupText(MEMBER, '', false);
+    delete (contact.message as { text?: string }).text;
+    (contact.message as unknown as { contact: object }).contact = {
+      phone_number: '+5511999999999',
+      first_name: 'Ana',
+    };
+    await bot.handleUpdate(contact);
+    await bot.handleUpdate(groupText(MEMBER, 'the question', false));
+    const last = sendMessageToAI.mock.calls.at(-1)!;
+    expect(last[1]).toBe('the question');
+    expect(last[2].saveOnly ?? false).toBe(false);
+  });
+
+  it('anonymous admins (sender_chat) neither open nor use the window', async () => {
+    const { bot, sendMessageToAI } = await boot('jid', `tg:${GROUP_ID}`);
+    const anon = (text: string, mention: boolean) => {
+      const u = groupText(1087968824, text, mention);
+      (u.message as unknown as { sender_chat: object }).sender_chat = {
+        id: GROUP_ID,
+        type: 'supergroup',
+        title: 'Team chat',
+      };
+      return u;
+    };
+    await bot.handleUpdate(anon('@MyBot', true));
+    await bot.handleUpdate(anon('the question', false));
+    expect(sendMessageToAI.mock.calls[0][2].saveOnly ?? false).toBe(false);
+    expect(sendMessageToAI.mock.calls[1][2].saveOnly).toBe(true);
+  });
+});
+
+describe('live whitelist unavailable', () => {
+  it('FAILS CLOSED: drops private and group updates, and edits, without a reply', async () => {
+    vi.stubEnv('WHITELIST_UNAVAILABLE', '1');
+    const { bot, sendMessageToAI, editMessage } = await boot('membership', '');
+    await bot.handleUpdate(privateText(MEMBER));
+    await bot.handleUpdate(groupText(MEMBER, '@MyBot hi', true));
+    expect(sendMessageToAI).not.toHaveBeenCalled();
+    expect(editMessage).not.toHaveBeenCalled();
   });
 });

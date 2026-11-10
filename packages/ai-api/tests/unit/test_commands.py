@@ -403,6 +403,7 @@ class TestHandleCleanCommandAll:
 
         assert "Full reset complete" in result
         assert mock_mem.content == ""
+        assert mock_mem.previous_content is None
         assert mock_prefs.tts_enabled is False
         assert mock_prefs.tts_language == "en"
         assert mock_prefs.stt_language is None
@@ -457,6 +458,7 @@ class TestHandleMemoriesClear:
 
         assert "Core memories cleared" in result
         assert mock_mem.content == ""
+        assert mock_mem.previous_content == "User info"
         db.commit.assert_called_once()
 
     @patch("ai_api.commands.get_or_create_core_memory")
@@ -483,15 +485,82 @@ class TestHandleMemoriesClear:
         assert "Likes pizza" in result
 
 
+class TestHandleMemoriesUndo:
+    @patch("ai_api.commands.get_or_create_core_memory")
+    def test_undo_restores_the_previous_document(self, mock_get_mem):
+        mock_mem = MagicMock(content="x", previous_content="## Facts\n- likes tea")
+        mock_get_mem.return_value = mock_mem
+        db = MagicMock()
+
+        result = _handle_memories_command(db, "user-123", ["/memories", "undo"])
+
+        assert mock_mem.content == "## Facts\n- likes tea"
+        assert mock_mem.previous_content == "x"
+        assert "likes tea" in result
+        db.commit.assert_called_once()
+        assert mock_mem.content_trusted is True
+
+    @patch("ai_api.commands.get_or_create_core_memory")
+    def test_undo_twice_redoes(self, mock_get_mem):
+        mock_mem = MagicMock(content="new", previous_content="old")
+        mock_get_mem.return_value = mock_mem
+        db = MagicMock()
+
+        _handle_memories_command(db, "user-123", ["/memories", "undo"])
+        _handle_memories_command(db, "user-123", ["/memories", "undo"])
+
+        assert mock_mem.content == "new"
+
+    @patch("ai_api.commands.get_or_create_core_memory")
+    def test_undo_after_clear_brings_the_memories_back(self, mock_get_mem):
+        mock_mem = MagicMock(content="Likes pizza", previous_content=None)
+        mock_get_mem.return_value = mock_mem
+        db = MagicMock()
+
+        _handle_memories_command(db, "user-123", ["/memories", "clear"])
+        _handle_memories_command(db, "user-123", ["/memories", "undo"])
+
+        assert mock_mem.content == "Likes pizza"
+
+    @patch("ai_api.commands.get_or_create_core_memory")
+    def test_nothing_to_undo(self, mock_get_mem):
+        mock_mem = MagicMock(content="Likes pizza", previous_content=None)
+        mock_get_mem.return_value = mock_mem
+        db = MagicMock()
+
+        result = _handle_memories_command(db, "user-123", ["/memories", "undo"])
+
+        assert result == "Nothing to undo."
+        assert mock_mem.content == "Likes pizza"
+        db.commit.assert_not_called()
+
+    def test_undo_is_admin_only_in_groups(self):
+        db = MagicMock()
+        result = parse_and_execute(
+            db,
+            "user-123",
+            "120363012345678@g.us",
+            "/memories undo",
+            conversation_type="group",
+            is_group_admin=None,
+        )
+        assert result.is_command
+        assert "admin" in result.response_text.lower()
+        db.commit.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # /clean all empty-account branch
 # ---------------------------------------------------------------------------
 
 
 class TestHandleCleanCommandAllEmpty:
+    @patch("ai_api.commands.cancel_chat_tasks", return_value=0)
     @patch("ai_api.commands.get_or_create_preferences")
     @patch("ai_api.commands.get_or_create_core_memory")
-    def test_returns_already_clean_when_nothing_to_reset(self, mock_get_mem, mock_get_prefs):
+    def test_returns_already_clean_when_nothing_to_reset(
+        self, mock_get_mem, mock_get_prefs, _mock_cancel
+    ):
         mock_mem = MagicMock()
         mock_mem.content = ""
         mock_get_mem.return_value = mock_mem
@@ -511,6 +580,25 @@ class TestHandleCleanCommandAllEmpty:
         assert "Nothing to reset" in result
         assert "already clean" in result
         db.commit.assert_called_once()
+
+    @patch("ai_api.commands.cancel_chat_tasks", return_value=2)
+    @patch("ai_api.commands.get_or_create_preferences")
+    @patch("ai_api.commands.get_or_create_core_memory")
+    def test_all_cancels_the_chats_scheduled_tasks(self, mock_get_mem, mock_get_prefs, mock_cancel):
+        mock_get_mem.return_value = MagicMock(content="")
+        mock_get_prefs.return_value = MagicMock(
+            tts_enabled=False, tts_language="en", stt_language=None
+        )
+        db = _make_clean_db(message_count=0, docs=[])
+        result = handle_clean_command(db, "user-123", "123@s.whatsapp.net", level="all")
+        mock_cancel.assert_called_once_with(db, "user-123")
+        assert "scheduled tasks" in result
+
+    @patch("ai_api.commands.cancel_chat_tasks")
+    def test_messages_level_keeps_scheduled_tasks(self, mock_cancel):
+        db = _make_clean_db(message_count=3, docs=[])
+        handle_clean_command(db, "user-123", "123@s.whatsapp.net", level="messages")
+        mock_cancel.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

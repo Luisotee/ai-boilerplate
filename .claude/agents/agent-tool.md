@@ -1,6 +1,6 @@
 ---
 name: agent-tool
-description: Scaffolds new Pydantic AI agent tools with decorator boilerplate, __init__.py registration, and system prompt updates. Use when adding a new tool to the AI agent, e.g. 'add a translate tool' or 'create a tool that searches the knowledge base'.
+description: Scaffolds new Pydantic AI agent tools with decorator boilerplate, __init__.py registration, and a docstring-first description. Use when adding a new tool to the AI agent, e.g. 'add a translate tool' or 'create a tool that searches the knowledge base'.
 model: sonnet
 tools:
   - Read
@@ -39,9 +39,6 @@ async def tool_name(ctx: RunContext[AgentDeps], param: str) -> str:
     Args:
         ctx: Run context with dependencies
         param: Description of parameter
-
-    Returns:
-        Description of return value
     """
     logger.info("=" * 80)
     logger.info("TOOL CALLED: tool_name")
@@ -84,23 +81,9 @@ Edit `packages/ai-api/src/ai_api/agent/tools/__init__.py`.
 
 Read the file to see the current import list, then add the new module name. The import triggers `@agent.tool` decorator registration — no other registration is needed.
 
-## Step 3: Update the system prompt
+## Step 3: Describe the tool in its docstring, not the system prompt
 
-Edit `packages/ai-api/src/ai_api/agent/core.py` inside the `system_prompt` string.
-
-Add the tool to the appropriate section following the numbering scheme:
-- **Search Tools:** 1-2
-- **Web Tools:** 3-4
-- **WhatsApp Action Tools:** 5-8
-- **Utility Tools:** 9-12
-- **Settings & Management Tools:** 13-16
-
-Format:
-```
-    N. **tool_name** - One-line description
-       Use for: specific use cases
-       Do NOT use for: things to avoid
-```
+The docstring IS the tool's description to the model (pydantic-ai sends it as the schema in every model request), so make it short and precise: what it does, when to use it, each argument. `DEFAULT_SYSTEM_PROMPT` in `agent/core.py` has no tool catalogue; add a one-line rule there only when the new tool competes with an existing one (e.g. "current facts: web_search; stable facts: wikipedia_lookup"). No `Returns:` section (it becomes a `<returns>` block the model never needs). If the tool can't work in some chats (a client, private vs group, a flag), hide it with a `prepare` hook (only on what is the same for the whole chat; `agent/CLAUDE.md` "Prompt surface"). Then regenerate the prompt snapshot and commit it: `cd packages/ai-api && UPDATE_PROMPT_SURFACE=1 uv run pytest tests/mocked/test_prompt_surface.py`. Details: `packages/ai-api/src/ai_api/agent/CLAUDE.md` "Prompt surface"
 
 ## Step 4: Check if AgentDeps needs updates
 

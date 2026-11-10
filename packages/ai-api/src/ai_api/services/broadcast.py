@@ -47,6 +47,7 @@ from sqlalchemy.orm import Session
 from ..config import get_whatsapp_client_url
 from ..database import User, is_group_jid, is_telegram_jid
 from ..logger import logger
+from ..surfaces import is_app_jid
 
 Platform = Literal["baileys", "cloud", "telegram"]
 Audience = Literal["private", "groups", "all"]
@@ -115,6 +116,9 @@ class BroadcastPlan:
 
 def candidate_routes(user: User) -> list[Route]:
     """Every route that reaches ``user``, most-recently-used platform first."""
+    if is_app_jid(user.whatsapp_jid):
+        # A web/terminal-only row (surfaces.py) has no chat client to send through.
+        return []
     if is_telegram_jid(user.whatsapp_jid):
         # Unlinked Telegram row: its tg: JID lives in whatsapp_jid.
         return [Route("telegram", user.whatsapp_jid)]

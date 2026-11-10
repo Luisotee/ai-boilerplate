@@ -23,13 +23,18 @@ from sqlalchemy.orm import Session
 
 from ..database import User, is_telegram_jid
 from ..logger import logger
+from ..surfaces import WEB_JID_PREFIX, is_cli_jid
+from .api_keys import move_api_keys
 from .bug_reports import scrub_user_reports
 
 LINK_CODE_TTL_SECONDS = 600  # 10 minutes
 _CODE_KEY = "link:code:{code}"
 _USER_KEY = "link:user:{user_id}"
 
-Platform = Literal["whatsapp", "telegram"]
+#: "web" is a `web:` row of the OpenAI-compatible API (services/api_keys.py).
+#: It is always the orphan of a merge: the WhatsApp/Telegram row is kept and the
+#: web row's keys move to it.
+Platform = Literal["whatsapp", "telegram", "web"]
 
 
 @dataclass
@@ -61,7 +66,12 @@ ERROR_MERGE_FAILED = "MERGE_FAILED"
 
 
 def platform_for_jid(jid: str) -> Platform:
+    if jid.startswith(WEB_JID_PREFIX):
+        return "web"
     return "telegram" if is_telegram_jid(jid) else "whatsapp"
+
+
+_PLATFORM_NAMES = {"whatsapp": "WhatsApp", "telegram": "Telegram", "web": "the web app"}
 
 
 def _generate_code() -> str:
@@ -147,7 +157,7 @@ async def consume_link_code(
             success=False,
             error=ERROR_SAME_PLATFORM,
             message="Both sides of a link must be on different platforms "
-            "(one WhatsApp, one Telegram).",
+            "(WhatsApp, Telegram or the web app).",
         )
 
     source = db.query(User).filter(User.id == source_user_id).first()
@@ -162,6 +172,14 @@ async def consume_link_code(
             message="The user that generated this code no longer exists. "
             "Generate a new code and try again.",
         )
+
+    if "web" in (source_platform, current_platform):
+        web_user, kept = (source, target) if source_platform == "web" else (target, source)
+        result = _merge_web_user(db, web_user, kept)
+        if result.success:
+            await redis.delete(_CODE_KEY.format(code=code))
+            await redis.delete(_USER_KEY.format(user_id=source_user_id))
+        return result
 
     if is_already_linked(source) or is_already_linked(target):
         return LinkResult(
@@ -192,6 +210,9 @@ async def consume_link_code(
         )
         # The orphan's messages are discarded, so are its reports' copies of them.
         scrub_user_reports(db, telegram_user.id)
+        # A web key linked to the Telegram row follows it (else the FK cascade
+        # would delete the key with the orphan).
+        move_api_keys(db, telegram_user.id, whatsapp_user.id)
         db.delete(telegram_user)  # cascade clears messages/prefs/core_memory
         db.commit()
     except Exception as exc:
@@ -217,6 +238,114 @@ async def consume_link_code(
         success=True,
         message="Linked successfully. Your WhatsApp and Telegram conversations now share the same memory.",
     )
+
+
+def _merge_web_user(db: Session, web_user: User, kept: User) -> LinkResult:
+    """Fold a `web:` row into a WhatsApp/Telegram row (discard-orphan policy).
+
+    The kept row may already be a WhatsApp↔Telegram pair: a web key only points
+    at a row, it adds no identity column, so "already linked" doesn't apply.
+    The web row's keys move to the kept row, then the orphan is deleted with its
+    messages, preferences and core memory.
+    """
+    if not web_user.whatsapp_jid.startswith(WEB_JID_PREFIX) or kept.whatsapp_jid.startswith(
+        WEB_JID_PREFIX
+    ):
+        return LinkResult(
+            success=False,
+            error=ERROR_SAME_PLATFORM,
+            message="Both sides of a link must be on different platforms "
+            "(WhatsApp, Telegram or the web app).",
+        )
+    try:
+        kept.broadcast_opt_out = bool(kept.broadcast_opt_out or web_user.broadcast_opt_out)
+        scrub_user_reports(db, web_user.id)
+        move_api_keys(db, web_user.id, kept.id)
+        db.delete(web_user)  # cascade clears messages/prefs/core_memory
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.exception(f"Failed to merge web user {web_user.id} into {kept.id}: {exc}")
+        return LinkResult(
+            success=False,
+            error=ERROR_MERGE_FAILED,
+            message="Sorry, linking failed due to a database error. Please try again.",
+        )
+    logger.info(f"Linked web user {web_user.whatsapp_jid} into row {kept.id}")
+    other = _PLATFORM_NAMES[platform_for_jid(kept.whatsapp_jid)]
+    return LinkResult(
+        success=True,
+        message=f"Linked successfully. The web app now shares your {other} "
+        "conversation and memory.",
+    )
+
+
+async def link_command_reply(
+    db: Session,
+    open_redis,
+    user: User,
+    whatsapp_jid: str,
+    conversation_type: str,
+    parts: list[str],
+) -> str:
+    """Reply text for `/link`, `/link <code>` or `/unlink` (``parts[0]``).
+
+    Shared by `/chat/enqueue` and the `/v1` API. ``open_redis`` is a callable
+    returning an async context manager that yields a Redis client (the caller's
+    `get_redis_client`); it is only opened by `/link`.
+    """
+    command = parts[0].lower()
+    if conversation_type == "group":
+        return "Linking is only available in private chats."
+    if is_cli_jid(whatsapp_jid):
+        return "Linking isn't available in the terminal chat."
+
+    if command == "/unlink":
+        unlink_result = unlink(db, str(user.id))
+        if unlink_result.db_error:
+            return "Sorry, unlinking failed due to a database error. Please try again."
+        if unlink_result.cleared:
+            return (
+                "Unlinked. Future messages on the other platform will start a fresh conversation."
+            )
+        return "No active link to remove."
+
+    platform = platform_for_jid(whatsapp_jid)
+    async with open_redis() as redis:
+        if len(parts) >= 2:
+            code = parts[1].strip()
+            result = await consume_link_code(db, redis, code, str(user.id), platform)
+            return result.message or ("Linked successfully." if result.success else "Link failed.")
+        if is_already_linked(user):
+            # Short-circuit: a fully-linked user generating a fresh code
+            # produces a code that can't be redeemed (both JIDs resolve
+            # to the same row, so consume_link_code hits ERROR_SAME_USER
+            # with a misleading message). Tell them directly instead.
+            return (
+                "Your accounts are already linked. "
+                "Run `/unlink` first if you want to re-link. To add the web app, "
+                "send `/link` there and enter its code here."
+            )
+        code = await generate_link_code(redis, str(user.id), platform)
+    if platform == "web":
+        where = "On WhatsApp or Telegram"
+        note = (
+            "Note: this web conversation's history will be discarded; the app then "
+            "shares your WhatsApp/Telegram conversation and memory."
+        )
+    else:
+        other = "Telegram" if platform == "whatsapp" else "WhatsApp"
+        where = f"On {other} (or in the web app)"
+        note = "Note: any prior conversation history on the other platform will be discarded."
+    response_text = (
+        f"Your link code is `{code}`.\n\n{where}, send `/link {code}` within 10 minutes.\n\n{note}"
+    )
+    if platform == "telegram":
+        response_text += (
+            "\n\nTip: on Telegram you can also send `/linkphone` and share "
+            "your number instead of using a code."
+        )
+    return response_text
 
 
 def unlink(db: Session, user_id: str) -> UnlinkResult:

@@ -1,5 +1,12 @@
-import type { GroupParticipant, WAMessage, WAMessageKey } from '@whiskeysockets/baileys';
+import {
+  normalizeMessageContent,
+  type GroupParticipant,
+  type WAMessage,
+  type WAMessageKey,
+  type proto,
+} from '@whiskeysockets/baileys';
 import { extractPhoneFromJid, phoneFromJid, stripDeviceSuffix } from './jid.js';
+import { isTypedMention } from './typed-mention.js';
 import { logger } from '../logger.js';
 
 /**
@@ -53,17 +60,68 @@ function getContextInfo(msg: WAMessage) {
 }
 
 /**
- * Check if bot is mentioned in group message
- * Supports both phone JID (@s.whatsapp.net) and LID (@lid) formats
+ * The user-visible text of a (normalized) message: its body, or the caption of
+ * an image, video or document. Undefined when there is none.
  */
-export function isBotMentioned(msg: WAMessage, botJid: string, botLid?: string): boolean {
+export function getMessageText(message: proto.IMessage | null | undefined): string | undefined {
+  if (!message) return undefined;
+  return (
+    message.conversation ||
+    message.extendedTextMessage?.text ||
+    message.imageMessage?.caption ||
+    message.videoMessage?.caption ||
+    message.documentMessage?.caption ||
+    undefined
+  );
+}
+
+/**
+ * Whether a (normalized) message carries content the router handles: text,
+ * audio, an image or a document. Reactions, stickers, polls and protocol
+ * messages (an edit's or revoke's own upsert) don't, so they must not open or
+ * consume the mention window.
+ */
+export function carriesHandledContent(message: proto.IMessage | null | undefined): boolean {
+  if (!message) return false;
+  return Boolean(
+    message.conversation ||
+    message.extendedTextMessage?.text ||
+    message.audioMessage ||
+    message.imageMessage ||
+    message.documentMessage
+  );
+}
+
+/**
+ * Check if bot is mentioned in group message.
+ *
+ * A mention pill (`contextInfo.mentionedJid`) is checked in both phone JID
+ * (@s.whatsapp.net) and LID (@lid) form. When the message carries NO pill at
+ * all, a typed `@Name` also counts (`utils/typed-mention.ts`), matched against
+ * `typedNames` (BOT_NAME, the bot's profile name, its phone digits). With any
+ * pill present the typed check is skipped, so a pill for a human whose name
+ * happens to match the bot's never addresses the bot.
+ */
+export function isBotMentioned(
+  msg: WAMessage,
+  botJid: string,
+  botLid?: string,
+  typedNames: readonly (string | undefined | null)[] = []
+): boolean {
   const contextInfo = getContextInfo(msg);
   const mentionedJids = contextInfo?.mentionedJid || [];
   const matchesJid = mentionedJids.includes(botJid);
   const matchesLid = botLid ? mentionedJids.includes(botLid) : false;
+  const matchesTyped =
+    mentionedJids.length === 0 &&
+    typedNames.length > 0 &&
+    isTypedMention(getMessageText(normalizeMessageContent(msg.message)) ?? '', typedNames);
 
-  logger.debug({ botJid, botLid, mentionedJids, matchesJid, matchesLid }, 'Checking bot mention');
-  return matchesJid || matchesLid;
+  logger.debug(
+    { botJid, botLid, mentionedJids, matchesJid, matchesLid, matchesTyped },
+    'Checking bot mention'
+  );
+  return matchesJid || matchesLid || matchesTyped;
 }
 
 /**
@@ -79,8 +137,15 @@ export function isReplyToBotMessage(msg: WAMessage, botJid: string, botLid?: str
  * Determine if bot should respond in group chat
  * Checks for both @mention (JID or LID) and replies to bot messages
  */
-export function shouldRespondInGroup(msg: WAMessage, botJid: string, botLid?: string): boolean {
-  return isBotMentioned(msg, botJid, botLid) || isReplyToBotMessage(msg, botJid, botLid);
+export function shouldRespondInGroup(
+  msg: WAMessage,
+  botJid: string,
+  botLid?: string,
+  typedNames: readonly (string | undefined | null)[] = []
+): boolean {
+  return (
+    isBotMentioned(msg, botJid, botLid, typedNames) || isReplyToBotMessage(msg, botJid, botLid)
+  );
 }
 
 /**
