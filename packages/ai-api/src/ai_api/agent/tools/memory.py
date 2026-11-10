@@ -166,7 +166,8 @@ async def memory(ctx: RunContext[AgentDeps], operations: list[MemoryOperation]) 
 
         # Over the limit only when the edit grows past it: if the limit was
         # lowered below the current notes, a shrinking edit still saves.
-        if len(content) > max(len(previous), max_length):
+        # Tidied on both sides, so tidying a legacy document frees no room.
+        if len(content) > max(len(_tidy(previous)), max_length):
             return (
                 f"Nothing saved: the notes would be {len(content)}/{max_length} chars. "
                 "In the same call, patch or remove lines to make room (merge related "

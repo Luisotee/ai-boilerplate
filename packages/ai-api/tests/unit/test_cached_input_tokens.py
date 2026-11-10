@@ -51,3 +51,24 @@ def test_null_values_count_as_zero():
     usage = RunUsage(input_tokens=100, details={"prompt_cache_hit_tokens": None})
     assert cached_input_tokens(usage) == 0
     log_usage(usage)  # must not raise
+
+
+def test_a_run_that_fell_back_from_deepseek_to_gemini_counts_both():
+    from pydantic_ai.usage import RequestUsage
+
+    usage = _deepseek_usage(prompt_cache_hit_tokens=800)
+    # Gemini's mapping: details.cached_content_tokens, also as cache_read_tokens.
+    usage.incr(RequestUsage(cache_read_tokens=600, details={"cached_content_tokens": 600}))
+    assert cached_input_tokens(usage) == 1400
+
+
+def test_deepseek_reporting_both_fields_is_not_counted_twice():
+    usage = _deepseek_usage(
+        prompt_cache_hit_tokens=800, prompt_tokens_details={"cached_tokens": 800}
+    )
+    assert usage.cache_read_tokens == 800
+    assert cached_input_tokens(usage) == 800
+
+
+def test_other_providers_fall_back_to_cache_read_tokens():
+    assert cached_input_tokens(RunUsage(input_tokens=100, cache_read_tokens=40)) == 40

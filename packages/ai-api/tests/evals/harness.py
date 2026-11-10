@@ -121,9 +121,15 @@ class EvalOutput:
     tool_calls: list[ToolCall] = field(default_factory=list)
     #: tool name -> its last reply in the run.
     tool_returns: dict[str, str] = field(default_factory=dict)
-    #: Every reply that reports an internal failure ("Failed to ..."): a broken
+    #: Every reply that reports an internal failure (FAILURE_MARKERS): a broken
     #: stub or a real bug, never the behaviour a case means to measure.
     tool_failures: list[str] = field(default_factory=list)
+
+
+#: How tool replies that report an internal failure start (a broken stub or a
+#: real bug): "Failed to ...", "Could not ...", and the knowledge/history search
+#: without an embedding service.
+FAILURE_MARKERS = ("Failed", "Could not", "Semantic search is not available")
 
 
 # --------------------------------------------------------------------------- stubs
@@ -216,9 +222,12 @@ def _deps(inputs: EvalInput, http_client: httpx.AsyncClient):
     from ai_api.agent import AgentDeps
 
     is_group = inputs.chat == "group"
+    # One AsyncMock per method the send tools await (agent/tools/whatsapp.py);
+    # test_every_send_tool_works_in_the_harness catches a renamed method.
     whatsapp_client = MagicMock()
-    for method in ("send_reaction", "send_location", "send_contact", "send_message"):
+    for method in ("send_reaction", "send_location", "send_contact"):
         setattr(whatsapp_client, method, AsyncMock(return_value={"success": True}))
+    whatsapp_client.send_text = AsyncMock(return_value=SimpleNamespace(message_id="EVAL"))
     return AgentDeps(
         db=MagicMock(),
         user_id="00000000-0000-0000-0000-000000000001",
@@ -258,7 +267,7 @@ def _read_tools(
             elif isinstance(part, ToolReturnPart):
                 text = part.model_response_str()
                 returns[part.tool_name] = text
-                if text.startswith("Failed"):
+                if text.startswith(FAILURE_MARKERS):
                     failures.append(f"{part.tool_name}: {text}")
     return calls, returns, failures
 

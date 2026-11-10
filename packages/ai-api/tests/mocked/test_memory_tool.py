@@ -439,3 +439,14 @@ async def test_tidying_a_legacy_document_alone_is_not_a_change():
     mem, _ = await _call(ctx, legacy, [_op("patch", "likes tea", "likes tea")])
     assert mem.previous_content is None
     ctx.deps.db.commit.assert_not_called()
+
+
+async def test_tidying_does_not_make_room_over_a_lowered_limit():
+    # 1900 raw chars, ~1500 tidied: an add back up to the raw size is growth.
+    lines = [f"- fact {i:03d}" for i in range(125)]
+    legacy = "   \n\n\n".join(lines)
+    assert len(legacy) > len(apply_operations(legacy, [])) + 300
+    grow = "- " + "y" * (len(legacy) - len(apply_operations(legacy, [])) - 10)
+    mem, result = await _call(_ctx(), legacy, [_op("add", grow)], max_length=1000)
+    assert mem.content == legacy
+    assert result.startswith("Nothing saved")

@@ -86,20 +86,24 @@ async def get_ai_response(
 def cached_input_tokens(usage: RunUsage) -> int:
     """Input tokens the provider served from its prompt cache in this run.
 
-    Checked against pydantic-ai 1.61 (``models/openai.py`` ``_map_usage``):
-    every top-level int in an OpenAI-compatible usage block lands in
-    ``details``, so DeepSeek's ``prompt_cache_hit_tokens`` is always there
-    (summed across requests by ``RunUsage.incr``). ``cache_read_tokens`` is
-    filled only from ``prompt_tokens_details.cached_tokens`` (OpenAI style;
-    Gemini's ``cachedContentTokenCount`` too), which DeepSeek may omit. Take
-    the larger; a None value (a provider sending null) counts as 0.
+    Checked against pydantic-ai 1.61, per provider, summed over the run's
+    requests by ``RunUsage.incr``:
+      - DeepSeek (``models/openai.py`` ``_map_usage``): ``prompt_cache_hit_tokens``
+        always lands in ``details``; ``cache_read_tokens`` only gets the same
+        count when the reply also has ``prompt_tokens_details.cached_tokens``.
+      - Gemini (``models/google.py`` ``_metadata_as_usage``): ``details``
+        ``cached_content_tokens``, which genai-prices also maps to
+        ``cache_read_tokens``.
+    The two ``details`` fields never describe the same request, so their sum
+    counts a run that fell back from DeepSeek to Gemini midway; each overlaps
+    ``cache_read_tokens``, so that one is only a floor (other providers). A
+    None value (a provider sending null) counts as 0.
     """
     details = usage.details or {}
-    return max(
-        usage.cache_read_tokens or 0,
-        details.get("prompt_cache_hit_tokens") or 0,
-        details.get("cached_content_tokens") or 0,
+    per_provider = (details.get("prompt_cache_hit_tokens") or 0) + (
+        details.get("cached_content_tokens") or 0
     )
+    return max(usage.cache_read_tokens or 0, per_provider)
 
 
 def log_usage(usage: RunUsage) -> None:

@@ -90,3 +90,38 @@ def test_a_tool_failure_fails_the_case():
         output = EvalOutput(route="agent", tool_failures=["memory: Failed to update core memory."])
 
     assert NoToolFailed().evaluate(Ctx()).value is False
+
+
+async def test_every_send_tool_works_in_the_harness():
+    # The client stub once had send_message while the tool awaits send_text, so
+    # send_whatsapp_message always failed in a real-model run.
+    from tests.evals.harness import ExpectedBehaviour, ExpectedCall
+
+    expected = ExpectedBehaviour(
+        tools=[
+            ExpectedCall("send_whatsapp_reaction", {"emoji": "👍"}),
+            ExpectedCall("send_whatsapp_location", {"latitude": -1.45, "longitude": -48.5}),
+            ExpectedCall(
+                "send_whatsapp_contact", {"contact_name": "Ana", "contact_phone": "5591999999999"}
+            ),
+            ExpectedCall("send_whatsapp_message", {"text": "um momento, já vejo"}),
+        ]
+    )
+    output = await run_case(EvalInput("manda tudo"), model=oracle_model(expected))
+    assert not output.tool_failures, output.tool_failures
+    assert set(output.tool_returns) == {c.name for c in expected.tools}
+
+
+@pytest.mark.parametrize(
+    ("reply", "failed"),
+    [
+        ("Failed to send message.", True),
+        ("Could not get the weather right now. Please try again.", True),
+        ("Semantic search is not available (GEMINI_API_KEY not configured).", True),
+        ("Message sent successfully.", False),
+    ],
+)
+def test_internal_failure_markers(reply, failed):
+    from tests.evals.harness import FAILURE_MARKERS
+
+    assert reply.startswith(FAILURE_MARKERS) is failed

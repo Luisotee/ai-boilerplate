@@ -14,11 +14,11 @@ from pydantic_ai import RunContext
 from ...commands import (
     LANGUAGE_NAMES,
     SUPPORTED_LANGUAGES,
-    format_settings,
     handle_clean_command,
     set_broadcast_opt_out,
+    settings_view,
 )
-from ...database import User, get_or_create_preferences, is_group_jid
+from ...database import get_or_create_preferences, is_group_jid
 from ...logger import logger
 from ..core import AgentDeps, agent
 from ._db import safe_rollback
@@ -73,10 +73,7 @@ async def settings(
 async def _show(deps: AgentDeps) -> str:
     try:
         prefs = get_or_create_preferences(deps.db, deps.user_id)
-        # Same view as /settings: the announcements flag lives on the user row.
-        user = deps.db.get(User, deps.user_id)
-        opt_out = bool(user.broadcast_opt_out) if user is not None else None
-        return format_settings(prefs, opt_out)
+        return settings_view(deps.db, deps.user_id, prefs)  # same text as /settings
     except Exception as e:
         safe_rollback(deps.db)
         logger.error(f"Error getting user settings: {str(e)}", exc_info=True)

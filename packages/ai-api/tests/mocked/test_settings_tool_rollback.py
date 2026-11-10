@@ -85,7 +85,7 @@ class TestGetUserSettingsRollback:
         ctx = _make_ctx()
         with (
             patch("ai_api.agent.tools.settings.get_or_create_preferences") as mock_prefs,
-            patch("ai_api.agent.tools.settings.format_settings") as mock_fmt,
+            patch("ai_api.agent.tools.settings.settings_view") as mock_fmt,
         ):
             mock_prefs.return_value = MagicMock()
             mock_fmt.return_value = "settings-blob"
