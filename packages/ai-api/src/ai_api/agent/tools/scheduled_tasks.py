@@ -29,6 +29,7 @@ from ...services.scheduled_tasks import (
 from ..core import AgentDeps, agent
 from ._db import safe_rollback
 from ._group import group_admin_refusal
+from ._surface import chat_client_only
 
 CLOUD_WINDOW_NOTE = (
     " Note: on this WhatsApp number I can only message you within 24 hours of your "
@@ -39,12 +40,16 @@ CLOUD_WINDOW_NOTE = (
 async def scheduled_tasks_enabled(
     ctx: RunContext[AgentDeps], tool_def: ToolDefinition
 ) -> ToolDefinition | None:
-    """`prepare` hook: hide the tool when scheduling is off, and in scheduled runs."""
+    """`prepare` hook: hide the tool when scheduling is off, in scheduled runs, and
+    on the app surfaces (``/v1``, terminal chat), which have no chat client to
+    deliver a task through (``_surface.chat_client_only``)."""
     if (ctx.deps is not None and ctx.deps.scheduled_run) or not runtime_config.get(
         "scheduled_tasks_enabled"
     ):
         return None
-    return tool_def
+    if ctx.deps is None:  # no run context (e.g. schema introspection): as before
+        return tool_def
+    return await chat_client_only(ctx, tool_def)
 
 
 def _creator(deps: AgentDeps) -> tuple[str | None, str | None]:

@@ -79,6 +79,10 @@ class Settings(BaseSettings):
     rate_limit_global: int = 30  # requests per minute
     rate_limit_expensive: int = 5  # requests per minute for expensive ops
 
+    # OpenAI-compatible /v1 API (routes/openai_compat.py): the model id
+    # GET /v1/models lists and every completion echoes back.
+    openai_api_model_id: str = "ai-agent"
+
     # Redis
     redis_host: str = "localhost"
     redis_port: int = 6379

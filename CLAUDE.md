@@ -26,7 +26,7 @@ scripts/
 
 ## Message Flow
 
-Baileys `messages.upsert` (`whatsapp.ts`) → a handler in `handlers/` → `handleTextMessage()` → `api-client.ts` POST `/chat/enqueue` → `routes/chat.py` answers slash commands (`/settings`, `/tts`, `/stt`, `/clean`, `/memories`, `/broadcast`, `/help`) itself, so they never reach the agent, and saves and enqueues the rest on `stream:user:{user_id}` → `streams/processor.py` runs the agent and streams chunks to Redis → the client polls GET `/chat/job/{id}` (500ms, max 120s) and replies, plus TTS if enabled. Step-by-step: `docs/architecture.md`.
+Baileys `messages.upsert` (`whatsapp.ts`) → a handler in `handlers/` → `handleTextMessage()` → `api-client.ts` POST `/chat/enqueue` → `routes/chat.py` answers slash commands (`/settings`, `/clean`, `/help`, …) itself, so they never reach the agent, and saves and enqueues the rest on `stream:user:{user_id}` → `streams/processor.py` runs the agent and streams chunks to Redis → the client polls GET `/chat/job/{id}` (500ms, max 120s) and replies, plus TTS if enabled. Step-by-step: `docs/architecture.md`.
 
 **Group messages**: non-@mentioned messages are saved as history only (`saveOnly=true`), never processed by AI. The bot checks both JID and LID formats for mentions.
 
@@ -36,11 +36,12 @@ Baileys `messages.upsert` (`whatsapp.ts`) → a handler in `handlers/` → `hand
 
 ## Subsystem docs (load on demand)
 
-Claude Code loads a folder's `CLAUDE.md` when it works there. **These subsystems cross folders, so read the file before changing any part of one**, even from another folder:
+**These subsystems cross folders, so read the file before changing any part of one**:
 
 | File | Covers |
 |------|--------|
-| `packages/ai-api/src/ai_api/services/CLAUDE.md` | Broadcasts (`/admin/broadcasts`), bug reports (`/admin/bug-reports`), scheduled tasks, cross-platform identity (`/link`, `/linkphone`) |
+| `packages/ai-api/src/ai_api/services/CLAUDE.md` | Broadcasts (`/admin/broadcasts`), bug reports (`/admin/bug-reports`), scheduled tasks, cross-platform identity (`/link`, `/linkphone`, `web:` keys) |
+| `packages/ai-api/docs/openai-api.md` | OpenAI-compatible `/v1` API, per-user keys, terminal chat |
 | `packages/ai-api/src/ai_api/agent/CLAUDE.md` | DeepSeek → Gemini model chain, `GuardedModel`, fallback reply, chat-history and shared-group tools |
 | `packages/ai-api/src/ai_api/streams/CLAUDE.md` | PDF queue; chat streams: dedup, crash recovery, late-reply push, burst merging |
 | `packages/whatsapp-client/CLAUDE.md` | Baileys gotchas (WA version, LID vs phone, whitelist placement), handler + multipart route workflows |
@@ -82,7 +83,7 @@ cd packages/ai-api && uv run pytest tests/mocked/test_model_chain_fallback.py -k
 
 ## Security
 
-- **API key auth**: every server requires `X-API-Key` on all routes except `/health`, `/contact` (AI API only), and `/docs*`: `AI_API_KEY` (AI API; it fails to start without it), `WHATSAPP_API_KEY` (Baileys, required), `WHATSAPP_CLOUD_API_KEY` and `TELEGRAM_API_KEY` (both fall back to `WHATSAPP_API_KEY`). Inter-service calls include the key automatically
+- **API key auth**: every server requires `X-API-Key` on all routes except `/health`, `/contact` (AI API only), `/docs*` and the AI API's `/v1/*` (per-user `Bearer` keys, never `AI_API_KEY`): `AI_API_KEY` (AI API; it fails to start without it), `WHATSAPP_API_KEY` (Baileys, required), `WHATSAPP_CLOUD_API_KEY` and `TELEGRAM_API_KEY` (both fall back to `WHATSAPP_API_KEY`). Inter-service calls include the key automatically
 - **Webhook verification**: `/webhook` on the Cloud and Telegram clients skips API-key auth for platform-native checks: `x-hub-signature-256` HMAC-SHA256 with `META_APP_SECRET` (Cloud), `X-Telegram-Bot-Api-Secret-Token` against `TELEGRAM_WEBHOOK_SECRET` (Telegram; grammY's `webhookCallback` validates it when `secretToken` is set)
 - **CORS**: `CORS_ORIGINS` (comma-separated). Empty blocks all cross-origin requests
 - **Rate limiting**: `RATE_LIMIT_GLOBAL` (default 30/min), `RATE_LIMIT_EXPENSIVE` (default 5/min). A valid `X-API-Key` exempts a request on the TS clients, because all inter-service traffic comes from one IP. The auth hook runs before the limiter, so the limiter does **not** throttle API-key guessing. `/health*` is exempt from both. Details: `docs/access-control.md`
@@ -99,7 +100,7 @@ cd packages/ai-api && uv run pytest tests/mocked/test_model_chain_fallback.py -k
 ## Database
 
 - **PostgreSQL + pgvector** (3072-dim vectors via `gemini-embedding-001`)
-- **11 tables**, models in `database.py` and `kb_models.py` (list in `docs/architecture.md`)
+- **14 tables**, models in `database.py` and `kb_models.py` (list in `docs/architecture.md`)
 - **No Alembic migrations.** SQLAlchemy `create_all()` only creates missing *tables*, never new columns. Column/index changes ship as hand-written, idempotent (`IF NOT EXISTS`) SQL in `packages/ai-api/docs/migrations/<YYYY-MM-DD>-<name>.sql`, named so they match what `create_all()` emits on a fresh DB. Apply them to an existing Docker deployment BEFORE rolling out the code that needs them (safe to re-run):
   ```bash
   docker compose exec -T postgres psql -U aiagent -d aiagent \
@@ -138,11 +139,11 @@ Sibling repos under `/home/ubuntu/projects/` have their own authoritative `CLAUD
 
 **Peer projects** (agent-mesh group `chatbots`): six open-source bots that solved our problems before. Ask them before designing; who knows what: `docs/peers.md`.
 
-- **Run or resume a peer agent in that repo** (Antigravity `agy` or Claude Code `claude`) instead of editing its files from here, so its own rules, skills and hooks apply and the user can resume it (`agy -c` or `claude -c`): `cd /home/ubuntu/projects/<repo> && agy -c -p "<prompt>" --dangerously-skip-permissions` or `cd /home/ubuntu/projects/<repo> && claude -c -p "<prompt>" --dangerously-skip-permissions`. **Always pass `--dangerously-skip-permissions`**, resumed (`-c -p`) or new (`-p`), because headless print mode needs it to auto-approve tools. Drop `-c` for a fresh session (`agy` needs one when an open TUI holds the latest conversation's lock); in `agy`, `send_message` to an open session's conversation ID queues into its inbox
+- **Run or resume a peer agent in that repo** (Antigravity `agy` or Claude Code `claude`) instead of editing its files from here, so its own rules, skills and hooks apply and the user can resume it: `cd /home/ubuntu/projects/<repo> && agy -c -p "<prompt>" --dangerously-skip-permissions` or `cd /home/ubuntu/projects/<repo> && claude -c -p "<prompt>" --dangerously-skip-permissions`. **Always pass `--dangerously-skip-permissions`**, resumed (`-c -p`) or new (`-p`), because headless print mode needs it to auto-approve tools. Drop `-c` for a fresh session (`agy` needs one when an open TUI holds the latest conversation's lock); in `agy`, `send_message` to an open session's conversation ID queues into its inbox
 - **curupira-bot**: fire-alert fork (municipality subscriptions, `fire_poller/`, persona "Curupira"). Features often start here and get ported back (the shared-group tools, `get_chat_history`)
 - **castanha-bot**: Brazil-nut price fork (external *cadeia-produtiva* platform via `cadeia` tools, weekly recap, Portuguese commands like `/regiao`, no Telegram client)
 - **fleetview**: Next.js 16 control plane for the fleet, not a fork. It keeps an encrypted registry of bots (base URL + `X-API-Key`) and calls each bot's `/admin/*`, `/health` and `/knowledge-base/*` server-side. **Its Zod schemas mirror `routes/admin.py`, `schemas.py` and the `runtime_config.py` REGISTRY strictly** (only health is lenient). Renaming or removing a field, route or setting attribute (`hot`/`secret`/`choices`) breaks the dashboard for every bot, and so does a new value in a closed enum (setting `type`, KB status, QR `status`, `conversation_type`, broadcast enums). A new field is safe (unknown keys are stripped)
-  - **Contract check**: the contract files are `packages/ai-api/src/ai_api/routes/{admin,broadcasts,bug_reports,health,knowledge_base}.py`, `schemas.py` and the `runtime_config.py` REGISTRY. After changing any of them, ask a fresh peer session in fleetview (no `-c`) for the verdict, since only fleetview knows its current schemas: `cd /home/ubuntu/projects/fleetview && claude -p "Run git -C /home/ubuntu/projects/ai-boilerplate diff origin/main...HEAD -- <the changed contract files>. Does it break a Zod schema in lib/bot-api/schemas.ts or a Server Action in lib/actions/? Read-only check: do not modify fleetview files, run write commands, or read .env* files. Answer Safe, Breaking or Needs a FleetView update, with file:line in both repos." --dangerously-skip-permissions` (or the same prompt with `agy -p ... --dangerously-skip-permissions`)
+  - **Contract check**: the contract files are `packages/ai-api/src/ai_api/routes/{admin,broadcasts,bug_reports,health,knowledge_base}.py`, `schemas.py` and the `runtime_config.py` REGISTRY. After changing any of them, ask a fresh peer session in fleetview (no `-c`) for the verdict, since only fleetview knows its current schemas: `cd /home/ubuntu/projects/fleetview && claude -p "Run git -C /home/ubuntu/projects/ai-boilerplate diff origin/main...HEAD -- <the changed contract files>. Does it break a Zod schema in lib/bot-api/schemas.ts or a Server Action in lib/actions/? Read-only check: do not modify fleetview files, run write commands, or read .env* files. Answer Safe, Breaking or Needs a FleetView update, with file:line in both repos." --dangerously-skip-permissions` (or the same with `agy -p`)
 
 ## Guidelines
 

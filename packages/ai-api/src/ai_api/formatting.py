@@ -224,3 +224,60 @@ def markdown_to_whatsapp(text: str) -> str:
         text = placeholder_re.sub(lambda m: protected[int(m.group(1))], text)
 
     return text
+
+
+_FENCE_LINE_RE = re.compile(r"^```")
+_DELIMITER_LINE_RE = re.compile(r"^---\s*$")
+
+
+def strip_split_delimiters(text: str) -> str:
+    """Drop the `---` burst lines outside code fences and collapse the blank runs
+    they leave, outside fences too.
+
+    Mirrors ``stripSplitDelimiters`` in the TS clients' ``utils/message-split.ts``
+    (same delimiter and fence rules). Used for the web surface, where a reply is
+    one message and a ``---`` under a text line would render as a Markdown heading.
+    Text without a delimiter line comes back unchanged, so code (blank lines,
+    leading indentation) is never rewritten.
+    """
+    if not text:
+        return text
+    kept: list[str] = []
+    in_fence = False
+    removed = False
+    for line in text.split("\n"):
+        if _FENCE_LINE_RE.match(line):
+            in_fence = not in_fence
+        elif not in_fence and _DELIMITER_LINE_RE.match(line):
+            removed = True
+            line = ""
+        kept.append(line)
+    if not removed:
+        return text
+    return "\n".join(_collapse_blank_runs(kept)).strip("\n")
+
+
+def _collapse_blank_runs(lines: list[str]) -> list[str]:
+    """At most one blank line in a row, outside code fences only."""
+    out: list[str] = []
+    in_fence = False
+    for line in lines:
+        if _FENCE_LINE_RE.match(line):
+            in_fence = not in_fence
+        elif not in_fence and not line.strip() and out and not out[-1].strip():
+            continue
+        out.append(line)
+    return out
+
+
+def render_reply(text: str, markdown: bool) -> str:
+    """The reply as delivered to the user's surface.
+
+    Chat clients (WhatsApp, Telegram) and the terminal chat get WhatsApp markup;
+    a Markdown surface (the ``/v1`` web API) gets the model's Markdown as is,
+    minus the burst delimiters. The text saved to history is always
+    ``markdown_to_whatsapp`` (see ``streams/processor.py``), whatever the surface.
+    """
+    if markdown:
+        return strip_split_delimiters(text)
+    return markdown_to_whatsapp(text)

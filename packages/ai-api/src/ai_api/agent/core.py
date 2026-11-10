@@ -13,6 +13,7 @@ from ..logger import logger
 from ..reply_media import ReplyImage
 from ..runtime_config import runtime_config
 from ..services.shared_groups import shared_group_tools_available
+from ..surfaces import renders_markdown, surface_of
 from ..whatsapp import WhatsAppClient
 from .model_chain import build_model
 
@@ -213,6 +214,15 @@ _FORMATTING_GUIDANCE = (
 )
 
 
+_MARKDOWN_FORMATTING_GUIDANCE = (
+    "\n\n== FORMATTING ==\n"
+    "This chat is a web or desktop app that renders Markdown: use it normally "
+    "(headings, lists, bold, links, tables, code blocks). Write the whole reply as "
+    "one message; never use a line containing only --- to split it.\n"
+    "== END FORMATTING =="
+)
+
+
 @agent.instructions
 async def formatting_guidance(ctx: RunContext[AgentDeps]) -> str:
     """Chat-markup rule appended to the system prompt on every run.
@@ -222,8 +232,11 @@ async def formatting_guidance(ctx: RunContext[AgentDeps]) -> str:
     and this rule must survive that. It is the same for every client: WhatsApp
     renders this markup natively and the Telegram client converts it to
     Telegram HTML on the way out. ``formatting.markdown_to_whatsapp`` is the
-    deterministic backstop for when the model ignores it anyway.
+    deterministic backstop for when the model ignores it anyway. The web
+    surface (``/v1``, surfaces.py) renders Markdown and gets its own rule.
     """
+    if renders_markdown(surface_of(ctx.deps.client_id, ctx.deps.whatsapp_jid)):
+        return _MARKDOWN_FORMATTING_GUIDANCE
     return _FORMATTING_GUIDANCE
 
 

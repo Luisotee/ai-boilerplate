@@ -3,9 +3,10 @@ from pydantic_ai import RunContext
 from ...formatting import markdown_to_whatsapp
 from ...logger import logger
 from ..core import AgentDeps, agent
+from ._surface import chat_client_only
 
 
-@agent.tool
+@agent.tool(prepare=chat_client_only)
 async def send_whatsapp_reaction(ctx: RunContext[AgentDeps], emoji: str) -> str:
     """
     React to the user's message with an emoji.
@@ -54,7 +55,7 @@ async def send_whatsapp_reaction(ctx: RunContext[AgentDeps], emoji: str) -> str:
         return "Failed to send reaction."
 
 
-@agent.tool
+@agent.tool(prepare=chat_client_only)
 async def send_whatsapp_location(
     ctx: RunContext[AgentDeps],
     latitude: float,
@@ -112,7 +113,7 @@ async def send_whatsapp_location(
         return "Failed to send location."
 
 
-@agent.tool
+@agent.tool(prepare=chat_client_only)
 async def send_whatsapp_contact(
     ctx: RunContext[AgentDeps],
     contact_name: str,
@@ -163,7 +164,7 @@ async def send_whatsapp_contact(
         return "Failed to send contact."
 
 
-@agent.tool
+@agent.tool(prepare=chat_client_only)
 async def send_whatsapp_message(ctx: RunContext[AgentDeps], text: str) -> str:
     """
     Send an additional text message to the user via WhatsApp, out-of-band.

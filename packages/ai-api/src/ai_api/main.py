@@ -32,10 +32,12 @@ from .routes import (
     health_router,
     knowledge_base_router,
     message_events_router,
+    openai_router,
     preferences_router,
     scheduled_tasks_router,
     speech_router,
 )
+from .routes.openai_compat import OpenAIError, openai_error_response
 from .scripts.cleanup_expired_documents import cleanup_expired_documents
 from .whitelist import parse_whitelist
 
@@ -192,6 +194,11 @@ app.openapi = custom_openapi  # type: ignore[method-assign]
 # --- Security Middleware ---
 
 _AUTH_EXEMPT_PREFIXES = ("/health", "/docs", "/redoc", "/openapi.json")
+#: Routers that authenticate themselves: the OpenAI-compatible API takes
+#: per-user keys (routes/openai_compat.py, a router-wide `require_app_key`
+#: dependency), never AI_API_KEY. Starlette matches routes on the raw path, so
+#: "/v1/../admin/…" is a 404, never an /admin route.
+_SELF_AUTH_PREFIXES = ("/v1/",)
 
 
 class APIKeyMiddleware(BaseHTTPMiddleware):
@@ -199,6 +206,8 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
+        if path.startswith(_SELF_AUTH_PREFIXES):
+            return await call_next(request)
         if any(path.startswith(p) for p in _AUTH_EXEMPT_PREFIXES) or path in (
             "/contact",
             "/contact/",
@@ -237,6 +246,7 @@ app.add_exception_handler(
     ),
 )
 app.add_middleware(SlowAPIMiddleware)
+app.add_exception_handler(OpenAIError, lambda req, exc: openai_error_response(exc))
 
 # --- Register Routers ---
 
@@ -252,3 +262,4 @@ app.include_router(admin_router)
 app.include_router(broadcasts_router)
 app.include_router(bug_reports_router)
 app.include_router(scheduled_tasks_router)
+app.include_router(openai_router)

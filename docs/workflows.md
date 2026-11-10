@@ -13,7 +13,7 @@ Step lists behind the Common Workflows section of the root `CLAUDE.md` / `AGENTS
 
 ## Adding a new API endpoint (ai-api) (use `/api-route` skill)
 1. Add the route in the appropriate `routes/*.py` file (or a new router module), using `APIRouter` with tags; import `limiter` from `deps.py` for rate-limited endpoints
-2. Add Pydantic schemas in `schemas.py`
+2. Add Pydantic schemas in `schemas.py`. Exception: schemas of an API that isn't the dashboard's (e.g. the OpenAI-compatible `/v1` in `routes/openai_compat.py`) live in their route module, because `schemas.py` is FleetView's contract file and every change to it needs a contract check
 3. Register a new router in `main.py` via `app.include_router()`
 4. Add integration tests in `tests/integration/` using `httpx.AsyncClient` with `ASGITransport`
 

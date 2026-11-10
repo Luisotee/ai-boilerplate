@@ -22,6 +22,7 @@ from ..formatting import markdown_to_whatsapp
 from ..logger import logger
 from ..runtime_config import runtime_config
 from ..schemas import ScheduledTaskKind, ScheduledTaskStatus
+from ..surfaces import delivers_through_chat_client
 from ..whitelist import is_whitelisted, parse_whitelist
 from .schedule import (
     ScheduleError,
@@ -154,6 +155,9 @@ def create_task(
         # The text is model output and is sent as is: same Markdown rule as replies.
         text = markdown_to_whatsapp(text).strip() or text
 
+    if not delivers_through_chat_client(client_id, address):
+        # Defense in depth (the agent tool is hidden there): nothing could deliver it.
+        raise TaskError("Scheduled messages can only be sent on WhatsApp and Telegram.")
     if not group_creator_allowed(address, created_by_jid):
         raise TaskError(
             "I can't confirm you're on this bot's whitelist by phone number, so a scheduled "

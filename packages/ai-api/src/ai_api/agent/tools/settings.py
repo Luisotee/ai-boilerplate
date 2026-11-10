@@ -20,6 +20,7 @@ from ...commands import (
 )
 from ...database import get_or_create_preferences, is_group_jid
 from ...logger import logger
+from ...surfaces import is_app_jid
 from ..core import AgentDeps, agent
 from ._db import safe_rollback
 from ._group import group_admin_refusal
@@ -159,6 +160,9 @@ async def _update_stt(deps: AgentDeps, language: str | None) -> str:
 
 
 async def _set_announcements(deps: AgentDeps, subscribed: bool) -> str:
+    if is_app_jid(deps.whatsapp_jid):
+        # A web-only/terminal row has no chat route: broadcasts never reach it.
+        return "Announcements are only sent on WhatsApp and Telegram, never to this app."
     try:
         refusal = group_admin_refusal(
             deps, "turn announcements on or off for this group", "/broadcast off"

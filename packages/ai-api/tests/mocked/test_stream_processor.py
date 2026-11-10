@@ -67,6 +67,8 @@ async def _run_processor(
     whatsapp_message_id: str | None = "wamid-test",
     raises: type[BaseException] | None = None,
     embedding_service=None,
+    whatsapp_jid: str = "5511999999999@s.whatsapp.net",
+    client_id: str | None = None,
 ):
     """Invoke process_chat_job_direct with get_ai_response replaced by `agent_fn`.
 
@@ -109,12 +111,13 @@ async def _run_processor(
         with pytest.raises(raises) if raises else nullcontext():
             result = await proc_module.process_chat_job_direct(
                 user_id=str(uuid.uuid4()),
-                whatsapp_jid="5511999999999@s.whatsapp.net",
+                whatsapp_jid=whatsapp_jid,
                 message="Hi",
                 conversation_type="private",
                 user_message_id=str(uuid.uuid4()),
                 job_id="job-test-001",
                 whatsapp_message_id=whatsapp_message_id,
+                client_id=client_id,
             )
 
     return result, mock_save_chunk, mock_set_meta, mock_save_message, mock_whatsapp_client
@@ -382,6 +385,41 @@ class TestMarkdownSanitising:
         delivered = mock_save_chunk.call_args.args[3]
         assert delivered == "Hi!\n---\n*Answer*\n---\nAnything else?"
         assert delivered.split("\n").count("---") == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "jid,client_id",
+        [("5511999999999@s.whatsapp.net", "web")],  # a key on a WhatsApp user
+    )
+    async def test_web_surface_gets_markdown_but_history_is_converted(self, jid, client_id):
+        _result, mock_save_chunk, _meta, mock_save_message, _wa = await _run_processor(
+            _make_streaming_agent([self.MARKDOWN]),
+            whatsapp_jid=jid,
+            client_id=client_id,
+            whatsapp_message_id=None,
+        )
+        delivered = mock_save_chunk.call_args.args[3]
+        assert delivered == (
+            "## Plan\n**Step one**: read [the docs](https://example.com/docs)\n\nDone?"
+        )
+        assert mock_save_message.call_args.args[3] == self.WHATSAPP
+
+    @pytest.mark.asyncio
+    async def test_web_only_user_keeps_markdown_in_history(self):
+        _result, mock_save_chunk, _meta, mock_save_message, _wa = await _run_processor(
+            _make_streaming_agent([self.MARKDOWN]),
+            whatsapp_jid="web:abc",
+            client_id="web",
+            whatsapp_message_id=None,
+        )
+        assert mock_save_message.call_args.args[3] == self.MARKDOWN
+
+    @pytest.mark.asyncio
+    async def test_terminal_chat_gets_whatsapp_markup(self):
+        _result, mock_save_chunk, *_ = await _run_processor(
+            _make_streaming_agent([self.MARKDOWN]), whatsapp_jid="cli:luis"
+        )
+        assert mock_save_chunk.call_args.args[3] == self.WHATSAPP
 
     @pytest.mark.asyncio
     async def test_partial_error_row_is_converted_too(self):

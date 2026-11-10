@@ -12,12 +12,18 @@ from ..agent.model_chain import MODEL_ERRORS
 from ..config import get_whatsapp_api_key, get_whatsapp_client_url, settings
 from ..database import SessionLocal, get_conversation_history, save_message
 from ..embeddings import create_embedding_service
-from ..formatting import markdown_to_whatsapp
+from ..formatting import markdown_to_whatsapp, render_reply
 from ..logger import logger
 from ..queue.connection import get_redis_client
 from ..queue.utils import delete_job_image, get_job_images, save_job_chunk, set_job_metadata
 from ..reply_media import ReplyMedia, collect_reply_media
 from ..services.bug_reports import record_auto_report
+from ..surfaces import (
+    delivers_through_chat_client,
+    renders_markdown,
+    stores_markdown,
+    surface_of,
+)
 from ..whatsapp import WhatsAppClient, create_whatsapp_client
 from .delivery import deliver_if_late
 from .manager import enqueue_pdf_processing
@@ -112,6 +118,8 @@ async def process_chat_job_direct(
         full_response = ""
         http_client: httpx.AsyncClient | None = None
         whatsapp_client: WhatsAppClient | None = None
+        push_client: WhatsAppClient | None = None  # whatsapp_client on a chat surface
+        chat_surface = delivers_through_chat_client(client_id, whatsapp_jid)
 
         try:
             # Close the burst's absorbed jobs at once, so their pollers stop
@@ -152,6 +160,10 @@ async def process_chat_job_direct(
                 api_key=get_whatsapp_api_key(client_id),
             )
             logger.info(f"[Job {job_id}] WhatsApp client initialized")
+            # An app-surface job (/v1, terminal chat) has no chat client: its
+            # reply is only read by its poller, never pushed late to WhatsApp
+            # (a key linked to a WhatsApp user runs on that user's JID).
+            push_client = whatsapp_client if chat_surface else None
 
             # Step 2.6: Hand an attached PDF to the PDF stream. Parsing happens in
             # the PDF consumer (streams/pdf_consumer.py), not inline: a Docling
@@ -210,7 +222,7 @@ async def process_chat_job_direct(
                         },
                     )
                     await deliver_if_late(
-                        redis, whatsapp_client, job_id, whatsapp_jid, full_response, enqueued_at_ms
+                        redis, push_client, job_id, whatsapp_jid, full_response, enqueued_at_ms
                     )
 
                     return {
@@ -312,7 +324,7 @@ async def process_chat_job_direct(
                 )
                 await deliver_if_late(
                     redis,
-                    whatsapp_client,
+                    push_client,
                     job_id,
                     whatsapp_jid,
                     MODEL_ERROR_FALLBACK_TEXT,
@@ -352,23 +364,35 @@ async def process_chat_job_direct(
             # tool queued) are fetched through the SSRF-hardened helper and the
             # delivered ones removed from the text, BEFORE markdown_to_whatsapp
             # would flatten them into links. Never fails the reply.
+            # Only on the chat-client path: a web reply keeps its image
+            # directives inline as Markdown and its job stores no media.
             reply_media = ReplyMedia(text=full_response, media=[], history_lines=[])
-            try:
-                reply_media = await collect_reply_media(
-                    redis, job_id, full_response, agent_deps.reply_media
-                )
-            except Exception:
-                logger.error(f"[Job {job_id}] Reply image handling failed", exc_info=True)
+            if chat_surface:
+                try:
+                    reply_media = await collect_reply_media(
+                        redis, job_id, full_response, agent_deps.reply_media
+                    )
+                except Exception:
+                    logger.error(f"[Job {job_id}] Reply image handling failed", exc_info=True)
             full_response = reply_media.text
 
             # Models answer in Markdown despite the prompt. Convert before the
             # reply is delivered, embedded or saved — saved Markdown would be
             # replayed as history and reinforce the habit. `---` burst lines are
             # left untouched, so the clients still split on them.
-            full_response = markdown_to_whatsapp(full_response)
+            # The web surface (/v1) renders Markdown, so it gets the reply as
+            # written (surfaces.py). History gets the converted text, so it stays
+            # uniform for a user linked across WhatsApp and the web; only a
+            # web-only `web:` user keeps Markdown (`stores_markdown`), or its
+            # replayed history would teach the model WhatsApp's `*bold*`.
+            delivered = render_reply(
+                full_response, renders_markdown(surface_of(client_id, whatsapp_jid))
+            )
+            if not stores_markdown(whatsapp_jid):
+                full_response = markdown_to_whatsapp(full_response)
 
             # Save complete response as single chunk
-            await save_job_chunk(redis, job_id, 0, full_response)
+            await save_job_chunk(redis, job_id, 0, delivered)
             chunk_index = 1
 
             logger.info(f"[Job {job_id}] AI response completed.")
@@ -418,7 +442,7 @@ async def process_chat_job_direct(
                 },
             )
             await deliver_if_late(
-                redis, whatsapp_client, job_id, whatsapp_jid, full_response, enqueued_at_ms
+                redis, push_client, job_id, whatsapp_jid, full_response, enqueued_at_ms
             )
 
             logger.info(f"[Job {job_id}] ✅ Completed successfully")
@@ -444,7 +468,12 @@ async def process_chat_job_direct(
                         "assistant",
                         # Converted here too: an unexpected error can skip the
                         # happy-path conversion, and this row is replayed as history.
-                        f"[Partial - Error] {markdown_to_whatsapp(full_response)}",
+                        "[Partial - Error] "
+                        + (
+                            full_response
+                            if stores_markdown(whatsapp_jid)
+                            else markdown_to_whatsapp(full_response)
+                        ),
                         conversation_type,
                         embedding=None,
                     )
@@ -473,7 +502,7 @@ async def process_chat_job_direct(
                 # Nobody polls a job this old any more: tell the user it failed.
                 await deliver_if_late(
                     redis,
-                    whatsapp_client,
+                    push_client,
                     job_id,
                     whatsapp_jid,
                     MODEL_ERROR_FALLBACK_TEXT,

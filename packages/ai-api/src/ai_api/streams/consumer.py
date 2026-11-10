@@ -19,6 +19,7 @@ from ..queue.utils import (
     save_job_chunk,
     set_job_metadata,
 )
+from ..surfaces import delivers_through_chat_client
 from .delivery import (
     EXPIRED_JOB_NOTICE,
     claim_key,
@@ -175,8 +176,19 @@ async def _read_new_entries(
 
 def _is_mergeable(data: dict) -> bool:
     """Chat jobs that may join a burst run: not scheduled, no PDF (a document
-    job always runs alone, it has its own reply flow)."""
-    return not is_scheduled_entry(data) and data.get(b"has_document") != b"true"
+    job always runs alone, it has its own reply flow), and from a chat client:
+    each ``/v1`` / terminal-chat request waits for its own reply (an absorbed
+    one would answer empty), and they skip the quiet-period wait."""
+    client_id = data.get(b"client_id")
+    jid = data.get(b"whatsapp_jid")
+    return (
+        not is_scheduled_entry(data)
+        and data.get(b"has_document") != b"true"
+        and delivers_through_chat_client(
+            client_id.decode("utf-8", "replace") if client_id else None,
+            jid.decode("utf-8", "replace") if jid else None,
+        )
+    )
 
 
 #: Fields that must match for two jobs to be answered in one run. In a group

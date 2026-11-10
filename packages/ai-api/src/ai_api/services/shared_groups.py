@@ -35,6 +35,7 @@ from sqlalchemy.orm import Session
 from ..database import ConversationMessage, User, is_group_jid, is_telegram_jid
 from ..logger import logger
 from ..runtime_config import runtime_config
+from ..surfaces import delivers_through_chat_client
 from ..whatsapp.client import SharedGroup
 
 #: Bound on the derived list, mirroring the bound applied to the Baileys lookup —
@@ -97,13 +98,18 @@ def shared_group_tools_available(deps) -> bool:
     """Whether the shared-group tools can work in this run's chat.
 
     SHARED_GROUP_TOOLS_ENABLED is on, the chat is private (inside a group both
-    tools refuse), and the client isn't the Cloud API (no group context). One
+    tools refuse), the client isn't the Cloud API (no group context) and the run
+    isn't on an app surface (``/v1`` or the terminal chat: no chat client). One
     predicate for the tools' `prepare` hook and the SHARED GROUPS instructions,
     so the prompt never describes tools the model wasn't given.
     """
     if not runtime_config.get("shared_group_tools_enabled"):
         return False
-    return not is_group_jid(deps.whatsapp_jid) and platform_of(deps.client_id) != "cloud"
+    return (
+        not is_group_jid(deps.whatsapp_jid)
+        and platform_of(deps.client_id) != "cloud"
+        and delivers_through_chat_client(deps.client_id, deps.whatsapp_jid)
+    )
 
 
 async def resolve_shared_groups(deps, user: User) -> list[SharedGroup]:

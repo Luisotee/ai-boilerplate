@@ -42,6 +42,11 @@ A production-ready AI agent system that brings conversational AI to WhatsApp wit
 - Runs next to WhatsApp (`docker compose --profile telegram up -d`), sharing memory via `/link` or `/linkphone`
 - Webhook delivery by default; `TELEGRAM_MODE=polling` needs no public URL (handy for local development or hosts behind NAT)
 
+### Web and desktop apps
+- OpenAI-compatible `/v1/chat/completions` (with streaming) and `/v1/models`, so Open WebUI, LibreChat or Chatbox can talk to the bot through the same pipeline, memory and tools
+- Per-user keys (`python -m ai_api.scripts.api_keys`), linkable to a WhatsApp/Telegram chat with `/link`; replies keep their Markdown
+- Terminal chat for testing without WhatsApp: `python -m ai_api.scripts.chat`. Setup: [packages/ai-api/docs/openai-api.md](packages/ai-api/docs/openai-api.md)
+
 ### WhatsApp Integration
 - Group chat support with sender attribution and @mention handling
 - Optional shared-group tools (`SHARED_GROUP_TOOLS_ENABLED`, off by default): in a private chat, read or search a group you share with the bot, or have it post a message there on your behalf (always attributed, confirmed first; Baileys + Telegram)
@@ -238,6 +243,12 @@ The free tier covers 10M records/month and is hard-capped at $0 — it can never
 | POST | `/chat/enqueue` | Async job (returns job_id) |
 | GET | `/chat/job/{job_id}` | Poll job status + chunks |
 
+### OpenAI-compatible (per-user `Authorization: Bearer sk-…`, not `X-API-Key`)
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/v1/chat/completions` | Answers the last user message as the bot; `stream: true` for SSE |
+| GET | `/v1/models` | The one model (`OPENAI_API_MODEL_ID`) |
+
 ### Knowledge Base
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -340,6 +351,7 @@ pnpm format          # Format all code
 | `BOT_TIMEZONE` | IANA time zone for scheduled tasks ("every day at 9:00"), e.g. `America/Rio_Branco`. Empty = `BROADCAST_TIMEZONE`. Hot via `PATCH /admin/settings` |
 | `SCHEDULED_TASKS_*` | Reminders and scheduled agent runs: on/off (`_ENABLED`, default `true`), active tasks per chat (`_MAX_PER_CHAT`, 10), shortest repeat (`_MIN_INTERVAL_MINUTES`, 60), messages per chat per 24h (`_MAX_RUNS_PER_DAY`, 24). Hot via `PATCH /admin/settings` |
 | `BROADCAST_*` | Broadcast footer and Baileys anti-ban pacing (delays, batch pause, daily cap, send window, time zone). Hot via `PATCH /admin/settings` |
+| `OPENAI_API_MODEL_ID` | Model id `GET /v1/models` lists for the OpenAI-compatible API (default `ai-agent`) |
 | `LOGFIRE_TOKEN` | Pydantic Logfire write token for LLM token/cost tracking (optional; empty disables it) |
 | `LOGFIRE_ENVIRONMENT` | Environment label shown in the Logfire UI (default `development`) |
 

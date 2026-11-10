@@ -27,6 +27,7 @@ from redis.asyncio import Redis
 from ..config import get_whatsapp_api_key, get_whatsapp_client_url, settings
 from ..logger import logger
 from ..queue.utils import get_job_media, get_job_metadata
+from ..surfaces import delivers_through_chat_client
 from ..whatsapp import WhatsAppClient, create_whatsapp_client
 
 #: Start pushing this long before the clients' budget runs out. The claim keeps
@@ -177,7 +178,12 @@ async def push_text_once(
     text: str,
     enqueued_at_ms: int | None,
 ) -> bool:
-    """deliver_if_late with its own short-lived client (for callers without one)."""
+    """deliver_if_late with its own short-lived client (for callers without one).
+
+    Never for an app-surface job (``/v1``, terminal chat): it has no chat client,
+    and a key linked to a WhatsApp user would otherwise get its reply on WhatsApp."""
+    if not delivers_through_chat_client(client_id, whatsapp_jid):
+        return False
     async with httpx.AsyncClient(timeout=settings.whatsapp_client_timeout) as http_client:
         client = create_whatsapp_client(
             http_client=http_client,
