@@ -69,6 +69,46 @@ class SaveMessageRequest(BaseModel):
     whatsapp_lid: str | None = Field(None, description="WhatsApp LID if known")
 
 
+class RevokeMessageRequest(BaseModel):
+    """A message was deleted for everyone on the platform: forget the saved copy."""
+
+    whatsapp_jid: str = Field(..., description="Conversation JID (group or private)")
+    whatsapp_message_id: str = Field(..., description="Platform id of the deleted message")
+    sender_jid: str | None = Field(
+        None, description="Who deleted it (group participant JID, resolved like on save)"
+    )
+    is_group_admin: bool | None = Field(
+        None, description="Whether the deleter is a group admin (may delete others' messages)"
+    )
+    phone: str | None = Field(None, description="E.164 phone of a private chat, if known")
+
+
+class EditMessageRequest(BaseModel):
+    """A message was edited on the platform: update the saved copy and its embedding."""
+
+    whatsapp_jid: str = Field(..., description="Conversation JID (group or private)")
+    whatsapp_message_id: str = Field(..., description="Platform id of the edited message")
+    message: str = Field(..., min_length=1, description="The new text")
+    sender_jid: str | None = Field(
+        None, description="Who edited it (group participant JID, resolved like on save)"
+    )
+    phone: str | None = Field(None, description="E.164 phone of a private chat, if known")
+
+
+class MessageEventResponse(BaseModel):
+    """How many saved rows a revoke or edit changed (0 = not found or not allowed)."""
+
+    changed: int
+
+
+class WhitelistResponse(BaseModel):
+    """The effective whitelist, unparsed (GET /chat/whitelist)."""
+
+    whitelist_phones: str = Field(
+        ..., description="Comma-separated entries, as WHITELIST_PHONES; empty = disabled"
+    )
+
+
 class UploadPDFResponse(BaseModel):
     """Response after uploading a PDF to the knowledge base"""
 

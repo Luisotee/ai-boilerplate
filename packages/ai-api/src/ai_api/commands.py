@@ -123,6 +123,7 @@ def _get_help_text() -> str:
 /clean all - Full reset (messages, documents, memories, preferences)
 /memories - Show saved core memories
 /memories clear - Delete all core memories
+/memories undo - Undo the last change to core memories
 /broadcast - Show whether update announcements are on
 /broadcast off - Stop receiving update announcements (groups: admins only)
 /broadcast on - Receive update announcements again (groups: admins only)
@@ -283,6 +284,9 @@ def handle_clean_command(
         had_memories = bool(mem.content)
         if mem.content:
             mem.content = ""
+        # A full reset leaves nothing for /memories undo to bring back.
+        mem.previous_content = None
+        mem.content_trusted = True
 
         prefs = get_or_create_preferences(db, user_id)
         had_prefs_changes = (
@@ -391,14 +395,32 @@ def _handle_broadcast_command(
 
 def _handle_memories_command(db: Session, user_id: str, parts: list[str]) -> str:
     """Handle /memories commands."""
-    if len(parts) >= 2 and parts[1].lower() == "clear":
+    sub = parts[1].lower() if len(parts) >= 2 else ""
+    if sub == "clear":
         mem = get_or_create_core_memory(db, user_id)
         if not mem.content:
             return "No core memories to clear."
+        mem.previous_content = mem.content
         mem.content = ""
+        mem.content_trusted = True  # an admin chose this state
         db.commit()
         logger.info(f"Cleared core memory for user {user_id}")
-        return "Core memories cleared."
+        return "Core memories cleared. Send /memories undo to bring them back."
+
+    if sub == "undo":
+        # One level: swap the document with its backup, so a second undo
+        # re-applies it. In a group the backup is the last trusted state
+        # (agent/tools/memory.py backup_after_save).
+        mem = get_or_create_core_memory(db, user_id)
+        if mem.previous_content is None or mem.previous_content == mem.content:
+            return "Nothing to undo."
+        mem.content, mem.previous_content = mem.previous_content, mem.content
+        mem.content_trusted = True  # an admin chose this state
+        db.commit()
+        logger.info(f"Undid the last core memory change for user {user_id}")
+        if not mem.content:
+            return "Undone. Core memories are now empty."
+        return f"Undone. Your core memories are now:\n\n{mem.content}"
 
     mem = get_or_create_core_memory(db, user_id)
     if not mem.content:

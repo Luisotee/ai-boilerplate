@@ -2,7 +2,6 @@ import { config as dotenvConfig, parse as dotenvParse } from 'dotenv';
 import { existsSync, readFileSync } from 'fs';
 import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
-import { parseWhitelist } from './utils/whitelist.js';
 import { parseGroupGating } from './utils/gating.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -31,8 +30,6 @@ if (existsSync(localEnvPath)) {
   dotenvConfig({ path: localEnvPath, override: true });
 }
 
-const whitelistPhones = parseWhitelist(process.env.WHITELIST_PHONES || '');
-
 // GROUP_GATING=jid|membership — see utils/gating.ts. An unknown value falls back
 // to the stricter `jid` rather than failing startup.
 const groupGating = parseGroupGating(process.env.GROUP_GATING);
@@ -52,7 +49,13 @@ function parseNonNegativeInt(name: string, defaultValue: number): number {
 }
 
 export const config = {
-  whitelistPhones,
+  // The bot's name, shared with the AI API. Here it is one of the names a typed
+  // `@Name` group mention is matched against (utils/typed-mention.ts).
+  botName: (process.env.BOT_NAME || '').trim(),
+  // GROUP_MENTION_WINDOW_SECONDS: after a group message mentions the bot, the
+  // same sender's next message within this window counts as addressed (e.g. a
+  // voice note after "@bot"). 0 disables it.
+  mentionWindowMs: parseNonNegativeInt('GROUP_MENTION_WINDOW_SECONDS', 60) * 1000,
   groupGating: groupGating.mode,
   aiApiUrl: process.env.AI_API_URL || 'http://localhost:8000',
   logLevel: process.env.LOG_LEVEL || 'info',

@@ -104,6 +104,11 @@ class ConversationMessage(Base):
 
     timestamp = Column(DateTime, default=datetime.utcnow, nullable=False)
 
+    # The platform's own message id (WhatsApp key.id / wamid, Telegram
+    # message_id), so a later revoke or edit of that message can find the row.
+    # Null for assistant replies and for rows saved before this column existed.
+    whatsapp_message_id = Column(String, nullable=True, index=True)
+
     # Embeddings for semantic search (nullable)
     embedding = Column(Vector(3072), nullable=True)  # Google gemini-embedding-001
     embedding_generated_at = Column(DateTime, nullable=True)
@@ -146,6 +151,12 @@ class CoreMemory(Base):
         UUID(as_uuid=True), ForeignKey("users.id"), unique=True, nullable=False, index=True
     )
     content = Column(Text, nullable=False, default="")
+    # The backup `/memories undo` restores (agent/tools/memory.py backup_after_save).
+    previous_content = Column(Text, nullable=True)
+    # Whether `content` was last written by a trusted source (a private chat, a
+    # confirmed group admin, /memories clear or undo). An untrusted group save
+    # backs up only trusted content, so undo returns the last admin-era state.
+    content_trusted = Column(Boolean, default=True, server_default=text("true"), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -460,6 +471,28 @@ def get_or_create_user(
     return user
 
 
+def find_user(db, whatsapp_jid: str, phone: str | None = None) -> User | None:
+    """Look up a conversation's user row WITHOUT creating or merging anything.
+
+    Same resolution order as `get_or_create_user` (primary column, then LID,
+    then phone for WhatsApp), read-only, for callers that must act only on a
+    conversation that already exists (revoke/edit of a saved message).
+    """
+    if is_telegram_jid(whatsapp_jid):
+        return (
+            db.query(User).filter(User.telegram_jid == whatsapp_jid).first()
+            or db.query(User).filter(User.whatsapp_jid == whatsapp_jid).first()
+        )
+    user = db.query(User).filter(User.whatsapp_jid == whatsapp_jid).first()
+    if not user:
+        user = db.query(User).filter(User.whatsapp_lid == whatsapp_jid).first()
+    if not user and not is_group_jid(whatsapp_jid):
+        phone = phone or phone_from_jid(whatsapp_jid)
+        if phone:
+            user = db.query(User).filter(User.phone == phone).first()
+    return user
+
+
 def get_conversation_history(
     db,
     whatsapp_jid: str,
@@ -583,6 +616,7 @@ def save_message(
     phone: str = None,
     whatsapp_lid: str = None,
     name: str = None,
+    whatsapp_message_id: str = None,
 ):
     """Save a message to the database with optional group context and embedding
 
@@ -600,6 +634,7 @@ def save_message(
         sender_name=sender_name,
         embedding=embedding,
         embedding_generated_at=datetime.now(UTC) if embedding else None,
+        whatsapp_message_id=whatsapp_message_id,
     )
     db.add(message)
     db.commit()

@@ -16,6 +16,13 @@ interface DrainLog {
 }
 
 /**
+ * Update types this bot subscribes to, in both modes (polling here, webhook via
+ * `setWebhook` in main.ts). `edited_message` keeps saved history in step with
+ * edits (`updates.ts`); Telegram sends no update for a deletion.
+ */
+export const ALLOWED_UPDATES = ['message', 'edited_message'] as const;
+
+/**
  * Clear any registered webhook and start polling. Returns immediately — the
  * handle owns the poll loop; do NOT await `run()`.
  *
@@ -35,7 +42,7 @@ export async function startLongPolling(): Promise<RunnerHandle> {
   return run(bot, {
     runner: {
       fetch: {
-        allowed_updates: ['message'],
+        allowed_updates: [...ALLOWED_UPDATES],
         timeout: config.telegram.pollTimeoutSeconds,
       },
       // The runner's own default is 15 HOURS of exponential backoff before it

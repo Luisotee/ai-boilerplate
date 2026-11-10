@@ -35,11 +35,13 @@ import {
   primeGroup,
 } from './services/group-cache.js';
 import { groupHasWhitelistedMember } from './services/groups.js';
+import { getLiveWhitelist } from './services/live-whitelist.js';
 import { resolveSenderGroupAdmin } from './services/group-admin.js';
 import { handleTextMessage } from './handlers/text.js';
 import { transcribeAudioMessage } from './handlers/audio.js';
 import { extractImageData } from './handlers/image.js';
 import { extractDocumentData } from './handlers/document.js';
+import { handleMessageUpdate } from './handlers/message-events.js';
 import { sendFailureReaction } from './utils/reactions.js';
 import {
   stripDeviceSuffix,
@@ -51,12 +53,17 @@ import {
 } from './utils/jid.js';
 import { isWhitelisted } from './utils/whitelist.js';
 import { gateMessage, type Gate } from './utils/gating.js';
-import { shouldRespondInGroup } from './utils/message.js';
+import { carriesHandledContent, isBotMentioned, isReplyToBotMessage } from './utils/message.js';
+import { createMentionWindow } from './utils/mention-window.js';
 
 const DEFAULT_IMAGE_PROMPT = 'Please describe and analyze this image';
 const DEFAULT_DOCUMENT_PROMPT = 'I have uploaded a document for you to analyze';
 
 const AUTH_DIR = 'auth_info_baileys';
+
+// "@bot, then the question": the sender's next group message after a mention
+// counts as addressed (utils/mention-window.ts). Keyed `<group>|<participant>`.
+const mentionWindow = createMentionWindow(config.mentionWindowMs);
 
 /**
  * The whitelist gate for one incoming message (see utils/gating.ts).
@@ -78,7 +85,10 @@ async function resolveGate(
   isGroup: boolean,
   phone: string | undefined
 ): Promise<Gate> {
-  const wl = config.whitelistPhones;
+  // The AI API's effective whitelist (services/live-whitelist.ts). Unavailable
+  // → drop the message: the gate fails closed.
+  const wl = await getLiveWhitelist();
+  if (!wl) return { skip: true, suppressResponse: true };
   const whitelistEnabled = wl.size > 0;
   if (!whitelistEnabled) {
     return gateMessage({
@@ -576,6 +586,14 @@ export async function initializeWhatsApp(): Promise<void> {
     invalidateGroup(id);
   });
 
+  // Deleted-for-everyone and edited messages: keep saved history in step
+  // (handlers/message-events.ts). Silent, never throws.
+  sock.ev.on('messages.update', async (updates) => {
+    for (const entry of updates) {
+      await handleMessageUpdate(sock, entry, getLiveWhitelist);
+    }
+  });
+
   // Message handler
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     for (const msg of messages) {
@@ -642,8 +660,23 @@ export async function initializeWhatsApp(): Promise<void> {
         const botLid = sock.user?.lid ? stripDeviceSuffix(sock.user.lid) : undefined;
         // A kept group message is save-only when it isn't addressed to the bot,
         // or (GROUP_GATING=membership) its sender may not trigger a reply.
-        const saveOnly =
-          isGroup && (gate.suppressResponse || !shouldRespondInGroup(msg, botJid, botLid));
+        // Addressed = a mention (pill, or a typed @Name when there is no pill),
+        // a reply to the bot, or the sender's next message after a mention.
+        let addressed = false;
+        if (isGroup) {
+          const typedNames = [config.botName, sock.user?.name, botJid.split('@')[0]];
+          const windowKey = `${whatsappJid}|${stripDeviceSuffix(msg.key.participant ?? '')}`;
+          const mentioned = isBotMentioned(msg, botJid, botLid, typedNames);
+          // Only content the bot handles touches the window, so a reaction or
+          // an edit's protocol upsert between "@bot" and the question can't eat it.
+          const windowed = carriesHandledContent(normalizedMessage);
+          addressed =
+            mentioned ||
+            isReplyToBotMessage(msg, botJid, botLid) ||
+            (windowed && mentionWindow.consume(windowKey, Date.now()));
+          if (mentioned && windowed) mentionWindow.arm(windowKey, Date.now());
+        }
+        const saveOnly = isGroup && (gate.suppressResponse || !addressed);
 
         // Get text from normalized message or transcribe audio
         let text = normalizedMessage?.conversation || normalizedMessage?.extendedTextMessage?.text;

@@ -67,6 +67,7 @@ A production-ready AI agent system that brings conversational AI to WhatsApp wit
 | `/clean all` | Full reset (messages, documents, memories, preferences; bug reports keep only their metadata) |
 | `/memories` | Show saved core memories |
 | `/memories clear` | Delete all core memories |
+| `/memories undo` | Undo the last change to core memories (one level) |
 | `/link` | Get a code to link this account to your other platform (WhatsApp ↔ Telegram) |
 | `/link [code]` | Enter a code from the other platform to finish linking |
 | `/linkphone` | Telegram only: link by sharing your phone number (must match your WhatsApp number) |
@@ -315,10 +316,11 @@ pnpm format          # Format all code
 | `DATABASE_URL` | PostgreSQL connection string |
 | `REDIS_URL` | Redis connection string |
 | `AI_API_URL` | AI API endpoint for WhatsApp client |
-| `WHITELIST_PHONES` | Comma-separated phones / chat ids allowed to use the bot (empty = everyone) |
+| `WHITELIST_PHONES` | Comma-separated phones / chat ids allowed to use the bot (empty = everyone). Read by the AI API; the chat clients fetch its effective value live (`GET /chat/whitelist`) and drop messages if they can't |
 | `SHARED_GROUP_TOOLS_ENABLED` | `false` (default). When `true`, users can, in a private chat, read/search groups they share with the bot and ask it to post into one (Baileys + Telegram). Group transcripts then reach the LLM provider inside private conversations — see CLAUDE.md "Shared-group tools". Hot via `PATCH /admin/settings` |
 | `TELEGRAM_MODE` | `webhook` (default — Telegram POSTs to `/webhook`, needs a public HTTPS URL + `TELEGRAM_WEBHOOK_SECRET`) or `polling` (long polling via `@grammyjs/runner`: no public URL or tunnel; one process per bot token). Group chats need privacy mode OFF in @BotFather (`/setprivacy` → Disable; then remove and re-add the bot) |
 | `GROUP_GATING` | How a group gets in scope when the whitelist is set: `jid` (default — the group's own id must be listed) or `membership` (Baileys: any group with a whitelisted member; Telegram: any group; the bot saves all messages there but replies only to whitelisted senders). Read by the AI API and the Baileys/Telegram clients |
+| `GROUP_MENTION_WINDOW_SECONDS` | After a group message mentions the bot, that sender's next message within this many seconds also counts as addressed ("@bot", then a voice note). Default 60; 0 disables. Baileys and Telegram |
 | `POLL_MAX_DURATION_MS` | How long a client waits for a reply (default `120000`). Read by the AI API too: a reply ready later is pushed to the chat, and the client tells the user it is coming |
 | `CHAT_BURST_QUIET_MS` / `CHAT_BURST_MAX_WAIT_MS` | Burst merging: once a user's message is pending, the worker waits for this much quiet (default `2000`; `0` = off), at most `8000` ms in total, and answers the sender's pending messages (and their images) in one run with one reply. The Telegram client uses the quiet period for albums |
 | `AGENT_REQUEST_LIMIT` | Most model requests one agent run may make (default `10`); a model looping on tools gets the fallback reply instead |

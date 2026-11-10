@@ -272,6 +272,7 @@ async def save_message_only(request: SaveMessageRequest, db: Session = Depends(g
             phone=request.phone,
             whatsapp_lid=request.whatsapp_lid,
             name=_display_name(request),
+            whatsapp_message_id=request.whatsapp_message_id,
         )
 
         return {"success": True}
@@ -517,6 +518,7 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
             phone=chat_request.phone,
             whatsapp_lid=chat_request.whatsapp_lid,
             name=_display_name(chat_request),
+            whatsapp_message_id=chat_request.whatsapp_message_id,
         )
 
         # Add message to user's Redis Stream for sequential processing
@@ -818,6 +820,7 @@ async def chat(request: Request, chat_request: ChatRequest, db: Session = Depend
             phone=chat_request.phone,
             whatsapp_lid=chat_request.whatsapp_lid,
             name=_display_name(chat_request),
+            whatsapp_message_id=chat_request.whatsapp_message_id,
         )
 
         # Prepare agent dependencies for semantic search tool (dependency injection)

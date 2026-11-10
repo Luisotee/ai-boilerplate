@@ -409,3 +409,49 @@ export async function transcribeAudio(
     return null;
   }
 }
+
+export interface MessageEvent {
+  whatsappJid: string;
+  messageId: string;
+  /** Who deleted/edited it (group participant), resolved like on save. */
+  senderJid?: string;
+  phone?: string;
+}
+
+/**
+ * Forward a platform edit or revoke to the AI API (`/chat/edit`,
+ * `/chat/revoke`), which updates or deletes the saved copy. Best-effort:
+ * returns the number of rows changed, or null on any failure (never throws),
+ * so a history-maintenance hiccup can't affect message handling.
+ */
+async function postMessageEvent(
+  path: '/chat/edit' | '/chat/revoke',
+  body: Record<string, unknown>
+): Promise<number | null> {
+  try {
+    const response = await fetchWithTimeout(
+      `${config.aiApiUrl}${path}`,
+      { method: 'POST', headers: aiApiHeaders('application/json'), body: JSON.stringify(body) },
+      config.timeouts.default
+    );
+    if (!response.ok) {
+      logger.warn({ path, status: response.status }, 'Message event not applied');
+      return null;
+    }
+    const data = (await response.json()) as { changed?: number };
+    return data.changed ?? 0;
+  } catch (error) {
+    logger.warn({ path, error }, 'Failed to forward message event');
+    return null;
+  }
+}
+
+export function editMessage(event: MessageEvent, newText: string): Promise<number | null> {
+  return postMessageEvent('/chat/edit', {
+    whatsapp_jid: event.whatsappJid,
+    whatsapp_message_id: event.messageId,
+    message: newText,
+    sender_jid: event.senderJid,
+    phone: event.phone,
+  });
+}

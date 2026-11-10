@@ -830,6 +830,50 @@ class TestSyncChatMarkdownSanitising:
         assert saved == [expected]
 
 
+class TestSyncChatMessageId:
+    """The sync /chat path saves the platform message id like /chat/save and
+    /chat/enqueue, so /chat/revoke and /chat/edit can find the row."""
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_user_message_is_saved_with_its_message_id(self, *_):
+        async def streaming(*_args, **_kwargs):
+            yield "ok"
+
+        mock_db = _make_mock_db()
+        mock_user = make_user(whatsapp_jid=TEST_JID)
+        with (
+            _patch_whitelist(),
+            patch("ai_api.routes.chat.get_conversation_history", return_value=[]),
+            patch("ai_api.routes.chat.get_or_create_user", return_value=mock_user),
+            patch("ai_api.routes.chat.create_embedding_service", return_value=None),
+            patch("ai_api.routes.chat.save_message") as mock_save,
+            patch("ai_api.routes.chat.get_ai_response", streaming),
+        ):
+            app = _get_app_with_db_override(mock_db)
+            try:
+                transport = ASGITransport(app=app)
+                async with AsyncClient(transport=transport, base_url="http://test") as client:
+                    response = await client.post(
+                        "/chat",
+                        json={
+                            "whatsapp_jid": TEST_JID,
+                            "message": "Hi",
+                            "conversation_type": "private",
+                            "whatsapp_message_id": "MSG-1",
+                        },
+                        headers=AUTH_HEADERS,
+                    )
+            finally:
+                _cleanup_overrides()
+
+        assert response.status_code == 200
+        user_saves = [c for c in mock_save.call_args_list if c.args[2] == "user"]
+        assert len(user_saves) == 1
+        assert user_saves[0].kwargs["whatsapp_message_id"] == "MSG-1"
+
+
 # ---------------------------------------------------------------------------
 # Whitelist — exercised for real (no _is_whitelisted patch)
 # ---------------------------------------------------------------------------

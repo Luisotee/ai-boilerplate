@@ -4,6 +4,11 @@
  * Real registerUpdateHandlers() + middleware, driven by bot.handleUpdate.
  */
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
+
+// The whitelist comes from the AI API now; serve WHITELIST_PHONES from the env.
+vi.mock('../../src/services/live-whitelist.js', async () =>
+  (await import('../helpers/live-whitelist-env.js')).envWhitelistMock()
+);
 import type { Update, UserFromGetMe } from 'grammy/types';
 
 vi.mock('../../src/api-client.js', () => ({
