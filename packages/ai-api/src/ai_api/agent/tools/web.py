@@ -26,9 +26,6 @@ async def web_search(ctx: RunContext[AgentDeps], query: str) -> str:
     Args:
         ctx: Run context (unused but required by decorator)
         query: The search query - be specific for better results
-
-    Returns:
-        Formatted search results with titles, snippets, and source URLs
     """
     logger.info("=" * 80)
     logger.info("🌐 TOOL CALLED: web_search")
@@ -86,9 +83,6 @@ async def fetch_website(ctx: RunContext[AgentDeps], url: str) -> str:
     Args:
         ctx: Run context with HTTP client
         url: The full URL to fetch (must start with http:// or https://)
-
-    Returns:
-        Page content as clean markdown, or error message
     """
     logger.info("=" * 80)
     logger.info("📄 TOOL CALLED: fetch_website")

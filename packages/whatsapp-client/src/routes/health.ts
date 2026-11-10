@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
-import { isBaileysReady } from '../services/baileys.js';
+import { getConnectionHealth, isBaileysReady } from '../services/baileys.js';
 import { HealthResponseSchema, ReadyResponseSchema } from '../schemas/messaging.js';
 
 export async function registerHealthRoutes(app: FastifyInstance) {
@@ -20,6 +20,7 @@ export async function registerHealthRoutes(app: FastifyInstance) {
       return {
         status: 'healthy',
         whatsapp_connected: isBaileysReady(),
+        ...getConnectionHealth(),
       };
     }
   );

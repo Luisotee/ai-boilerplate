@@ -5,6 +5,15 @@ from ...logger import logger
 from ..core import AgentDeps
 
 
+def is_trusted_sender(deps: AgentDeps) -> bool:
+    """A private chat, or a group sender the client confirmed as admin.
+
+    Fails closed: in a group anything but an explicit True (unknown, lookup
+    failed, older client) is not trusted.
+    """
+    return not is_group_jid(deps.whatsapp_jid) or deps.is_group_admin is True
+
+
 def group_admin_refusal(deps: AgentDeps, what: str, command: str) -> str | None:
     """Refusal text if this run may not change ``what`` for the group; None if it may.
 
@@ -14,7 +23,7 @@ def group_admin_refusal(deps: AgentDeps, what: str, command: str) -> str | None:
     client) is refused. Otherwise any member could ask the bot in plain words
     to do what the slash command reserves for admins.
     """
-    if not is_group_jid(deps.whatsapp_jid) or deps.is_group_admin is True:
+    if is_trusted_sender(deps):
         return None
     logger.info("Tool refused in group %s: sender is not a confirmed admin", deps.whatsapp_jid)
     return f"Only a group admin can {what}. An admin can ask me, or send {command}."

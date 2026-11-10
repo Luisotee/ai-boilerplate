@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from ai_api.agent.tools._group import group_admin_refusal
-from ai_api.agent.tools.settings import update_stt_settings, update_tts_settings
+from ai_api.agent.tools.settings import settings
 
 GROUPS = ["120363012345678@g.us", "tg:-1001234567890"]
 
@@ -43,8 +43,8 @@ class TestGroupAdminRefusal:
 @pytest.mark.parametrize(
     "call",
     [
-        lambda ctx: update_tts_settings(ctx, enabled=True),
-        lambda ctx: update_stt_settings(ctx, language="pt"),
+        lambda ctx: settings(ctx, "tts", enabled=True),
+        lambda ctx: settings(ctx, "stt", language="pt"),
     ],
     ids=["tts", "stt"],
 )

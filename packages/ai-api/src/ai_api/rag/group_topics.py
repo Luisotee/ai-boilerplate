@@ -483,7 +483,7 @@ def store_block(
     """Store a block's topics and move the cursor past it, in ONE transaction.
 
     Returns False (storing nothing) when the block's last message is gone: a
-    /clean ran meanwhile. ``FOR SHARE`` on that row makes /clean's DELETE wait
+    /clean or a revoke (``/chat/revoke``) ran meanwhile. ``FOR SHARE`` on that row makes /clean's DELETE wait
     for this commit, after which it also deletes these topics.
     """
     last = block.last
@@ -627,7 +627,9 @@ async def ingest_group(
             return result  # keep order: later blocks wait for this one
 
         if not stored:
-            logger.info(f"Group topics: group {group_id} was cleaned meanwhile, stopping")
+            logger.info(
+                f"Group topics: group {group_id} lost messages meanwhile (/clean or a revoke), stopping"
+            )
             return result
         await _forget_summary(redis, block)
         result.blocks_done += 1

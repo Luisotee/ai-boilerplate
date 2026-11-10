@@ -8,3 +8,17 @@
   - Dollar costs come from the `genai-prices` dataset, resolved per model name, so a hot `gemini_model` switch via `PATCH /admin/settings` is costed correctly with no local price table. Note `logfire` and `genai-prices` are **not new installs** — `pydantic-ai` already pulls `pydantic-ai-slim[…,logfire,…]`, and `genai-prices` is an unconditional dep of `pydantic-ai-slim`. The `pyproject.toml` entries are version floors that make the reliance explicit
   - Tests force it off via `os.environ["LOGFIRE_TOKEN"] = ""` in `tests/conftest.py`. Note `LOGFIRE_SEND_TO_LOGFIRE` would **not** work there: `load_param` short-circuits on an explicit runtime kwarg before consulting env, and `instrument.py` always passes `send_to_logfire`
   - `LOGFIRE_TOKEN` / `LOGFIRE_ENVIRONMENT` reach both containers through `env_file: .env` — no `docker-compose.yml` entry needed. Both are `hot=False` in the `runtime_config` REGISTRY (read once at startup; restart to change). `.logfire/` is gitignored — `logfire auth` writes a live write token there
+  - **Prompt-cache hits**: every model-request span carries `gen_ai.usage.input_tokens` and, when the provider served part of the prompt from its cache, `gen_ai.usage.details.cache_read_tokens` (pinned by `test_instrument.py` `TestCacheTokensReachLogfire`). DeepSeek also reports its raw `gen_ai.usage.details.prompt_cache_hit_tokens`, Gemini `gen_ai.usage.details.cached_content_tokens`. Without Logfire, the worker logs one content-free line per run: `📊 Agent usage: requests=… input_tokens=… cached_input_tokens=… (…%) output_tokens=…` (`agent/response.py` `log_usage`). Daily hit ratio in Logfire's SQL explorer:
+    ```sql
+    SELECT date_trunc('day', start_timestamp) AS day,
+           attributes->>'gen_ai.request.model' AS model,
+           sum(CAST(attributes->>'gen_ai.usage.input_tokens' AS BIGINT)) AS input_tokens,
+           sum(CAST(coalesce(attributes->>'gen_ai.usage.details.cache_read_tokens',
+                             attributes->>'gen_ai.usage.details.prompt_cache_hit_tokens', '0') AS BIGINT)) AS cached_tokens
+    FROM records
+    WHERE service_name = 'ai-api-worker'
+      AND attributes->>'gen_ai.usage.input_tokens' IS NOT NULL
+    GROUP BY day, model
+    ORDER BY day DESC
+    ```
+    What raises it: instructions that are the same for every run up to the per-chat core memory (`inject_core_memory` stays the last hook), a tool list that doesn't change between messages of one chat (`prepare` hooks never depend on the sender), and the stepped history window (`HISTORY_WINDOW_STEP`, `database.stepped_window_start`)

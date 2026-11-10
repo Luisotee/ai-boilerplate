@@ -35,6 +35,7 @@ from sqlalchemy.orm import Session
 
 from ..database import User, is_group_jid, is_telegram_jid
 from ..logger import logger
+from .api_keys import move_api_keys
 from .bug_reports import scrub_user_reports
 
 # Error codes
@@ -230,6 +231,8 @@ def try_autolink(
         )
         # The orphan's messages are discarded, so are its reports' copies of them.
         scrub_user_reports(db, telegram_user.id)
+        # A web key linked to the Telegram row follows it (services/api_keys.py).
+        move_api_keys(db, telegram_user.id, whatsapp_user.id)
         db.delete(telegram_user)  # cascade clears messages/prefs/core_memory
         db.commit()
     except Exception:

@@ -79,11 +79,19 @@ class Settings(BaseSettings):
     rate_limit_global: int = 30  # requests per minute
     rate_limit_expensive: int = 5  # requests per minute for expensive ops
 
+    # OpenAI-compatible /v1 API (routes/openai_compat.py): the model id
+    # GET /v1/models lists and every completion echoes back.
+    openai_api_model_id: str = "ai-agent"
+
     # Redis
     redis_host: str = "localhost"
     redis_port: int = 6379
     redis_db: int = 0
     redis_password: str | None = None
+
+    # Instance name (the root .env's SERVICE_NAME, also used by Compose). It
+    # prefixes Redis keys that must not clash when several bots share a Redis.
+    service_name: str = "aiagent"
 
     # Queue
     # TTL (seconds) of job metadata in Redis. Keeps its legacy ARQ_KEEP_RESULT
@@ -91,10 +99,33 @@ class Settings(BaseSettings):
     arq_keep_result: int = 3600
     queue_chunk_ttl: int = 3600
     queue_per_user_max_jobs: int = 1
+    # The clients' polling budget for one reply (root .env POLL_MAX_DURATION_MS,
+    # shared with them). A job that finishes after it is delivered by push.
+    poll_max_duration_ms: int = 120000
+    # A chat job older than this when the worker gets to it is not run; the
+    # user gets a short "send it again" notice instead (an outage backlog).
+    chat_job_max_age_seconds: int = 3600
+    # Burst merging: after a user's first pending message the worker waits for
+    # this much quiet (ms) and answers everything that arrived in one run.
+    # 0 disables it. The Telegram client uses the same value for albums.
+    chat_burst_quiet_ms: int = 2000
+    # ...but never waits longer than this in total (ms) for a burst to end.
+    chat_burst_max_wait_ms: int = 8000
+
+    # Agent loop cap: model requests in one run (tool round-trips + the answer).
+    # Pydantic AI's own default is 50, each request carrying every tool schema.
+    agent_request_limit: int = 10
 
     # History
     history_limit_private: int = 20
     history_limit_group: int = 30
+    # The injected history starts at a fixed message and moves forward in
+    # steps of this many messages (database.stepped_window_start), so its
+    # prefix repeats across runs and the provider's prompt cache can serve it.
+    # 1 (or 0) = the plain sliding window of exactly the limit. Off by default:
+    # on Gemini (implicit cache) a 10-step window measured no cache gain and
+    # ~6% more input tokens; it targets DeepSeek's prefix cache.
+    history_window_step: int = 1
     # How the bot's own lines are labelled in transcripts the agent reads back
     # (get_chat_history). Overridable at runtime via /admin.
     bot_name: str = "Assistant"
@@ -138,6 +169,17 @@ class Settings(BaseSettings):
     # "HH:MM-HH:MM" in broadcast_timezone (may wrap midnight); empty = any time.
     broadcast_send_window: str = "09:00-21:00"
     broadcast_timezone: str = "UTC"
+
+    # Bot time zone: what "every day at 9:00" means for scheduled tasks
+    # (services/schedule.py). Empty = broadcast_timezone. Never the server's.
+    bot_timezone: str = ""
+
+    # Scheduled tasks and reminders (manage_scheduled_tasks tool, fired by the
+    # stream worker's scheduler). All hot via /admin.
+    scheduled_tasks_enabled: bool = True
+    scheduled_tasks_max_per_chat: int = Field(10, ge=1, le=1000)
+    scheduled_tasks_min_interval_minutes: int = Field(60, ge=1, le=10080)
+    scheduled_tasks_max_runs_per_day: int = Field(24, ge=1, le=1000)
 
     # Token Management
     max_context_tokens: int = 50000
@@ -296,6 +338,8 @@ class Settings(BaseSettings):
         # PATCH /admin/settings validates overrides the same way.
         parse_send_window(self.broadcast_send_window)
         parse_timezone(self.broadcast_timezone)
+        if self.bot_timezone:
+            parse_timezone(self.bot_timezone)
         if len(self.broadcast_footer) > 500:
             raise ValueError("BROADCAST_FOOTER is too long (max 500 characters)")
         if self.broadcast_min_delay_seconds > self.broadcast_max_delay_seconds:

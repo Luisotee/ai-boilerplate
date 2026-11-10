@@ -81,6 +81,11 @@ class TestCandidateRoutes:
     def test_unlinked_telegram_row(self):
         assert candidate_routes(user("tg:42")) == [Route("telegram", "tg:42")]
 
+    def test_web_and_terminal_rows_have_no_route(self):
+        """A web:/cli: row (surfaces.py) is not a WhatsApp address."""
+        assert candidate_routes(user("web:abc")) == []
+        assert candidate_routes(user("cli:luis")) == []
+
     def test_legacy_whatsapp_row_defaults_to_baileys(self):
         u = user()
         assert candidate_routes(u) == [Route("baileys", u.whatsapp_jid)]

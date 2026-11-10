@@ -2,7 +2,7 @@
 """
 Redis Streams worker entry point.
 
-Runs four tasks side by side in one process:
+Runs six tasks side by side in one process:
 
 - the chat consumer (``streams/consumer.py``) — per-user sequential processing
   of chat messages, concurrent across users
@@ -11,11 +11,16 @@ Runs four tasks side by side in one process:
 - the broadcast consumer (``streams/broadcast_consumer.py``) — operator
   broadcasts from ``POST /admin/broadcasts``, paced per platform; only one
   worker process sends at a time (Redis lease)
+- the scheduler (``streams/scheduler.py``) — fires due scheduled tasks
+  (``SELECT … FOR UPDATE SKIP LOCKED``): reminders straight to the sender,
+  agent tasks onto the chats' own streams
+- the scheduled sender (``streams/scheduled_sender.py``) — sends the ready
+  scheduled messages: a paced Baileys lane and a Telegram/Cloud lane
 - the group-topics loop (``streams/group_topics.py``) — summarises finished
   group conversations into searchable topics when ``group_topics_enabled``
 
 If any task stops, the worker exits non-zero so the process supervisor
-(Docker ``restart: unless-stopped``) restarts it with all of them healthy.
+(Docker ``restart: unless-stopped``) restarts it with every task healthy.
 
 It runs ``init_db()`` first, like the API, so tables a worker task needs (the
 group-topics ones) exist even when the worker starts before the API.
@@ -34,6 +39,8 @@ from ..streams.broadcast_consumer import run_broadcast_consumer
 from ..streams.consumer import run_stream_consumer
 from ..streams.group_topics import run_group_topics_loop
 from ..streams.pdf_consumer import run_pdf_consumer
+from ..streams.scheduled_sender import run_scheduled_sender
+from ..streams.scheduler import run_scheduler
 
 #: init_db() tries before giving up, and the pause between them. The API runs
 #: init_db() at the same moment on a fresh deploy, and two concurrent
@@ -79,6 +86,8 @@ async def main() -> int:
         asyncio.create_task(run_stream_consumer(redis), name="chat-consumer"),
         asyncio.create_task(run_pdf_consumer(redis), name="pdf-consumer"),
         asyncio.create_task(run_broadcast_consumer(redis), name="broadcast-consumer"),
+        asyncio.create_task(run_scheduler(redis), name="scheduler"),
+        asyncio.create_task(run_scheduled_sender(), name="scheduled-sender"),
         asyncio.create_task(run_group_topics_loop(redis), name="group-topics"),
     }
     try:

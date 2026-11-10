@@ -24,6 +24,13 @@ pnpm dev:telegram                       # Start Telegram client (port 3003)
 pnpm dev:queue                          # Start the stream worker (chat + PDF + broadcast consumers; required for replies, PDF processing AND broadcasts)
 pnpm install:all                        # Install Node + Python dependencies
 
+# Terminal chat and API keys (docs: packages/ai-api/docs/openai-api.md)
+docker compose exec api python -m ai_api.scripts.chat --name luis          # chat as cli:luis through the real pipeline
+cd packages/ai-api && uv run python -m ai_api.scripts.chat                  # same, local dev (needs dev:server + dev:queue)
+docker compose exec api python -m ai_api.scripts.api_keys create --name "Ana web"   # issue a /v1 key (printed once)
+docker compose exec api python -m ai_api.scripts.api_keys list              # list keys (never the keys themselves)
+docker compose exec api python -m ai_api.scripts.api_keys revoke sk-AbCdEfG # revoke by prefix or id
+
 # Linting & Formatting
 pnpm lint                               # Check TypeScript (ESLint) + Python (Ruff)
 pnpm lint:fix                           # Auto-fix lint issues

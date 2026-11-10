@@ -18,6 +18,7 @@ import { extractAndTranscribeAudio } from '../handlers/audio.js';
 import { extractImageData } from '../handlers/image.js';
 import { extractDocumentData } from '../handlers/document.js';
 import { isWhitelisted } from '../utils/whitelist.js';
+import { getLiveWhitelist } from '../services/live-whitelist.js';
 import { phoneToJid } from '../utils/jid.js';
 
 export async function registerWebhookRoutes(app: FastifyInstance) {
@@ -151,8 +152,12 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
  * lets `+49…`, spaced, and JID-form entries all work. Group JID entries remain
  * inert on Cloud — a documented platform limitation, not a matcher one.
  */
-function passesWhitelist(senderPhone: string): boolean {
-  return isWhitelisted(config.whitelistPhones, phoneToJid(senderPhone), `+${senderPhone}`);
+async function passesWhitelist(senderPhone: string): Promise<boolean> {
+  // The AI API's effective whitelist (services/live-whitelist.ts); unavailable
+  // → drop (fail closed).
+  const wl = await getLiveWhitelist();
+  if (!wl) return false;
+  return isWhitelisted(wl, phoneToJid(senderPhone), `+${senderPhone}`);
 }
 
 /**
@@ -173,7 +178,7 @@ async function processWebhookMessages(body: WebhookBody): Promise<void> {
     const messageId = message.id;
 
     // Whitelist check: skip non-whitelisted phones
-    if (!passesWhitelist(senderPhone)) {
+    if (!(await passesWhitelist(senderPhone))) {
       logger.info({ senderPhone }, 'Skipping non-whitelisted phone');
       continue;
     }

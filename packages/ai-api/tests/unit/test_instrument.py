@@ -89,3 +89,40 @@ class TestContentExclusion:
 
         assert attrs.get("gen_ai.usage.input_tokens", 0) > 0
         assert attrs.get("gen_ai.usage.output_tokens", 0) > 0
+
+
+class TestCacheTokensReachLogfire:
+    """Prompt-cache hits are recorded per model request, with no extra code.
+
+    pydantic-ai puts the request's usage on its span as ``gen_ai.usage.*``;
+    cached input tokens land in ``gen_ai.usage.details.cache_read_tokens``.
+    That is the number to chart in Logfire (docs/logfire.md).
+    """
+
+    def test_cache_read_tokens_are_a_span_attribute(self):
+        from logfire.testing import TestExporter
+        from pydantic_ai.messages import ModelResponse, TextPart
+        from pydantic_ai.models.function import FunctionModel
+        from pydantic_ai.usage import RequestUsage
+
+        def respond(messages, info):
+            return ModelResponse(
+                parts=[TextPart("ok")],
+                usage=RequestUsage(input_tokens=1200, cache_read_tokens=900, output_tokens=5),
+            )
+
+        exporter = TestExporter()
+        logfire.configure(
+            send_to_logfire=False,
+            console=False,
+            additional_span_processors=[SimpleSpanProcessor(exporter)],
+        )
+        logfire.instrument_pydantic_ai(include_content=False)
+        try:
+            Agent(FunctionModel(respond), name="cache_probe").run_sync("hi")
+        finally:
+            Agent.instrument_all(False)
+
+        attrs = [dict(span.attributes or {}) for span in exporter.exported_spans]
+        assert any(a.get("gen_ai.usage.details.cache_read_tokens") == 900 for a in attrs)
+        assert any(a.get("gen_ai.usage.input_tokens") == 1200 for a in attrs)

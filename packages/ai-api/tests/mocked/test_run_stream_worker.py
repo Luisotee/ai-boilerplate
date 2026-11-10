@@ -1,4 +1,5 @@
-"""The stream worker runs the chat, PDF and broadcast consumers, and exits if any stops."""
+"""The stream worker runs the chat, PDF, broadcast, scheduler and scheduled-sender tasks,
+and exits if any stops."""
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -8,14 +9,18 @@ import pytest
 from ai_api.scripts import run_stream_worker
 
 
-async def _idle_consumer(_redis):
+async def _idle_consumer(_redis=None):
     await asyncio.sleep(3600)
 
 
 @pytest.fixture(autouse=True)
 def idle_broadcast_consumer():
-    """Keep the real broadcast consumer (Redis lease + DB polling) out of these tests."""
-    with patch.object(run_stream_worker, "run_broadcast_consumer", _idle_consumer):
+    """Keep the real broadcast consumer, scheduler and sender (DB polling) out of these tests."""
+    with (
+        patch.object(run_stream_worker, "run_broadcast_consumer", _idle_consumer),
+        patch.object(run_stream_worker, "run_scheduler", _idle_consumer),
+        patch.object(run_stream_worker, "run_scheduled_sender", _idle_consumer),
+    ):
         yield
 
 
@@ -31,6 +36,42 @@ def idle_group_topics_loop():
     """Keep the real group-topics loop (runtime_config + Redis lease) out of these tests."""
     with patch.object(run_stream_worker, "run_group_topics_loop", _idle_consumer):
         yield
+
+
+@pytest.mark.asyncio
+async def test_a_crashed_scheduler_stops_the_worker():
+    async def scheduler(_redis):
+        raise RuntimeError("boom")
+
+    fake_redis = MagicMock()
+    fake_redis.aclose = AsyncMock()
+    with (
+        patch.object(run_stream_worker, "setup_instrumentation"),
+        patch.object(run_stream_worker, "Redis", return_value=fake_redis),
+        patch.object(run_stream_worker, "run_stream_consumer", _idle_consumer),
+        patch.object(run_stream_worker, "run_pdf_consumer", _idle_consumer),
+        patch.object(run_stream_worker, "run_scheduler", scheduler),
+    ):
+        code = await asyncio.wait_for(run_stream_worker.main(), timeout=5)
+    assert code == 1
+
+
+@pytest.mark.asyncio
+async def test_a_crashed_scheduled_sender_stops_the_worker():
+    async def sender():
+        raise RuntimeError("boom")
+
+    fake_redis = MagicMock()
+    fake_redis.aclose = AsyncMock()
+    with (
+        patch.object(run_stream_worker, "setup_instrumentation"),
+        patch.object(run_stream_worker, "Redis", return_value=fake_redis),
+        patch.object(run_stream_worker, "run_stream_consumer", _idle_consumer),
+        patch.object(run_stream_worker, "run_pdf_consumer", _idle_consumer),
+        patch.object(run_stream_worker, "run_scheduled_sender", sender),
+    ):
+        code = await asyncio.wait_for(run_stream_worker.main(), timeout=5)
+    assert code == 1
 
 
 @pytest.mark.asyncio

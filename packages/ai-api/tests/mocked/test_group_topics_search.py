@@ -94,7 +94,9 @@ async def test_group_without_topics_falls_back_to_messages(enabled, message_sear
     message_search.assert_awaited_once()
 
 
-@pytest.mark.parametrize("jid", ["5511999999999@s.whatsapp.net", "tg:12345"])
+@pytest.mark.parametrize(
+    "jid", ["5511999999999@s.whatsapp.net", "tg:12345", "web:3f2a", "cli:laptop"]
+)
 async def test_private_chat_never_reads_topics(enabled, message_search, jid):
     with patch(f"{MODULE}.search_group_topics") as topics:
         await search_conversation_history(_ctx(jid), "the trip")

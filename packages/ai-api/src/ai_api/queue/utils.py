@@ -143,8 +143,9 @@ async def delete_job_data(redis: Redis, job_id: str) -> None:
     meta_key = f"job:meta:{job_id}"
     result_key = f"job:result:{job_id}"
     image_key = f"job:image:{job_id}"
+    media_keys = [_media_key(job_id, i) for i in range(MAX_JOB_MEDIA)]
 
-    await redis.delete(chunk_key, meta_key, result_key, image_key)
+    await redis.delete(chunk_key, meta_key, result_key, image_key, *media_keys)
     logger.info(f"Deleted all data for job {job_id}")
 
 
@@ -187,14 +188,72 @@ async def get_job_image(redis: Redis, job_id: str) -> str | None:
     return None
 
 
+async def save_job_images(redis: Redis, job_id: str, images: list[dict[str, str]]) -> None:
+    """
+    Store several images of one job (an album) as one JSON list.
+
+    Args:
+        redis: Redis client instance
+        job_id: Unique job identifier
+        images: [{"data": <base64>, "mimetype": <type>}, ...]
+    """
+    await redis.set(f"job:images:{job_id}", json.dumps(images), ex=settings.queue_chunk_ttl)
+    logger.info(f"Stored {len(images)} images for job {job_id}")
+
+
+async def get_job_images(
+    redis: Redis, job_id: str, mimetype: str | None, count: int = 1
+) -> list[tuple[str, str]]:
+    """
+    All images of a job as (base64, mimetype) pairs.
+
+    One image lives under the single-image key (save_job_image, which jobs
+    queued before albums existed also use); several under job:images.
+    """
+    if count > 1:
+        raw = await redis.get(f"job:images:{job_id}")
+        if not raw:
+            return []
+        try:
+            return [(item["data"], item["mimetype"]) for item in json.loads(raw)]
+        except (ValueError, KeyError, TypeError) as e:
+            logger.error(f"Failed to parse images for job {job_id}: {e}")
+            return []
+    data = await get_job_image(redis, job_id)
+    return [(data, mimetype)] if data and mimetype else []
+
+
 async def delete_job_image(redis: Redis, job_id: str) -> None:
     """
-    Delete image data from Redis.
+    Delete a job's image data (single image or album) from Redis.
 
     Args:
         redis: Redis client instance
         job_id: Unique job identifier
     """
-    image_key = f"job:image:{job_id}"
-    await redis.delete(image_key)
+    await redis.delete(f"job:image:{job_id}", f"job:images:{job_id}")
     logger.debug(f"Deleted image for job {job_id}")
+
+
+#: Most images one reply may carry (see reply_media.py).
+MAX_JOB_MEDIA = 4
+#: Reply image bytes are fetched by the client right after the job completes,
+#: so they need far less time than chunks (up to 4 x 5 MB per job).
+JOB_MEDIA_TTL_SECONDS = 600
+
+
+def _media_key(job_id: str, index: int) -> str:
+    return f"job:media:{job_id}:{index}"
+
+
+async def save_job_media(redis: Redis, job_id: str, index: int, data: bytes) -> None:
+    """Store one reply image's raw bytes, for the client to fetch and send."""
+    await redis.set(_media_key(job_id, index), data, ex=JOB_MEDIA_TTL_SECONDS)
+
+
+async def get_job_media(redis: Redis, job_id: str, index: int) -> bytes | None:
+    """Raw bytes of reply image `index` of `job_id`, or None once expired."""
+    data = await redis.get(_media_key(job_id, index))
+    if data is None:
+        return None
+    return data if isinstance(data, bytes) else data.encode("latin-1")

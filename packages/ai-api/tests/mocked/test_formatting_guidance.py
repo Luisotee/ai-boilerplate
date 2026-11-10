@@ -8,6 +8,7 @@ and must reach the model whatever the base prompt is.
 
 from unittest.mock import MagicMock, patch
 
+import pytest
 from pydantic_ai.models.test import TestModel
 
 from ai_api.agent.core import (
@@ -63,3 +64,22 @@ class TestDefaultPrompt:
 
     def test_default_prompt_describes_get_chat_history(self):
         assert "get_chat_history" in DEFAULT_SYSTEM_PROMPT
+
+
+class TestWebSurfaceGuidance:
+    """The /v1 web surface renders Markdown, so it gets the Markdown rule."""
+
+    @pytest.mark.parametrize(
+        "client_id,jid", [("web", "5511999999999@s.whatsapp.net"), (None, "web:abc")]
+    )
+    async def test_web_gets_the_markdown_rule(self, client_id, jid):
+        ctx = MagicMock()
+        ctx.deps.client_id, ctx.deps.whatsapp_jid = client_id, jid
+        text = await formatting_guidance(ctx)
+        assert "renders Markdown" in text
+        assert "*bold* (ONE asterisk)" not in text
+
+    async def test_terminal_chat_keeps_the_whatsapp_rule(self):
+        ctx = MagicMock()
+        ctx.deps.client_id, ctx.deps.whatsapp_jid = None, "cli:luis"
+        assert "ONE asterisk" in await formatting_guidance(ctx)

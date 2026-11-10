@@ -10,7 +10,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { GrammyError } from 'grammy';
 import { bot } from '../../src/bot.js';
-import { sendReaction, sendText } from '../../src/services/telegram-api.js';
+import { sendImage, sendReaction, sendText } from '../../src/services/telegram-api.js';
 
 function makeGrammyError(errorCode: number, description: string): GrammyError {
   // GrammyError's constructor signature: (message, errorObj, method, payload).
@@ -133,5 +133,57 @@ describe('sendText', () => {
       reply_parameters: { message_id: 55 },
     });
     expect(sendMessageSpy.mock.calls[1][2]).not.toHaveProperty('reply_parameters');
+  });
+});
+
+describe('sendImage', () => {
+  let sendPhotoSpy: ReturnType<typeof vi.spyOn>;
+  const png = Buffer.from('png');
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    sendPhotoSpy = vi.spyOn(bot.api, 'sendPhoto');
+  });
+
+  it('sends the caption as Telegram HTML and quotes the given message', async () => {
+    sendPhotoSpy.mockResolvedValueOnce({ message_id: 9 } as never);
+
+    await expect(sendImage(1, png, 'image.png', 'Fire *map*', 42)).resolves.toBe(9);
+    expect(sendPhotoSpy.mock.calls[0][2]).toEqual({
+      caption: 'Fire <b>map</b>',
+      parse_mode: 'HTML',
+      reply_parameters: { message_id: 42, allow_sending_without_reply: true },
+    });
+  });
+
+  it('sends no caption or reply parameters when none are given', async () => {
+    sendPhotoSpy.mockResolvedValueOnce({ message_id: 9 } as never);
+
+    await sendImage(1, png, 'image.png');
+    expect(sendPhotoSpy.mock.calls[0][2]).toEqual({});
+  });
+
+  it("resends with the plain caption on can't parse entities", async () => {
+    sendPhotoSpy
+      .mockRejectedValueOnce(
+        new GrammyError(
+          'x',
+          { ok: false, error_code: 400, description: "Bad Request: can't parse entities" },
+          'sendPhoto',
+          {}
+        )
+      )
+      .mockResolvedValueOnce({ message_id: 10 } as never);
+
+    await expect(sendImage(1, png, 'image.png', 'a *b*')).resolves.toBe(10);
+    expect(sendPhotoSpy.mock.calls[1][2]).toEqual({ caption: 'a *b*' });
+  });
+
+  it('uses the plain caption when the HTML would pass 1024 characters', async () => {
+    sendPhotoSpy.mockResolvedValueOnce({ message_id: 11 } as never);
+    const caption = '*b* '.repeat(250); // 1000 chars raw, longer as HTML
+
+    await sendImage(1, png, 'image.png', caption);
+    expect(sendPhotoSpy.mock.calls[0][2]).toEqual({ caption });
   });
 });
