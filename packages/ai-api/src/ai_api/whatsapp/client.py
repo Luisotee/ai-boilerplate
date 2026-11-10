@@ -7,9 +7,11 @@ Uses httpx.AsyncClient passed via constructor for connection pooling.
 
 import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 import httpx
 
+from ..safe_fetch import ImageFetchError, fetch_public_image
 from .exceptions import (
     WhatsAppClientError,
     WhatsAppNotConnectedError,
@@ -32,6 +34,15 @@ class SuccessResponse:
     """Response from operations that only return success status."""
 
     success: bool
+
+
+@dataclass
+class ReachoutTimelock:
+    """WhatsApp's restriction on messaging new contacts (Baileys only)."""
+
+    active: bool
+    #: When the restriction ends, naive UTC; None when WhatsApp didn't say.
+    ends_at: datetime | None = None
 
 
 @dataclass
@@ -114,6 +125,21 @@ class WhatsAppClient:
             success=data.get("success", False),
             message_id=data.get("message_id"),
         )
+
+    async def get_reachout_timelock(self) -> ReachoutTimelock:
+        """WhatsApp's reach-out timelock for this account (Baileys client only)."""
+        response = await self._client.get(
+            f"{self._base_url}/whatsapp/reachout-timelock",
+            headers=self._get_headers(),
+        )
+        data = await self._handle_response(response)
+        ends_at = None
+        if data.get("ends_at"):
+            parsed = datetime.fromisoformat(data["ends_at"])
+            if parsed.tzinfo is not None:
+                parsed = parsed.astimezone(UTC).replace(tzinfo=None)
+            ends_at = parsed
+        return ReachoutTimelock(active=bool(data.get("active")), ends_at=ends_at)
 
     async def send_typing(self, phone_number: str, state: str = "composing") -> SuccessResponse:
         """
@@ -410,33 +436,26 @@ class WhatsAppClient:
             phone_number: WhatsApp JID or phone number
             image_url: HTTPS URL of the image to download
             caption: Optional caption for the image
-            max_size_mb: Maximum file size in MB (default 16)
+            max_size_mb: Maximum file size in MB (capped at 5, the WhatsApp image limit)
 
         Returns:
             SendMessageResponse with success status and message_id
 
         Raises:
-            WhatsAppClientError: If URL is invalid, download fails, or file too large
+            WhatsAppClientError: If the URL is not a public https JPEG/PNG,
+                the download fails, or the file is too large (see safe_fetch.py)
         """
-        if not image_url.startswith("https://"):
-            raise WhatsAppClientError("Only HTTPS URLs are allowed for security")
-
         logger.info(f"Downloading image from {image_url[:50]}...")
 
         try:
-            img_response = await self._client.get(image_url, follow_redirects=True)
-            img_response.raise_for_status()
-        except httpx.HTTPError as e:
-            raise WhatsAppClientError(f"Failed to download image: {e}")
+            fetched = await fetch_public_image(
+                image_url, max_bytes=min(max_size_mb, 5) * 1024 * 1024
+            )
+        except ImageFetchError as e:
+            raise WhatsAppClientError(f"Could not download image: {e}") from e
 
-        content_type = img_response.headers.get("content-type", "")
-        if not content_type.startswith("image/"):
-            raise WhatsAppClientError(f"URL does not point to an image: {content_type}")
-
-        image_data = img_response.content
-        size_mb = len(image_data) / (1024 * 1024)
-        if size_mb > max_size_mb:
-            raise WhatsAppClientError(f"Image too large: {size_mb:.1f}MB (max {max_size_mb}MB)")
+        image_data = fetched.data
+        content_type = fetched.mimetype
 
         return await self.send_image(
             phone_number=phone_number,

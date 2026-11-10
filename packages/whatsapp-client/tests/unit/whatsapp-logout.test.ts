@@ -23,6 +23,9 @@ vi.mock('../../src/services/baileys.js', () => ({
   setPairedPhoneNumber: vi.fn(),
   getPairedPhoneNumber: vi.fn(),
   getConnectionInfo: vi.fn(),
+  noteInbound: vi.fn(),
+  setLastDisconnect: vi.fn(),
+  setReconnectAttempts: vi.fn(),
 }));
 
 // Keep the rest of fs/promises + baileys real; only swap the pieces logoutWhatsApp
@@ -42,6 +45,16 @@ vi.mock('@whiskeysockets/baileys', async (importOriginal) => ({
 
 // initializeWhatsApp() resolves the WA Web version on every init; stub it so tests never
 // hit the network (the real fetch would add a 5s timeout per uncached call).
+// Route the atomic auth-state wrapper to the mocked useMultiFileAuthState above,
+// so each init's saveCreds spy stays observable and no real files are touched.
+vi.mock('../../src/services/auth-state.js', async () => {
+  const baileys = await import('@whiskeysockets/baileys');
+  return {
+    useAtomicMultiFileAuthState: (dir: string) => baileys.useMultiFileAuthState(dir),
+    flushPendingCredsSave: vi.fn().mockResolvedValue(true),
+  };
+});
+
 vi.mock('../../src/services/wa-version.js', () => ({
   getWaVersionConfig: vi.fn().mockResolvedValue({}),
 }));

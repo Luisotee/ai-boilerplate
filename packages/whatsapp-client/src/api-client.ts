@@ -8,6 +8,22 @@ function aiApiHeaders(contentType?: string): Record<string, string> {
   return headers;
 }
 
+/**
+ * Thrown when a reply is not ready within POLL_MAX_DURATION_MS. Not a failure:
+ * the AI API pushes the reply through /whatsapp/send-text once it is ready, so
+ * handlers tell the user to wait instead of reporting an error.
+ */
+export class PollTimeoutError extends Error {
+  constructor(jobId: string, limit: string) {
+    super(`Polling timeout: job ${jobId} exceeded ${limit}`);
+    this.name = 'PollTimeoutError';
+  }
+}
+
+/** Sent when the reply outlives the polling window (it arrives later by push). */
+export const LATE_REPLY_NOTICE =
+  "This is taking longer than usual. I'll send the answer here as soon as it's ready.";
+
 interface ImagePayload {
   data: string; // base64 encoded
   mimetype: string;
@@ -17,6 +33,15 @@ interface DocumentPayload {
   data: string; // base64 encoded
   mimetype: string;
   filename: string;
+}
+
+/** One image to send after the reply text (ai-api `reply_media.py`). */
+export interface JobMedia {
+  index: number;
+  caption: string;
+  mimetype: string;
+  /** Source URL: only for the text fallback, never fetched by this client. */
+  url: string;
 }
 
 interface MessageOptions {
@@ -32,6 +57,8 @@ interface MessageOptions {
   isGroupAdmin?: boolean;
   phone?: string;
   whatsappLid?: string;
+  /** Called with the reply images when the job completes with any. */
+  onMedia?: (jobId: string, media: JobMedia[]) => void;
 }
 
 interface JobStatus {
@@ -40,6 +67,9 @@ interface JobStatus {
   complete: boolean;
   full_response?: string;
   error?: string;
+  // Finished, but delivered another way (pushed late, or merged into another job's reply)
+  silent?: boolean;
+  media?: JobMedia[] | null;
 }
 
 interface EnqueueResponse {
@@ -50,6 +80,8 @@ interface EnqueueResponse {
   // Command response
   is_command?: boolean;
   response?: string;
+  // Duplicate (a platform redelivery of a message already received): send nothing
+  duplicate?: boolean;
 }
 
 interface UserPreferences {
@@ -75,6 +107,7 @@ export async function sendMessageToAI(
     isGroupAdmin,
     phone,
     whatsappLid,
+    onMedia,
   } = options;
 
   // Handle save-only endpoint separately
@@ -165,6 +198,13 @@ export async function sendMessageToAI(
 
   const enqueueResult: EnqueueResponse = await enqueueResponse.json();
 
+  // A redelivered message (Baileys offline replay, a webhook retry): the first
+  // copy is already being answered, so this one sends nothing.
+  if (enqueueResult.duplicate) {
+    logger.info({ whatsappJid, messageId }, 'Duplicate message ignored');
+    return null;
+  }
+
   // Handle command response (e.g., /settings, /tts on, /help)
   if (enqueueResult.is_command) {
     logger.info({ whatsappJid }, 'Command executed');
@@ -185,7 +225,7 @@ export async function sendMessageToAI(
   while (iterations < config.polling.maxIterations) {
     const elapsedMs = Date.now() - startTime;
     if (elapsedMs >= config.polling.maxDurationMs) {
-      throw new Error(`Polling timeout: job ${job_id} exceeded ${config.polling.maxDurationMs}ms`);
+      throw new PollTimeoutError(job_id, `${config.polling.maxDurationMs}ms`);
     }
 
     const statusResponse = await fetchWithTimeout(
@@ -200,8 +240,14 @@ export async function sendMessageToAI(
 
     const status: JobStatus = await statusResponse.json();
 
+    if (status.silent) {
+      logger.info({ job_id, iterations, elapsedMs }, 'Job finished; reply delivered elsewhere');
+      return null;
+    }
+
     if (status.complete) {
       logger.info({ job_id, iterations, elapsedMs }, 'Job completed');
+      if (status.media?.length) onMedia?.(job_id, status.media);
       return status.full_response || '';
     }
 
@@ -216,9 +262,20 @@ export async function sendMessageToAI(
     await new Promise((resolve) => setTimeout(resolve, config.polling.intervalMs));
   }
 
-  throw new Error(
-    `Polling timeout: job ${job_id} exceeded ${config.polling.maxIterations} iterations`
+  throw new PollTimeoutError(job_id, `${config.polling.maxIterations} iterations`);
+}
+
+/** Bytes of reply image `index` of a completed job (already SSRF-checked by ai-api). */
+export async function fetchJobMedia(jobId: string, index: number): Promise<Buffer> {
+  const response = await fetchWithTimeout(
+    `${config.aiApiUrl}/chat/job/${encodeURIComponent(jobId)}/media/${index}`,
+    { headers: aiApiHeaders() },
+    config.timeouts.default
   );
+  if (!response.ok) {
+    throw new Error(`Job media failed: ${response.status} ${response.statusText}`);
+  }
+  return Buffer.from(await response.arrayBuffer());
 }
 
 export async function getUserPreferences(whatsappJid: string): Promise<UserPreferences | null> {

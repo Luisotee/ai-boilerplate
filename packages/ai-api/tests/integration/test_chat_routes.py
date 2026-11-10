@@ -947,3 +947,304 @@ class TestWhitelistEnforcement:
                 }
             )
         assert response.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Inbound dedup (platform redeliveries)
+# ---------------------------------------------------------------------------
+
+
+def _fake_redis_client(fake):
+    """Patchable stand-in for get_redis_client() yielding one fakeredis client."""
+
+    @asynccontextmanager
+    async def _client():
+        yield fake
+
+    return _client
+
+
+class TestInboundDedup:
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_redelivered_enqueue_is_dropped(self, mock_cleanup, mock_redis, mock_init_db):
+        import fakeredis
+
+        fake = fakeredis.FakeAsyncRedis()
+        mock_db = _make_mock_db()
+        user = make_user(whatsapp_jid=TEST_JID)
+        saved = make_conversation_message(role="user", content="hi")
+        with (
+            _patch_whitelist(),
+            patch("ai_api.routes.chat.get_redis_client", _fake_redis_client(fake)),
+            patch("ai_api.routes.chat.get_or_create_user", return_value=user),
+            patch("ai_api.routes.chat._record_client"),
+            patch("ai_api.routes.chat.create_embedding_service", return_value=None),
+            patch("ai_api.routes.chat.save_message", return_value=saved) as mock_save,
+            patch("ai_api.routes.chat.add_message_to_stream", new_callable=AsyncMock) as mock_xadd,
+        ):
+            app = _get_app_with_db_override(mock_db)
+            try:
+                body = {
+                    "whatsapp_jid": TEST_JID,
+                    "message": "hi",
+                    "conversation_type": "private",
+                    "whatsapp_message_id": "WAMID-1",
+                }
+                async with AsyncClient(
+                    transport=ASGITransport(app=app), base_url="http://test"
+                ) as client:
+                    first = await client.post("/chat/enqueue", json=body, headers=AUTH_HEADERS)
+                    second = await client.post("/chat/enqueue", json=body, headers=AUTH_HEADERS)
+            finally:
+                _cleanup_overrides()
+
+        assert first.status_code == 200 and "job_id" in first.json()
+        assert second.status_code == 200
+        assert second.json()["duplicate"] is True
+        assert mock_save.call_count == 1
+        assert mock_xadd.await_count == 1
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_failed_enqueue_releases_the_claim(self, mock_cleanup, mock_redis, mock_init_db):
+        import fakeredis
+
+        fake = fakeredis.FakeAsyncRedis()
+        mock_db = _make_mock_db()
+        with (
+            _patch_whitelist(),
+            patch("ai_api.routes.chat.get_redis_client", _fake_redis_client(fake)),
+            patch("ai_api.routes.chat.get_or_create_user", side_effect=RuntimeError("db down")),
+        ):
+            app = _get_app_with_db_override(mock_db)
+            try:
+                body = {
+                    "whatsapp_jid": TEST_JID,
+                    "message": "hi",
+                    "conversation_type": "private",
+                    "whatsapp_message_id": "WAMID-2",
+                }
+                async with AsyncClient(
+                    transport=ASGITransport(app=app), base_url="http://test"
+                ) as client:
+                    response = await client.post("/chat/enqueue", json=body, headers=AUTH_HEADERS)
+            finally:
+                _cleanup_overrides()
+
+        assert response.status_code == 500
+        from ai_api.services.dedup import dedup_key
+
+        assert await fake.exists(dedup_key(TEST_JID, "WAMID-2")) == 0
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_failed_command_releases_the_claim(self, mock_cleanup, mock_redis, mock_init_db):
+        import fakeredis
+
+        fake = fakeredis.FakeAsyncRedis()
+        mock_db = _make_mock_db()
+        with (
+            _patch_whitelist(),
+            patch("ai_api.routes.chat.get_redis_client", _fake_redis_client(fake)),
+            patch("ai_api.routes.chat.get_or_create_user", side_effect=RuntimeError("db down")),
+        ):
+            app = _get_app_with_db_override(mock_db)
+            try:
+                body = {
+                    "whatsapp_jid": TEST_JID,
+                    "message": "/help",
+                    "conversation_type": "private",
+                    "whatsapp_message_id": "WAMID-CMD",
+                }
+                async with AsyncClient(
+                    transport=ASGITransport(app=app, raise_app_exceptions=False),
+                    base_url="http://test",
+                ) as client:
+                    response = await client.post("/chat/enqueue", json=body, headers=AUTH_HEADERS)
+            finally:
+                _cleanup_overrides()
+
+        assert response.status_code == 500
+        from ai_api.services.dedup import dedup_key
+
+        assert await fake.exists(dedup_key(TEST_JID, "WAMID-CMD")) == 0
+
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_redelivered_save_is_dropped(self, mock_cleanup, mock_redis, mock_init_db):
+        import fakeredis
+
+        fake = fakeredis.FakeAsyncRedis()
+        mock_db = _make_mock_db()
+        saved = make_conversation_message(role="user", content="chatter")
+        with (
+            _patch_whitelist(),
+            patch("ai_api.routes.chat.get_redis_client", _fake_redis_client(fake)),
+            patch("ai_api.routes.chat.create_embedding_service", return_value=None),
+            patch("ai_api.routes.chat.save_message", return_value=saved) as mock_save,
+        ):
+            app = _get_app_with_db_override(mock_db)
+            try:
+                body = {
+                    "whatsapp_jid": "120363000000000000@g.us",
+                    "message": "chatter",
+                    "conversation_type": "group",
+                    "whatsapp_message_id": "WAMID-3",
+                }
+                async with AsyncClient(
+                    transport=ASGITransport(app=app), base_url="http://test"
+                ) as client:
+                    first = await client.post("/chat/save", json=body, headers=AUTH_HEADERS)
+                    second = await client.post("/chat/save", json=body, headers=AUTH_HEADERS)
+            finally:
+                _cleanup_overrides()
+
+        assert first.json() == {"success": True}
+        assert second.json() == {"success": True, "duplicate": True}
+        assert mock_save.call_count == 1
+
+
+class TestEnqueueAlbum:
+    @patch("ai_api.main.init_db")
+    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+    @patch("ai_api.main.cleanup_expired_documents")
+    async def test_several_images_are_one_job(self, mock_cleanup, mock_redis, mock_init_db):
+        import fakeredis
+
+        fake = fakeredis.FakeAsyncRedis()
+        user = make_user(whatsapp_jid="tg:123")
+        saved = make_conversation_message(role="user", content="x")
+        with (
+            _patch_whitelist(),
+            patch("ai_api.routes.chat.get_redis_client", _fake_redis_client(fake)),
+            patch("ai_api.routes.chat.get_or_create_user", return_value=user),
+            patch("ai_api.routes.chat._record_client"),
+            patch("ai_api.routes.chat.create_embedding_service", return_value=None),
+            patch("ai_api.routes.chat.save_message", return_value=saved) as mock_save,
+            patch("ai_api.routes.chat.add_message_to_stream", new_callable=AsyncMock) as mock_xadd,
+        ):
+            app = _get_app_with_db_override(_make_mock_db())
+            try:
+                body = {
+                    "whatsapp_jid": "tg:123",
+                    "message": "our trip",
+                    "conversation_type": "private",
+                    "client_id": "telegram",
+                    "images": [
+                        {"data": "aGk=", "mimetype": "image/jpeg"},
+                        {"data": "aG8=", "mimetype": "image/jpeg"},
+                    ],
+                }
+                async with AsyncClient(
+                    transport=ASGITransport(app=app), base_url="http://test"
+                ) as client:
+                    response = await client.post("/chat/enqueue", json=body, headers=AUTH_HEADERS)
+            finally:
+                _cleanup_overrides()
+
+        assert response.status_code == 200
+        job_data = mock_xadd.await_args.kwargs["job_data"]
+        assert job_data["has_image"] == "true" and job_data["image_count"] == "2"
+        assert mock_save.call_args.args[3] == "[2 images: our trip]"
+        from ai_api.queue.utils import get_job_images
+
+        stored = await get_job_images(fake, job_data["job_id"], "image/jpeg", 2)
+        assert [data for data, _ in stored] == ["aGk=", "aG8="]
+
+
+# ---------------------------------------------------------------------------
+# Reply images: media on GET /chat/job/{id} and GET /chat/job/{id}/media/{i}
+# ---------------------------------------------------------------------------
+
+_MEDIA_META = {
+    "user_id": "u",
+    "whatsapp_jid": TEST_JID,
+    "message": "Hi",
+    "conversation_type": "private",
+    "media": [
+        {
+            "index": 0,
+            "caption": "Fire map",
+            "mimetype": "image/png",
+            "url": "https://maps.example.com/fire.png",
+        }
+    ],
+}
+_PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 10
+
+
+def _media_redis(metadata: dict | None, media: dict[str, bytes]):
+    import json
+
+    async def get(key):
+        if key.startswith("job:meta:"):
+            return json.dumps(metadata) if metadata is not None else None
+        return media.get(key)
+
+    mock_redis = AsyncMock()
+    mock_redis.get = AsyncMock(side_effect=get)
+    mock_redis.lrange = AsyncMock(
+        return_value=[
+            json.dumps({"index": 0, "content": "", "timestamp": "2026-01-01T00:00:00"}).encode()
+        ]
+    )
+
+    @asynccontextmanager
+    async def mock_get_redis_client():
+        yield mock_redis
+
+    return mock_get_redis_client
+
+
+@patch("ai_api.main.init_db")
+@patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
+@patch("ai_api.main.cleanup_expired_documents")
+class TestJobMedia:
+    async def _get(self, path, metadata, media, headers=AUTH_HEADERS):
+        with patch("ai_api.routes.chat.get_redis_client", _media_redis(metadata, media)):
+            from ai_api.main import app
+
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                return await client.get(path, headers=headers)
+
+    async def test_status_lists_media_when_complete(self, *_mocks):
+        response = await self._get("/chat/job/j1", _MEDIA_META, {})
+        data = response.json()
+        assert data["complete"] is True
+        assert data["full_response"] == ""
+        assert data["media"] == _MEDIA_META["media"]
+
+    async def test_status_without_media_has_null_media(self, *_mocks):
+        meta = {k: v for k, v in _MEDIA_META.items() if k != "media"}
+        response = await self._get("/chat/job/j1", meta, {})
+        assert response.json()["media"] is None
+
+    async def test_media_route_returns_bytes(self, *_mocks):
+        response = await self._get("/chat/job/j1/media/0", _MEDIA_META, {"job:media:j1:0": _PNG})
+        assert response.status_code == 200
+        assert response.content == _PNG
+        assert response.headers["content-type"] == "image/png"
+
+    async def test_media_route_404_for_unknown_index(self, *_mocks):
+        response = await self._get("/chat/job/j1/media/3", _MEDIA_META, {"job:media:j1:0": _PNG})
+        assert response.status_code == 404
+
+    async def test_media_route_404_when_bytes_expired(self, *_mocks):
+        response = await self._get("/chat/job/j1/media/0", _MEDIA_META, {})
+        assert response.status_code == 404
+
+    async def test_media_route_404_for_unknown_job(self, *_mocks):
+        response = await self._get("/chat/job/nope/media/0", None, {})
+        assert response.status_code == 404
+
+    async def test_media_route_requires_api_key(self, *_mocks):
+        response = await self._get(
+            "/chat/job/j1/media/0", _MEDIA_META, {"job:media:j1:0": _PNG}, headers={}
+        )
+        assert response.status_code == 401

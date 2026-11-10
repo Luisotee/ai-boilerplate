@@ -9,7 +9,8 @@ import { config } from './config.js';
 import { handleTextMessage } from './handlers/text.js';
 import { editMessage } from './api-client.js';
 import { extractAndTranscribeVoice } from './handlers/voice.js';
-import { extractPhotoData } from './handlers/photo.js';
+import { extractPhotoData, type PhotoExtraction } from './handlers/photo.js';
+import { collectAlbumItem } from './utils/album-buffer.js';
 import { extractDocumentData } from './handlers/document.js';
 import { handleSharedContact, offerPhoneLink } from './handlers/link-prompt.js';
 import { logger } from './logger.js';
@@ -26,6 +27,84 @@ import { isSenderGroupAdmin } from './services/group-admin.js';
 // "@bot, then the question": the sender's next group message after a mention
 // counts as addressed (utils/mention-window.ts). Keyed `<chat id>|<sender id>`.
 const mentionWindow = createMentionWindow(config.mentionWindowMs);
+
+interface AlbumItem {
+  ctx: TelegramContext;
+  messageId: number;
+  caption: string;
+  /** Not addressed to the bot (an un-mentioned group photo): history only. */
+  saveOnly: boolean;
+  /** Started at once for an addressed photo; lazily otherwise. */
+  photo?: Promise<PhotoExtraction>;
+}
+
+/**
+ * One photo of an album. The first one to arrive (the leader) waits for the
+ * album to settle, then decides for the whole album: in a group only the
+ * captioned photo mentions the bot, so the album is answered when ANY photo is
+ * addressed (all photos in one request), and otherwise each photo is saved as
+ * a history marker. The others return.
+ */
+async function handleAlbumPhoto(
+  ctx: TelegramContext,
+  albumId: string,
+  caption: string,
+  saveOnly: boolean
+): Promise<void> {
+  const items = await collectAlbumItem<AlbumItem>(
+    `${ctx.chat?.id}:${albumId}`,
+    {
+      ctx,
+      messageId: ctx.msg?.message_id ?? 0,
+      caption,
+      saveOnly,
+      photo: saveOnly ? undefined : extractPhotoData(ctx),
+    },
+    config.album
+  );
+  if (!items) return; // another photo of this album leads it
+
+  items.sort((a, b) => a.messageId - b.messageId);
+  if (items.every((item) => item.saveOnly)) {
+    for (const item of items) {
+      await handleTextMessage(item.ctx, imageMarker(item.caption), {
+        senderJid: item.ctx.from ? chatIdToJid(item.ctx.from.id) : undefined,
+        saveOnly: true,
+      });
+    }
+    return;
+  }
+
+  ctx.chatAction = 'typing';
+  const results = await Promise.all(items.map((item) => item.photo ?? extractPhotoData(item.ctx)));
+  const images = results.flatMap((r) =>
+    r.kind === 'ok' ? [{ data: r.data, mimetype: r.mimetype }] : []
+  );
+  if (images.length < results.length) {
+    logger.warn(
+      { albumId, received: results.length, downloaded: images.length },
+      'Some album photos could not be downloaded'
+    );
+  }
+  if (images.length === 0) {
+    await ctx.reply(
+      results.some((r) => r.kind === 'too-large')
+        ? "Sorry, that image is larger than Telegram's 20 MB bot download limit. Please send a smaller file."
+        : "Sorry, I couldn't download that image. Please try again."
+    );
+    return;
+  }
+
+  const isGroup = chatTypeToConversationType(ctx.chat?.type ?? 'private') === 'group';
+  const rawCaption = items.find((item) => item.caption)?.caption ?? '';
+  const albumCaption = isGroup ? stripBotMentionFromCtx(ctx, rawCaption) : rawCaption;
+  await handleTextMessage(ctx, albumCaption || 'Image received', {
+    senderJid: ctx.from ? chatIdToJid(ctx.from.id) : undefined,
+    images,
+    // Same fail-closed admin rule as text: resolve it for an answered group album.
+    isGroupAdmin: isGroup ? await isSenderGroupAdmin(ctx) : undefined,
+  });
+}
 
 export function registerUpdateHandlers(): void {
   // ---------------- Account linking (phone share) ----------------
@@ -102,7 +181,7 @@ export function registerUpdateHandlers(): void {
 
   // ---------------- Voice / Audio ----------------
   bot.on(['message:voice', 'message:audio'], async (ctx) => {
-    const { skip, saveOnly } = await resolveGate(ctx);
+    const { skip, isGroup, saveOnly } = await resolveGate(ctx);
     if (skip) return;
 
     if (saveOnly) {
@@ -117,6 +196,7 @@ export function registerUpdateHandlers(): void {
     if (result.kind === 'ok') {
       await handleTextMessage(ctx, result.transcription, {
         senderJid: ctx.from ? chatIdToJid(ctx.from.id) : undefined,
+        isGroupAdmin: isGroup ? await isSenderGroupAdmin(ctx) : undefined,
       });
       return;
     }
@@ -159,10 +239,18 @@ export function registerUpdateHandlers(): void {
 
   // ---------------- Photo ----------------
   bot.on('message:photo', async (ctx) => {
-    const { skip, saveOnly } = await resolveGate(ctx);
+    const { skip, isGroup, saveOnly } = await resolveGate(ctx);
     if (skip) return;
 
     const caption = ctx.msg.caption ?? '';
+
+    // An album arrives as one update per photo, and in a group only the
+    // captioned one mentions the bot: group it first, then gate the album.
+    const albumId = ctx.msg.media_group_id;
+    if (albumId) {
+      await handleAlbumPhoto(ctx, albumId, caption, saveOnly);
+      return;
+    }
 
     // Group non-mention: save an [Image] / [Image: caption] marker to history
     // without downloading the binary. Matches Baileys (whatsapp.ts:226-234) so
@@ -177,13 +265,14 @@ export function registerUpdateHandlers(): void {
 
     ctx.chatAction = 'typing';
     const result = await extractPhotoData(ctx);
-    const text = caption || 'Image received';
+    const text = (isGroup ? stripBotMentionFromCtx(ctx, caption) : caption) || 'Image received';
 
     switch (result.kind) {
       case 'ok':
         await handleTextMessage(ctx, text, {
           senderJid: ctx.from ? chatIdToJid(ctx.from.id) : undefined,
           image: { data: result.data, mimetype: result.mimetype },
+          isGroupAdmin: isGroup ? await isSenderGroupAdmin(ctx) : undefined,
         });
         break;
       case 'too-large':
@@ -199,7 +288,7 @@ export function registerUpdateHandlers(): void {
 
   // ---------------- Document ----------------
   bot.on('message:document', async (ctx) => {
-    const { skip, saveOnly } = await resolveGate(ctx);
+    const { skip, isGroup, saveOnly } = await resolveGate(ctx);
     if (skip) return;
 
     const caption = ctx.msg.caption ?? '';
@@ -217,13 +306,15 @@ export function registerUpdateHandlers(): void {
 
     ctx.chatAction = 'typing';
     const result = await extractDocumentData(ctx);
-    const text = caption || `Document: ${filename}`;
+    const text =
+      (isGroup ? stripBotMentionFromCtx(ctx, caption) : caption) || `Document: ${filename}`;
 
     switch (result.kind) {
       case 'ok':
         await handleTextMessage(ctx, text, {
           senderJid: ctx.from ? chatIdToJid(ctx.from.id) : undefined,
           document: { data: result.data, mimetype: result.mimetype, filename: result.filename },
+          isGroupAdmin: isGroup ? await isSenderGroupAdmin(ctx) : undefined,
         });
         break;
       case 'wrong-type':

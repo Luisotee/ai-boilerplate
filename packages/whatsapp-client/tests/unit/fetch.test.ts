@@ -25,9 +25,12 @@ describe('fetchWithTimeout', () => {
 
     expect(result).toBe(fakeResponse);
     expect(mockFetch).toHaveBeenCalledOnce();
-    expect(mockFetch).toHaveBeenCalledWith('https://example.com/api', expect.objectContaining({
-      signal: expect.any(AbortSignal),
-    }));
+    expect(mockFetch).toHaveBeenCalledWith(
+      'https://example.com/api',
+      expect.objectContaining({
+        signal: expect.any(AbortSignal),
+      })
+    );
   });
 
   it('should pass options through to fetch along with the abort signal', async () => {
@@ -37,11 +40,14 @@ describe('fetchWithTimeout', () => {
     const headers = { 'Content-Type': 'application/json' };
     await fetchWithTimeout('https://example.com/api', { method: 'POST', headers }, 10000);
 
-    expect(mockFetch).toHaveBeenCalledWith('https://example.com/api', expect.objectContaining({
-      method: 'POST',
-      headers,
-      signal: expect.any(AbortSignal),
-    }));
+    expect(mockFetch).toHaveBeenCalledWith(
+      'https://example.com/api',
+      expect.objectContaining({
+        method: 'POST',
+        headers,
+        signal: expect.any(AbortSignal),
+      })
+    );
   });
 
   it('should throw RequestTimeoutError when the request times out', async () => {
@@ -62,7 +68,9 @@ describe('fetchWithTimeout', () => {
     vi.advanceTimersByTime(3000);
 
     await expect(fetchPromise).rejects.toThrow(RequestTimeoutError);
-    await expect(fetchPromise).rejects.toThrow('Request timeout after 3000ms: https://slow-api.com/data');
+    await expect(fetchPromise).rejects.toThrow(
+      'Request timeout after 3000ms: https://slow-api.com/data'
+    );
   });
 
   it('should rethrow non-abort errors as-is', async () => {
@@ -70,17 +78,17 @@ describe('fetchWithTimeout', () => {
     networkError.name = 'TypeError';
     mockFetch.mockRejectedValueOnce(networkError);
 
-    await expect(
-      fetchWithTimeout('https://example.com/api', {}, 5000)
-    ).rejects.toThrow(networkError);
+    await expect(fetchWithTimeout('https://example.com/api', {}, 5000)).rejects.toThrow(
+      networkError
+    );
   });
 
   it('should rethrow errors that are not Error instances', async () => {
     mockFetch.mockRejectedValueOnce('string error');
 
-    await expect(
-      fetchWithTimeout('https://example.com/api', {}, 5000)
-    ).rejects.toBe('string error');
+    await expect(fetchWithTimeout('https://example.com/api', {}, 5000)).rejects.toBe(
+      'string error'
+    );
   });
 
   it('should pass an AbortController signal to fetch', async () => {
@@ -109,9 +117,7 @@ describe('fetchWithTimeout', () => {
     const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
     mockFetch.mockRejectedValueOnce(new Error('fail'));
 
-    await expect(
-      fetchWithTimeout('https://example.com/api', {}, 5000)
-    ).rejects.toThrow('fail');
+    await expect(fetchWithTimeout('https://example.com/api', {}, 5000)).rejects.toThrow('fail');
 
     expect(clearTimeoutSpy).toHaveBeenCalled();
     clearTimeoutSpy.mockRestore();
@@ -124,9 +130,12 @@ describe('fetchWithTimeout', () => {
     const result = await fetchWithTimeout('https://example.com/api', undefined, 5000);
 
     expect(result).toBe(fakeResponse);
-    expect(mockFetch).toHaveBeenCalledWith('https://example.com/api', expect.objectContaining({
-      signal: expect.any(AbortSignal),
-    }));
+    expect(mockFetch).toHaveBeenCalledWith(
+      'https://example.com/api',
+      expect.objectContaining({
+        signal: expect.any(AbortSignal),
+      })
+    );
   });
 
   it('should not override a user-provided signal (spread behavior)', async () => {

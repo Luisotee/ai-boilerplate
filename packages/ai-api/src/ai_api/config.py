@@ -85,12 +85,32 @@ class Settings(BaseSettings):
     redis_db: int = 0
     redis_password: str | None = None
 
+    # Instance name (the root .env's SERVICE_NAME, also used by Compose). It
+    # prefixes Redis keys that must not clash when several bots share a Redis.
+    service_name: str = "aiagent"
+
     # Queue
     # TTL (seconds) of job metadata in Redis. Keeps its legacy ARQ_KEEP_RESULT
     # env name from the retired arq worker so existing overrides still apply.
     arq_keep_result: int = 3600
     queue_chunk_ttl: int = 3600
     queue_per_user_max_jobs: int = 1
+    # The clients' polling budget for one reply (root .env POLL_MAX_DURATION_MS,
+    # shared with them). A job that finishes after it is delivered by push.
+    poll_max_duration_ms: int = 120000
+    # A chat job older than this when the worker gets to it is not run; the
+    # user gets a short "send it again" notice instead (an outage backlog).
+    chat_job_max_age_seconds: int = 3600
+    # Burst merging: after a user's first pending message the worker waits for
+    # this much quiet (ms) and answers everything that arrived in one run.
+    # 0 disables it. The Telegram client uses the same value for albums.
+    chat_burst_quiet_ms: int = 2000
+    # ...but never waits longer than this in total (ms) for a burst to end.
+    chat_burst_max_wait_ms: int = 8000
+
+    # Agent loop cap: model requests in one run (tool round-trips + the answer).
+    # Pydantic AI's own default is 50, each request carrying every tool schema.
+    agent_request_limit: int = 10
 
     # History
     history_limit_private: int = 20
