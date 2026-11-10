@@ -299,6 +299,7 @@ class OverviewResponse(BaseModel):
     messages: int
     knowledge_base_documents: int
     open_bug_reports: int = 0
+    disabled_scheduled_tasks: int = 0
 
 
 class WhatsAppStatusResponse(BaseModel):
@@ -526,6 +527,81 @@ class BugReportsResponse(BaseModel):
 class BugReportUpdateRequest(BaseModel):
     status: BugReportStatus
     resolution_note: str | None = Field(None, max_length=4000)
+
+
+# --- Scheduled tasks (/admin/scheduled-tasks) ---
+# ScheduledTaskStatus, ScheduledTaskKind and TaskRunStatus become a FleetView
+# contract once it mirrors them (closed enums): adding a value would break it.
+# last_error / error_code / disabled_reason are open strings.
+
+ScheduledTaskStatus = Literal["active", "completed", "cancelled", "disabled"]
+ScheduledTaskKind = Literal["reminder", "agent"]
+TaskRunStatus = Literal[
+    "dispatched",
+    "running",
+    "ready",
+    "sending",
+    "sent",
+    "silent",
+    "skipped",
+    "failed",
+    "unknown",
+]
+
+
+class ScheduledTaskSummary(BaseModel):
+    id: str
+    status: ScheduledTaskStatus
+    kind: ScheduledTaskKind
+    text: str
+    schedule: str = Field(
+        ..., description="Normalised human description, e.g. 'every day at 09:00'"
+    )
+    timezone: str
+    whatsapp_jid: str = Field(..., description="The chat it delivers to")
+    user_name: str | None = None
+    client_id: str | None = None
+    conversation_type: str | None = None
+    next_run_at: datetime | None = None
+    last_run_at: datetime | None = None
+    last_status: TaskRunStatus | None = None
+    last_error: str | None = None
+    disabled_reason: str | None = None
+    consecutive_failures: int
+    run_count: int
+    created_at: datetime
+
+
+class TaskRunItem(BaseModel):
+    id: str
+    scheduled_for: datetime
+    status: TaskRunStatus
+    error_code: str | None = None
+    late_seconds: int
+    created_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+class ScheduledTaskDetail(ScheduledTaskSummary):
+    cron_expr: str | None = None
+    interval_seconds: int | None = None
+    run_at: datetime | None = None
+    runs: list[TaskRunItem] = Field(default_factory=list, description="Latest runs, newest first")
+
+
+class ScheduledTasksResponse(BaseModel):
+    tasks: list[ScheduledTaskSummary]
+    total: int
+    limit: int
+    offset: int
+    counts_by_status: dict[ScheduledTaskStatus, int]
+
+
+class ScheduledTaskUpdateRequest(BaseModel):
+    status: Literal["active", "cancelled"] = Field(
+        ..., description="active re-enables a disabled task; cancelled stops it"
+    )
 
 
 # --- Public Bot Contact ---

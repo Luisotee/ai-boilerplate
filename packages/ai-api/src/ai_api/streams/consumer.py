@@ -37,6 +37,7 @@ from .manager import (
     stream_entry_time_ms,
 )
 from .processor import process_chat_job_direct
+from .scheduled_runner import process_scheduled_run
 
 #: Job metadata statuses that mean the job already ran to the end. A job with
 #: one of these is acked without running again (a worker that died between
@@ -61,8 +62,8 @@ SILENT_EXPIRY_AGE_SECONDS = 24 * 3600
 def is_scheduled_entry(data: dict) -> bool:
     """Stream entries added by the scheduler (``trigger=scheduled``).
 
-    The scheduler (PR #50) writes them to the same per-user stream, with their
-    own ``run_id``/``job_id`` semantics and no platform message id, so the
+    The scheduler (``streams/scheduler.py``) writes them to the same per-user
+    stream, with their own ``run_id``/``job_id`` semantics and no platform message id, so the
     chat-specific steps here (the already-finished and expiry checks, burst
     merging) never touch them: each one goes to process_single_message alone.
     """
@@ -565,6 +566,13 @@ async def process_single_message(user_id: str, message_id: str, data: dict):
         message_id: Stream message ID
         data: Message data dictionary with job information
     """
+    # A fired scheduled task (streams/scheduler.py), not a user message. It
+    # shares the chat's stream only so it runs in order with that chat's
+    # messages; it is never merged with them or deduplicated as one.
+    if is_scheduled_entry(data):
+        await process_scheduled_run(_safe_decode(data.get(b"run_id"), "") or "")
+        return
+
     try:
         kwargs = _job_kwargs(message_id, data)
         logger.info(f"Processing job {kwargs['job_id']} for user {user_id}")

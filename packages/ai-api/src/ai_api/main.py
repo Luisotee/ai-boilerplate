@@ -33,6 +33,7 @@ from .routes import (
     knowledge_base_router,
     message_events_router,
     preferences_router,
+    scheduled_tasks_router,
     speech_router,
 )
 from .scripts.cleanup_expired_documents import cleanup_expired_documents
@@ -250,3 +251,4 @@ app.include_router(preferences_router)
 app.include_router(admin_router)
 app.include_router(broadcasts_router)
 app.include_router(bug_reports_router)
+app.include_router(scheduled_tasks_router)

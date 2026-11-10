@@ -2,7 +2,7 @@ import re
 from dataclasses import dataclass, field
 
 import httpx
-from pydantic_ai import Agent, RunContext
+from pydantic_ai import Agent, RunContext, ToolDefinition
 from pydantic_ai.models import Model
 from sqlalchemy.orm import Session
 
@@ -45,11 +45,48 @@ class AgentDeps:
     is_group_admin: bool | None = None
     #: Stream job id of the message being answered (recorded on bug reports).
     job_id: str | None = None
+    #: True for a scheduled task's agent run (streams/scheduled_runner.py): no
+    #: user is waiting, so only read-only tools are offered (SCHEDULED_RUN_TOOLS).
+    scheduled_run: bool = False
+    #: Id of the saved user message being answered (conversation_messages.id):
+    #: its sender_jid / sender_name record who asked for a scheduled task.
+    user_message_id: str | None = None
     #: Images to send after this run's text, in the current chat only. The
     #: processor merges them with the `![caption](https://…)` directives in the
     #: reply; a tool that produces an image URL can append here instead of
     #: relying on the model to repeat it.
     reply_media: list[ReplyImage] = field(default_factory=list)
+
+
+#: The only tools a scheduled agent run may use: read-only ones. Nothing that
+#: sends (that would bypass the run's claim, Cloud-window and daily-cap checks),
+#: changes settings or memory, or creates more scheduled tasks (recursion).
+SCHEDULED_RUN_TOOLS = frozenset(
+    {
+        "search_conversation_history",
+        "get_chat_history",
+        "search_knowledge_base",
+        "web_search",
+        "fetch_website",
+        "calculate",
+        "get_weather",
+        "wikipedia_lookup",
+        "convert_units",
+    }
+)
+
+
+async def scheduled_run_tools(
+    ctx: RunContext["AgentDeps"], tool_defs: list[ToolDefinition]
+) -> list[ToolDefinition]:
+    """Agent-wide ``prepare_tools``: in a scheduled run, keep only SCHEDULED_RUN_TOOLS.
+
+    Runs after each tool's own ``prepare`` hook; a tool filtered out here can't
+    be called either. Ordinary chat runs get every tool unchanged.
+    """
+    if ctx.deps is not None and ctx.deps.scheduled_run:
+        return [td for td in tool_defs if td.name in SCHEDULED_RUN_TOOLS]
+    return tool_defs
 
 
 # Startup default: DeepSeek -> Gemini when DEEPSEEK_API_KEY is set, else Gemini
@@ -64,6 +101,7 @@ class AgentDeps:
 agent = Agent(
     model=build_model(settings.deepseek_model, settings.gemini_model),
     deps_type=AgentDeps,
+    prepare_tools=scheduled_run_tools,
     retries=3,  # Increase from default 1 to handle occasional malformed model responses
 )
 

@@ -40,7 +40,7 @@ Claude Code loads a folder's `CLAUDE.md` when it works there. **These subsystems
 
 | File | Covers |
 |------|--------|
-| `packages/ai-api/src/ai_api/services/CLAUDE.md` | Broadcasts (`/admin/broadcasts`), bug reports (`/admin/bug-reports`), cross-platform identity (`/link`, `/linkphone`) |
+| `packages/ai-api/src/ai_api/services/CLAUDE.md` | Broadcasts (`/admin/broadcasts`), bug reports (`/admin/bug-reports`), scheduled tasks, cross-platform identity (`/link`, `/linkphone`) |
 | `packages/ai-api/src/ai_api/agent/CLAUDE.md` | DeepSeek → Gemini model chain, `GuardedModel`, fallback reply, chat-history and shared-group tools |
 | `packages/ai-api/src/ai_api/streams/CLAUDE.md` | PDF queue; chat streams: dedup, crash recovery, late-reply push, burst merging |
 | `packages/whatsapp-client/CLAUDE.md` | Baileys gotchas (WA version, LID vs phone, whitelist placement), handler + multipart route workflows |
@@ -149,7 +149,7 @@ Sibling repos under `/home/ubuntu/projects/` have their own authoritative `CLAUD
 - Use `pnpm add` / `uv add` for dependencies. NEVER edit package.json/pyproject.toml directly
 - Prefer pure functions over classes. Async throughout both codebases
 - Use structured logging (Pino for TS, Python `logging`), no console.log/print
-- Write tests for new functionality, following the existing patterns in `tests/` directories
+- Write tests for new functionality, following the patterns in `tests/`
 
 ## Testing
 

@@ -60,7 +60,7 @@ from ..services.link import (
 from ..streams.delivery import claim_delivery
 from ..streams.manager import add_message_to_stream
 from ..whatsapp import create_whatsapp_client
-from ..whitelist import Whitelist, is_whitelisted, parse_whitelist
+from ..whitelist import Whitelist, chat_in_scope, parse_whitelist
 
 router = APIRouter()
 
@@ -148,9 +148,13 @@ def _is_whitelisted(whatsapp_jid: str, phone: str | None = None) -> bool:
     raw = runtime_config.get("whitelist_phones")
     if not raw:
         return True
-    if settings.group_gating == "membership" and is_group_jid(whatsapp_jid):
-        return True
-    return is_whitelisted(_parse_whitelist(raw), whatsapp_jid, phone)
+    return chat_in_scope(
+        _parse_whitelist(raw),
+        whatsapp_jid,
+        phone,
+        is_group=is_group_jid(whatsapp_jid),
+        group_gating=settings.group_gating,
+    )
 
 
 @router.post("/chat/link-phone", response_model=CommandResponse, tags=["Chat"])

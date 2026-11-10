@@ -157,6 +157,17 @@ class Settings(BaseSettings):
     broadcast_send_window: str = "09:00-21:00"
     broadcast_timezone: str = "UTC"
 
+    # Bot time zone: what "every day at 9:00" means for scheduled tasks
+    # (services/schedule.py). Empty = broadcast_timezone. Never the server's.
+    bot_timezone: str = ""
+
+    # Scheduled tasks and reminders (manage_scheduled_tasks tool, fired by the
+    # stream worker's scheduler). All hot via /admin.
+    scheduled_tasks_enabled: bool = True
+    scheduled_tasks_max_per_chat: int = Field(10, ge=1, le=1000)
+    scheduled_tasks_min_interval_minutes: int = Field(60, ge=1, le=10080)
+    scheduled_tasks_max_runs_per_day: int = Field(24, ge=1, le=1000)
+
     # Token Management
     max_context_tokens: int = 50000
     min_recent_messages: int = 5
@@ -308,6 +319,8 @@ class Settings(BaseSettings):
         # PATCH /admin/settings validates overrides the same way.
         parse_send_window(self.broadcast_send_window)
         parse_timezone(self.broadcast_timezone)
+        if self.bot_timezone:
+            parse_timezone(self.bot_timezone)
         if len(self.broadcast_footer) > 500:
             raise ValueError("BROADCAST_FOOTER is too long (max 500 characters)")
         if self.broadcast_min_delay_seconds > self.broadcast_max_delay_seconds:

@@ -1,6 +1,6 @@
 # streams/ — Redis Stream consumers (chat, PDF, broadcast)
 
-Loaded on demand when working in this folder. The root `CLAUDE.md` holds the architecture, commands, security model and cross-cutting gotchas. The broadcast consumer (`broadcast_consumer.py`) is documented in `../services/CLAUDE.md`; the model-error fallback in `processor.py` in `../agent/CLAUDE.md`.
+Loaded on demand when working in this folder. The root `CLAUDE.md` holds the architecture, commands, security model and cross-cutting gotchas. The broadcast consumer (`broadcast_consumer.py`) and the scheduler (`scheduler.py`, `scheduled_runner.py`, `scheduled_sender.py`; a `trigger=scheduled` entry on a chat stream is an agent task's run: never merge it into a burst or deduplicate it against a user message, and never send or pace from the chat consumer) are documented in `../services/CLAUDE.md`; the model-error fallback in `processor.py` in `../agent/CLAUDE.md`.
 
 ## PDF processing queue
 
