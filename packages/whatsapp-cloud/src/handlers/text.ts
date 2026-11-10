@@ -1,5 +1,12 @@
 import * as graphApi from '../services/graph-api.js';
-import { sendMessageToAI, getUserPreferences, textToSpeech, type JobMedia } from '../api-client.js';
+import {
+  sendMessageToAI,
+  getUserPreferences,
+  textToSpeech,
+  LATE_REPLY_NOTICE,
+  PollTimeoutError,
+  type JobMedia,
+} from '../api-client.js';
 import { sendReplyMedia } from '../utils/reply-media.js';
 import { config } from '../config.js';
 import { phoneToJid, isGroupChat, phoneFromJid } from '../utils/jid.js';
@@ -164,6 +171,16 @@ export async function handleTextMessage(
       });
     }
   } catch (error) {
+    if (error instanceof PollTimeoutError) {
+      // The AI API pushes the reply when it is ready: no ❌, just a notice.
+      logger.warn({ to, messageId }, 'Reply not ready within the polling window');
+      try {
+        await graphApi.sendText(to, LATE_REPLY_NOTICE);
+      } catch (noticeError) {
+        logger.warn({ error: noticeError, to }, 'Failed to send the late-reply notice');
+      }
+      return;
+    }
     logger.error({ error, to, messageId }, 'Error handling text message');
     try {
       await graphApi.sendReaction(to, messageId, '\u274c');

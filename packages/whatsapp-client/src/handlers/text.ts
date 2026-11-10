@@ -1,6 +1,13 @@
 import type { WASocket, WAMessage } from '@whiskeysockets/baileys';
 import { logger } from '../logger.js';
-import { getUserPreferences, sendMessageToAI, textToSpeech, type JobMedia } from '../api-client.js';
+import {
+  getUserPreferences,
+  LATE_REPLY_NOTICE,
+  PollTimeoutError,
+  sendMessageToAI,
+  textToSpeech,
+  type JobMedia,
+} from '../api-client.js';
 import { sendReplyMedia } from '../utils/reply-media.js';
 import { config } from '../config.js';
 import { stripDeviceSuffix, isGroupChat, resolveParticipantJid } from '../utils/jid.js';
@@ -218,6 +225,16 @@ export async function handleTextMessage(
       });
     }
   } catch (error) {
+    if (error instanceof PollTimeoutError) {
+      // The AI API pushes the reply when it is ready: no ❌, no error text.
+      logger.warn({ whatsappJid }, 'Reply not ready within the polling window');
+      try {
+        await sendSerialized(whatsappJid, { text: LATE_REPLY_NOTICE });
+      } catch (noticeError) {
+        logger.warn({ error: noticeError, whatsappJid }, 'Failed to send the late-reply notice');
+      }
+      return;
+    }
     logger.error({ error, whatsappJid }, 'Error processing message');
     // Link down: a ❌ and an error reply would only wait out another ready
     // window each and fail too.

@@ -1,6 +1,13 @@
 import { InputFile } from 'grammy';
 import type { TelegramContext } from '../bot.js';
-import { sendMessageToAI, getUserPreferences, textToSpeech, type JobMedia } from '../api-client.js';
+import {
+  sendMessageToAI,
+  getUserPreferences,
+  textToSpeech,
+  LATE_REPLY_NOTICE,
+  PollTimeoutError,
+  type JobMedia,
+} from '../api-client.js';
 import { sendReplyMedia } from '../utils/reply-media.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
@@ -27,6 +34,8 @@ interface HandleOptions {
   isGroupAdmin?: boolean;
   saveOnly?: boolean;
   image?: ImageData;
+  /** Album photos, sent in one request (utils/album-buffer.ts). */
+  images?: ImageData[];
   document?: DocumentData;
 }
 
@@ -112,7 +121,7 @@ export async function handleTextMessage(
       from: jid,
       text,
       conversationType,
-      hasImage: !!options.image,
+      hasImage: !!options.image || !!options.images?.length,
       hasDocument: !!options.document,
     },
     'Received message'
@@ -131,6 +140,7 @@ export async function handleTextMessage(
       messageId: String(messageId),
       isGroupAdmin: options.isGroupAdmin,
       image: options.image,
+      images: options.images,
       document: options.document,
     });
 
@@ -217,6 +227,16 @@ export async function handleTextMessage(
       });
     }
   } catch (error) {
+    if (error instanceof PollTimeoutError) {
+      // The AI API pushes the reply when it is ready: no reaction, just a notice.
+      logger.warn({ jid, messageId }, 'Reply not ready within the polling window');
+      try {
+        await ctx.reply(LATE_REPLY_NOTICE);
+      } catch (noticeError) {
+        logger.warn({ error: noticeError, jid }, 'Failed to send the late-reply notice');
+      }
+      return;
+    }
     logger.error({ error, jid, messageId }, 'Error handling text message');
     try {
       await telegramApi.sendReaction(chatId, messageId, '❌');

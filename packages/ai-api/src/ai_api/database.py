@@ -14,6 +14,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     create_engine,
+    or_,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -459,8 +460,23 @@ def get_or_create_user(
     return user
 
 
-def get_conversation_history(db, whatsapp_jid: str, conversation_type: str, limit: int = None):
-    """Retrieve recent conversation history for a user by WhatsApp JID"""
+def get_conversation_history(
+    db,
+    whatsapp_jid: str,
+    conversation_type: str,
+    limit: int = None,
+    *,
+    before_message_id: str | None = None,
+    exclude_ids: list[str] | None = None,
+):
+    """Retrieve recent conversation history for a user by WhatsApp JID.
+
+    A chat job passes the message(s) it is answering: ``before_message_id``
+    (the earliest of them) drops every user row saved after it, such as later
+    messages of the same burst (assistant rows stay: a reply to an earlier
+    message may be saved after this one), and ``exclude_ids`` drops the messages
+    themselves, which the job sends as the prompt instead.
+    """
     user = get_or_create_user(db, whatsapp_jid, conversation_type)
 
     # Load limit from runtime config (env default, overridable via /admin)
@@ -477,15 +493,44 @@ def get_conversation_history(db, whatsapp_jid: str, conversation_type: str, limi
 
         logger.info(f"Using history limit {limit} for {user.conversation_type} conversation")
 
-    messages = (
-        db.query(ConversationMessage)
-        .filter(ConversationMessage.user_id == user.id)
-        .order_by(ConversationMessage.timestamp.desc())
-        .limit(limit)
-        .all()
-    )
+    query = db.query(ConversationMessage).filter(ConversationMessage.user_id == user.id)
+    anchor_id = _as_uuid(before_message_id)
+    if anchor_id is not None:
+        anchor = (
+            db.query(ConversationMessage.timestamp)
+            .filter(ConversationMessage.id == anchor_id)
+            .scalar()
+        )
+        if anchor is not None:
+            # User rows only: the bot's reply to an earlier message is often
+            # saved after this one arrived (the user wrote again while that
+            # job still ran), and the model must still see it.
+            query = query.filter(
+                or_(
+                    ConversationMessage.timestamp <= anchor,
+                    ConversationMessage.role == "assistant",
+                )
+            )
+    excluded = [u for u in (_as_uuid(i) for i in exclude_ids or []) if u is not None]
+    if excluded:
+        query = query.filter(ConversationMessage.id.notin_(excluded))
+
+    messages = query.order_by(ConversationMessage.timestamp.desc()).limit(limit).all()
 
     return list(reversed(messages))
+
+
+def _as_uuid(value) -> uuid.UUID | None:
+    """Message ids travel as strings (stream fields); the column is a UUID.
+
+    None (or a malformed id) means "no such row", never an error.
+    """
+    if value is None or isinstance(value, uuid.UUID):
+        return value
+    try:
+        return uuid.UUID(str(value))
+    except ValueError:
+        return None
 
 
 # Hard cap on get_conversation_messages, whatever the caller asks for: the result

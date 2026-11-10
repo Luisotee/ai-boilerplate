@@ -27,6 +27,17 @@ class EnqueueResponse(BaseModel):
     message: str = Field(default="Job queued successfully", description="Human-readable message")
 
 
+class DuplicateResponse(BaseModel):
+    """
+    Response when the message was already received (a platform redelivery).
+
+    The client must send nothing: the first copy is (or was) answered.
+    """
+
+    duplicate: Literal[True] = Field(default=True, description="Always true")
+    is_command: bool = Field(default=False, description="Always false")
+
+
 class JobMedia(BaseModel):
     """
     One image to send after the reply text. Fetch its bytes from
@@ -60,6 +71,14 @@ class JobStatusResponse(BaseModel):
         description="Complete assembled response (only present when status=complete)",
     )
     error: str | None = Field(default=None, description="Error message if status=failed")
+    silent: bool = Field(
+        default=False,
+        description=(
+            "Finished, but the client must send nothing: the reply was delivered "
+            "another way (pushed after the polling window, or merged into another "
+            "job's reply)"
+        ),
+    )
     media: list[JobMedia] | None = Field(
         default=None,
         description="Images to send after the text (only present when status=complete)",

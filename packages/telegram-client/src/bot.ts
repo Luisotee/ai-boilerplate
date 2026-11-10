@@ -39,7 +39,9 @@ bot.api.config.use(
   })
 );
 if (polling) {
-  bot.use(sequentialize((ctx) => ctx.chat?.id.toString()));
+  // Album photos (media_group_id) are exempt: utils/album-buffer.ts needs them
+  // to arrive concurrently and sends the album as one request.
+  bot.use(sequentialize((ctx) => (ctx.msg?.media_group_id ? [] : ctx.chat?.id.toString())));
 }
 bot.use(autoChatAction());
 
