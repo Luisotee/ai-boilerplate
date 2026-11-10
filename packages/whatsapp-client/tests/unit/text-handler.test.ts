@@ -46,6 +46,7 @@ vi.mock('../../src/config.js', async (importOriginal) => {
 
 vi.mock('../../src/api-client.js', () => ({
   sendMessageToAI: vi.fn(),
+  fetchJobMedia: vi.fn(),
   getUserPreferences: vi.fn().mockResolvedValue({ tts_enabled: false }),
   textToSpeech: vi.fn(),
 }));
@@ -450,5 +451,71 @@ describe('handleTextMessage — dead link and presence failures', () => {
 
     expect(textSends(sock).map(([, c]) => c)).toEqual([{ text: 'answer' }]);
     expect(reactions(sock)).toHaveLength(0);
+  });
+});
+
+describe('handleTextMessage — reply images', () => {
+  const media = [
+    { index: 0, caption: 'Fire map', mimetype: 'image/png', url: 'https://m.example.com/a.png' },
+  ];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSplitConfig.enabled = true;
+  });
+
+  async function setup(response: string) {
+    const { fetchJobMedia } = await import('../../src/api-client.js');
+    (fetchJobMedia as ReturnType<typeof vi.fn>).mockResolvedValue(Buffer.from('png-bytes'));
+    mockSendMessageToAI.mockImplementationOnce(
+      async (_jid: string, _text: string, options: { onMedia?: (...a: unknown[]) => void }) => {
+        options.onMedia?.('job-9', media);
+        return response;
+      }
+    );
+  }
+
+  it('sends the text, then the image with its caption', async () => {
+    const sock = makeMockSocket();
+    await setup('Here is the map.');
+
+    await handleTextMessage(sock as never, makeTextMsg('map?') as never, 'map?');
+
+    const payloads = sock.sendMessage.mock.calls.map(([, p]) => p as Record<string, unknown>);
+    expect(payloads[0]).toEqual({ text: 'Here is the map.' });
+    expect(payloads[1]).toEqual({
+      image: Buffer.from('png-bytes'),
+      mimetype: 'image/png',
+      caption: 'Fire map',
+    });
+  });
+
+  it('sends no empty text message for an images-only reply', async () => {
+    const sock = makeMockSocket();
+    await setup('');
+
+    await handleTextMessage(sock as never, makeTextMsg('map?') as never, 'map?');
+
+    const payloads = sock.sendMessage.mock.calls.map(([, p]) => p as Record<string, unknown>);
+    expect(payloads.filter((p) => 'text' in p)).toHaveLength(0);
+    expect(payloads.filter((p) => 'image' in p)).toHaveLength(1);
+  });
+
+  it('still sends the images, with no ❌ or error text, when TTS fails', async () => {
+    const api = await import('../../src/api-client.js');
+    (api.getUserPreferences as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      tts_enabled: true,
+    });
+    (api.textToSpeech as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('tts down'));
+    const sock = makeMockSocket();
+    await setup('Here is the map.');
+
+    await handleTextMessage(sock as never, makeTextMsg('map?') as never, 'map?');
+
+    const payloads = sock.sendMessage.mock.calls.map(([, p]) => p as Record<string, unknown>);
+    expect(payloads).toHaveLength(2);
+    expect(payloads[0]).toEqual({ text: 'Here is the map.' });
+    expect(payloads[1]).toMatchObject({ image: Buffer.from('png-bytes') });
+    expect(payloads.filter((p) => 'react' in p)).toHaveLength(0);
   });
 });

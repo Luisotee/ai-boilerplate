@@ -27,6 +27,18 @@ class EnqueueResponse(BaseModel):
     message: str = Field(default="Job queued successfully", description="Human-readable message")
 
 
+class JobMedia(BaseModel):
+    """
+    One image to send after the reply text. Fetch its bytes from
+    `GET /chat/job/{job_id}/media/{index}`.
+    """
+
+    index: int = Field(..., description="Position, used in the media URL")
+    caption: str = Field(default="", description="Caption (max 1024 chars), may be empty")
+    mimetype: str = Field(..., description="image/jpeg or image/png")
+    url: str = Field(..., description="Source URL, for a text fallback if sending fails")
+
+
 class JobStatusResponse(BaseModel):
     """
     Response for job status polling.
@@ -48,6 +60,10 @@ class JobStatusResponse(BaseModel):
         description="Complete assembled response (only present when status=complete)",
     )
     error: str | None = Field(default=None, description="Error message if status=failed")
+    media: list[JobMedia] | None = Field(
+        default=None,
+        description="Images to send after the text (only present when status=complete)",
+    )
 
 
 class JobMetadata(BaseModel):

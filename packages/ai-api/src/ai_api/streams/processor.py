@@ -15,6 +15,7 @@ from ..formatting import markdown_to_whatsapp
 from ..logger import logger
 from ..queue.connection import get_redis_client
 from ..queue.utils import delete_job_image, get_job_image, save_job_chunk, set_job_metadata
+from ..reply_media import ReplyMedia, collect_reply_media
 from ..services.bug_reports import record_auto_report
 from ..whatsapp import WhatsAppClient, create_whatsapp_client
 from .manager import enqueue_pdf_processing
@@ -296,6 +297,19 @@ async def process_chat_job_direct(
             if has_image:
                 await delete_job_image(redis, job_id)
 
+            # Images first: `![caption](https://…)` directives (and any image a
+            # tool queued) are fetched through the SSRF-hardened helper and the
+            # delivered ones removed from the text, BEFORE markdown_to_whatsapp
+            # would flatten them into links. Never fails the reply.
+            reply_media = ReplyMedia(text=full_response, media=[], history_lines=[])
+            try:
+                reply_media = await collect_reply_media(
+                    redis, job_id, full_response, agent_deps.reply_media
+                )
+            except Exception:
+                logger.error(f"[Job {job_id}] Reply image handling failed", exc_info=True)
+            full_response = reply_media.text
+
             # Models answer in Markdown despite the prompt. Convert before the
             # reply is delivered, embedded or saved — saved Markdown would be
             # replayed as history and reinforce the habit. `---` burst lines are
@@ -309,12 +323,17 @@ async def process_chat_job_direct(
             logger.info(f"[Job {job_id}] AI response completed.")
             logger.info(f"[Job {job_id}] Full response length: {len(full_response)} characters")
 
+            # History records which images went out, so the model knows later.
+            history_text = full_response
+            if reply_media.history_lines:
+                history_text = "\n".join([full_response, *reply_media.history_lines]).strip()
+
             # Step 5: Generate embedding for complete assistant response
             assistant_embedding = None
             if embedding_service:
                 try:
                     logger.info(f"[Job {job_id}] Generating embedding for assistant response...")
-                    assistant_embedding = await embedding_service.generate(full_response)
+                    assistant_embedding = await embedding_service.generate(history_text)
                     logger.info(f"[Job {job_id}] Embedding generated successfully")
                 except Exception as e:
                     logger.error(f"[Job {job_id}] Error generating assistant embedding: {e}")
@@ -326,7 +345,7 @@ async def process_chat_job_direct(
                 db,
                 whatsapp_jid,
                 "assistant",
-                full_response,
+                history_text,
                 conversation_type,
                 embedding=assistant_embedding,
             )
@@ -344,6 +363,7 @@ async def process_chat_job_direct(
                     "total_chunks": chunk_index,
                     "db_message_id": str(assistant_msg.id),
                     "user_message_id": user_message_id,
+                    "media": reply_media.media,
                 },
             )
 

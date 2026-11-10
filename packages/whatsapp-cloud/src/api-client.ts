@@ -19,6 +19,15 @@ interface DocumentPayload {
   filename: string;
 }
 
+/** One image to send after the reply text (ai-api `reply_media.py`). */
+export interface JobMedia {
+  index: number;
+  caption: string;
+  mimetype: string;
+  /** Source URL: only for the text fallback, never fetched by this client. */
+  url: string;
+}
+
 interface MessageOptions {
   conversationType: 'private' | 'group';
   senderJid?: string;
@@ -30,6 +39,8 @@ interface MessageOptions {
   isGroupAdmin?: boolean;
   phone?: string;
   whatsappLid?: string;
+  /** Called with the reply images when the job completes with any. */
+  onMedia?: (jobId: string, media: JobMedia[]) => void;
 }
 
 interface JobStatus {
@@ -38,6 +49,7 @@ interface JobStatus {
   complete: boolean;
   full_response?: string;
   error?: string;
+  media?: JobMedia[] | null;
 }
 
 interface EnqueueResponse {
@@ -72,6 +84,7 @@ export async function sendMessageToAI(
     isGroupAdmin,
     phone,
     whatsappLid,
+    onMedia,
   } = options;
 
   // Handle save-only endpoint separately
@@ -197,6 +210,7 @@ export async function sendMessageToAI(
 
     if (status.complete) {
       logger.info({ job_id, iterations, elapsedMs }, 'Job completed');
+      if (status.media?.length) onMedia?.(job_id, status.media);
       return status.full_response || '';
     }
 
@@ -214,6 +228,19 @@ export async function sendMessageToAI(
   throw new Error(
     `Polling timeout: job ${job_id} exceeded ${config.polling.maxIterations} iterations`
   );
+}
+
+/** Bytes of reply image `index` of a completed job (already SSRF-checked by ai-api). */
+export async function fetchJobMedia(jobId: string, index: number): Promise<Buffer> {
+  const response = await fetchWithTimeout(
+    `${config.aiApiUrl}/chat/job/${encodeURIComponent(jobId)}/media/${index}`,
+    { headers: aiApiHeaders() },
+    config.timeouts.default
+  );
+  if (!response.ok) {
+    throw new Error(`Job media failed: ${response.status} ${response.statusText}`);
+  }
+  return Buffer.from(await response.arrayBuffer());
 }
 
 export async function getUserPreferences(whatsappJid: string): Promise<UserPreferences | null> {

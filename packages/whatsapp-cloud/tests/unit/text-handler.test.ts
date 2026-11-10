@@ -20,6 +20,7 @@ vi.mock('../../src/config.js', async (importOriginal) => {
 
 vi.mock('../../src/api-client.js', () => ({
   sendMessageToAI: vi.fn(),
+  fetchJobMedia: vi.fn(),
   getUserPreferences: vi.fn().mockResolvedValue({ tts_enabled: false }),
   textToSpeech: vi.fn(),
 }));
@@ -28,6 +29,7 @@ vi.mock('../../src/services/graph-api.js', () => ({
   sendText: vi.fn().mockResolvedValue('wamid.sent'),
   sendTypingIndicator: vi.fn().mockResolvedValue(undefined),
   sendAudio: vi.fn().mockResolvedValue('wamid.audio'),
+  sendImage: vi.fn().mockResolvedValue('wamid.image'),
   sendReaction: vi.fn().mockResolvedValue(undefined),
   markAsRead: vi.fn().mockResolvedValue(undefined),
 }));
@@ -220,5 +222,61 @@ describe('handleTextMessage (Cloud) — burst sending', () => {
       ([, message]) => message === 'Sent AI response'
     );
     expect(successInfo).toBeUndefined();
+  });
+});
+
+describe('handleTextMessage (Cloud) — reply images', () => {
+  const media = [
+    { index: 0, caption: 'Fire map', mimetype: 'image/png', url: 'https://m.example.com/a.png' },
+  ];
+
+  beforeEach(() => vi.clearAllMocks());
+
+  async function setup(response: string) {
+    const { fetchJobMedia } = await import('../../src/api-client.js');
+    (fetchJobMedia as ReturnType<typeof vi.fn>).mockResolvedValue(Buffer.from('png-bytes'));
+    mockSendMessageToAI.mockImplementationOnce(
+      async (_jid: string, _text: string, options: { onMedia?: (...a: unknown[]) => void }) => {
+        options.onMedia?.('job-9', media);
+        return response;
+      }
+    );
+  }
+
+  it('sends the text, then uploads the image with its caption', async () => {
+    await setup('Here is the map.');
+
+    await handleTextMessage('16505551234', 'wamid.abc', 'map?', 'Test User');
+
+    expect(mockSendText.mock.calls).toEqual([['16505551234', 'Here is the map.']]);
+    expect(graphApi.sendImage).toHaveBeenCalledWith(
+      '16505551234',
+      Buffer.from('png-bytes'),
+      'image/png',
+      'Fire map'
+    );
+  });
+
+  it('sends no empty text message for an images-only reply', async () => {
+    await setup('');
+
+    await handleTextMessage('16505551234', 'wamid.abc', 'map?', 'Test User');
+
+    expect(mockSendText).not.toHaveBeenCalled();
+    expect(graphApi.sendImage).toHaveBeenCalledTimes(1);
+    expect(mockReaction).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the link as text when the upload fails', async () => {
+    await setup('Map:');
+    (graphApi.sendImage as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('upload'));
+
+    await handleTextMessage('16505551234', 'wamid.abc', 'map?', 'Test User');
+
+    expect(mockSendText.mock.calls).toEqual([
+      ['16505551234', 'Map:'],
+      ['16505551234', 'Fire map: https://m.example.com/a.png'],
+    ]);
+    expect(mockReaction).not.toHaveBeenCalled();
   });
 });
