@@ -1,10 +1,10 @@
 # CLAUDE.md
 
-Guidance for Claude Code (claude.ai/code) in this repository. Keep `CLAUDE.md`, `AGENTS.md` and the folder `CLAUDE.md` files (symlinked as `AGENTS.md`) updated with important changes, putting subsystem detail in the folder file or a linked doc, not here. Keep every rules file under 24 KB (`< 24,000` bytes) so Antigravity (`agy`) never truncates it.
+Guidance for Claude Code in this repository. Keep `CLAUDE.md`, `AGENTS.md` and the folder `CLAUDE.md` files (symlinked as `AGENTS.md`) updated with important changes, putting subsystem detail in the folder file or a linked doc, not here. Keep every rules file under 24 KB (`< 24,000` bytes) so Antigravity (`agy`) never truncates it.
 
 AI chat-agent system: Node.js/TypeScript clients (Baileys + Meta Cloud API + Telegram/grammY) + Python/FastAPI API (Pydantic AI + Gemini).
 
-`README.md` has the setup guide, the API endpoint tables and the environment variable list.
+`README.md`: setup guide, API endpoint tables, environment variables.
 
 ## Structure
 
@@ -52,6 +52,7 @@ Baileys `messages.upsert` (`whatsapp.ts`) → a handler in `handlers/` → `hand
 | `docs/docker.md` | Non-root images, ignore files, volume chown on upgrade, TS logging/shutdown |
 | `packages/ai-api/docs/admin-api.md` | `/admin` routes, runtime settings `REGISTRY` |
 | `packages/ai-api/docs/media-and-kb.md` | KB dedup, hybrid/vector search, PDF parser, STT |
+| `packages/ai-api/docs/group-topics.md` | Group topics job (opt-in), topic search |
 | `packages/ai-api/docs/markdown-formatting.md` | Model-output Markdown → WhatsApp/Telegram conversion |
 | `packages/ai-api/docs/logfire.md` | Logfire instrumentation details |
 | `docs/architecture.md`, `docs/commands.md`, `docs/testing.md`, `docs/workflows.md` | Full message flow, command list, test patterns, workflow steps |
@@ -100,7 +101,7 @@ cd packages/ai-api && uv run pytest tests/mocked/test_model_chain_fallback.py -k
 ## Database
 
 - **PostgreSQL + pgvector** (3072-dim vectors via `gemini-embedding-001`)
-- **14 tables**, models in `database.py` and `kb_models.py` (list in `docs/architecture.md`)
+- **16 tables**, models in `database.py` and `kb_models.py` (list in `docs/architecture.md`)
 - **No Alembic migrations.** SQLAlchemy `create_all()` only creates missing *tables*, never new columns. Column/index changes ship as hand-written, idempotent (`IF NOT EXISTS`) SQL in `packages/ai-api/docs/migrations/<YYYY-MM-DD>-<name>.sql`, named so they match what `create_all()` emits on a fresh DB. Apply them to an existing Docker deployment BEFORE rolling out the code that needs them (safe to re-run):
   ```bash
   docker compose exec -T postgres psql -U aiagent -d aiagent \
@@ -122,7 +123,7 @@ cd packages/ai-api && uv run pytest tests/mocked/test_model_chain_fallback.py -k
 
 ## Library docs
 
-**Before writing or modifying code that touches any external library, SDK, API or framework, look up its current documentation with the Context7 MCP server** (resolve the library id, then query the docs). Do not rely on training data for signatures or behavior. This covers every dependency (Baileys, Pydantic AI, FastAPI, Fastify, grammY, Meta Cloud API, Gemini, pgvector, SQLAlchemy, Zod, Redis, Docling, Groq…). Fall back to web search when Context7 has no entry.
+**Before writing or changing code that touches any external library, SDK, API or framework, look up its current docs with the Context7 MCP server** (resolve the library id, then query). Never rely on training data for signatures or behavior. This covers every dependency (Baileys, Pydantic AI, FastAPI, Fastify, grammY, Meta Cloud API, Gemini, pgvector, SQLAlchemy, Zod, Redis, Docling, Groq…). Fall back to web search when Context7 has no entry.
 
 ## Task tracking: Devflow
 

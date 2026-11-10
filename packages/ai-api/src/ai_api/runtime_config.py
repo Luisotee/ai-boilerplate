@@ -189,6 +189,15 @@ REGISTRY: tuple[SettingSpec, ...] = (
         "Messages of context returned around each semantic match.",
     ),
     SettingSpec(
+        "group_topics_enabled",
+        "bool",
+        True,
+        "search",
+        "Summarise group chats into topics (stream worker, about one cheap model "
+        "call per finished conversation) that conversation search uses first in "
+        "groups. Sends every group message, mentioned or not, to the chat model.",
+    ),
+    SettingSpec(
         "kb_search_limit",
         "int",
         True,

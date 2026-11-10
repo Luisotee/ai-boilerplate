@@ -137,6 +137,15 @@ class Settings(BaseSettings):
     # post into groups on a member's behalf. Overridable at runtime via /admin.
     shared_group_tools_enabled: bool = False
 
+    # Group topics (rag/group_topics.py, run by the stream worker): summarise each
+    # group's finished stretches of chat into {subject, summary} topics that
+    # search_conversation_history searches first in that group. Off by default:
+    # it sends every group message, mentioned or not, to the chat model
+    # (DeepSeek too when DEEPSEEK_API_KEY is set). Enabled is hot via /admin;
+    # the interval is read once at worker start.
+    group_topics_enabled: bool = False
+    group_topics_interval_minutes: int = Field(60, ge=5)
+
     # Bug reports (services/bug_reports.py, /admin/bug-reports): the report_bug
     # agent tool plus automatic reports from model errors, crashed chat jobs and
     # failed PDFs. Each report copies the chat's last messages for the operator.

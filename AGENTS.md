@@ -59,6 +59,7 @@ Deep detail lives in `AGENTS.md` (symlinked to `CLAUDE.md`) next to the code. **
 | `docs/docker.md` | Non-root images, ignore files, volume chown on upgrade, TS logging/shutdown |
 | `packages/ai-api/docs/admin-api.md` | `/admin` routes, runtime settings `REGISTRY` |
 | `packages/ai-api/docs/media-and-kb.md` | KB dedup, hybrid/vector search, PDF parser, STT |
+| `packages/ai-api/docs/group-topics.md` | Group topics job (opt-in), topic search |
 | `packages/ai-api/docs/markdown-formatting.md` | Model-output Markdown → WhatsApp/Telegram conversion |
 | `packages/ai-api/docs/logfire.md` | Logfire instrumentation details |
 | `docs/architecture.md`, `docs/commands.md`, `docs/testing.md`, `docs/workflows.md`, `docs/devflow.md` | Full message flow, command list, test patterns, workflow steps, Devflow board |
@@ -126,7 +127,7 @@ cd packages/ai-api && uv run pytest tests/mocked/test_model_chain_fallback.py -k
 ## Database
 
 - **PostgreSQL + pgvector** (3072-dim vectors via `gemini-embedding-001`).
-- **14 tables**: `users`, `conversation_messages`, `conversation_preferences`, `core_memories`, `bot_prompt`, `runtime_settings`, `broadcasts`, `broadcast_recipients`, `bug_reports`, `api_keys`, `scheduled_tasks`, `task_runs` (`database.py`) + `knowledge_base_documents`, `knowledge_base_chunks` (`kb_models.py`).
+- **16 tables**: `users`, `conversation_messages`, `conversation_preferences`, `core_memories`, `bot_prompt`, `runtime_settings`, `broadcasts`, `broadcast_recipients`, `bug_reports`, `api_keys`, `scheduled_tasks`, `task_runs`, `group_topics`, `group_topic_cursors` (`database.py`) + `knowledge_base_documents`, `knowledge_base_chunks` (`kb_models.py`).
 - **No Alembic migrations**: `create_all()` only creates missing tables, never new columns/indexes. Ship column/index changes as idempotent (`IF NOT EXISTS`) SQL in `packages/ai-api/docs/migrations/<YYYY-MM-DD>-<name>.sql` (use `/db-migration` skill) and apply before rollout:
   ```bash
   docker compose exec -T postgres psql -U aiagent -d aiagent < packages/ai-api/docs/migrations/<file>.sql

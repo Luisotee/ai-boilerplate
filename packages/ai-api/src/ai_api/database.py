@@ -126,6 +126,9 @@ class ConversationMessage(Base):
             postgresql_using="hnsw",
             postgresql_ops={"embedding": "halfvec_cosine_ops"},
         ),
+        # One chat's messages in (timestamp, id) order: the group-topics job's
+        # cursor reads (rag/group_topics.py); docs/migrations/2026-11-09-group-topics.sql.
+        Index("idx_conversation_messages_user_ts_id", "user_id", "timestamp", "id"),
     )
 
 
@@ -321,6 +324,60 @@ class BugReport(Base):
     last_seen_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     resolved_at = Column(DateTime, nullable=True)
     resolution_note = Column(Text, nullable=True)
+
+
+class GroupTopic(Base):
+    """An LLM-written {subject, summary} of a stretch of one group's chat.
+
+    Written by the group-topics job in the stream worker (rag/group_topics.py),
+    searched by search_conversation_history in that group only. ``user_id`` is
+    the GROUP's users row, so a private chat never reads it. The id is derived
+    from the block's message ids (never from the generated subject), so a
+    re-run of the same block can't duplicate topics. New table: create_all()
+    builds it and its HNSW index, no migration file needed.
+    """
+
+    __tablename__ = "group_topics"
+
+    id = Column(UUID(as_uuid=True), primary_key=True)
+    user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    block_key = Column(String(64), nullable=False, index=True)
+    subject = Column(String(200), nullable=False)
+    summary = Column(Text, nullable=False)
+    start_at = Column(DateTime, nullable=False)
+    end_at = Column(DateTime, nullable=False)
+    message_count = Column(Integer, nullable=False)
+    embedding = Column(Vector(3072), nullable=True)  # gemini-embedding-001
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        Index(
+            "idx_group_topics_embedding_hnsw",
+            func.cast(embedding, HALFVEC(3072)).label("embedding"),
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "halfvec_cosine_ops"},
+        ),
+    )
+
+
+class GroupTopicCursor(Base):
+    """How far the group-topics job has read one group's messages.
+
+    The watermark is the (timestamp, id) of the last message of the last
+    ingested block, never the time the job ran: a message saved while the
+    model was working would otherwise fall behind it and be skipped forever.
+    """
+
+    __tablename__ = "group_topic_cursors"
+
+    user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    last_message_at = Column(DateTime, nullable=False)
+    last_message_id = Column(UUID(as_uuid=True), nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
 
 class ApiKey(Base):

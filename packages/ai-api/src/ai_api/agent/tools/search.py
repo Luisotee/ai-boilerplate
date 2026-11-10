@@ -1,5 +1,6 @@
 from pydantic_ai import RunContext
 
+from ...database import is_group_jid
 from ...logger import logger
 from ...rag.conversation import (
     format_conversation_results,
@@ -7,12 +8,14 @@ from ...rag.conversation import (
 from ...rag.conversation import (
     search_conversation_history as search_conversation_fn,
 )
+from ...rag.group_topics import format_topic_results, search_group_topics
 from ...rag.knowledge_base import (
     format_knowledge_base_results,
 )
 from ...rag.knowledge_base import (
     search_knowledge_base as search_kb_fn,
 )
+from ...runtime_config import runtime_config
 from ..core import AgentDeps, agent
 from ._db import safe_rollback
 
@@ -55,6 +58,13 @@ async def search_conversation_history(ctx: RunContext[AgentDeps], search_query: 
         if not query_embedding:
             return "Failed to generate search embedding. Please try again."
 
+        # In a group, its topic summaries (rag/group_topics.py) come first; they
+        # are keyed by this group's own users.id, so a private chat never sees them.
+        topics = []
+        if is_group_jid(deps.whatsapp_jid) and runtime_config.get("group_topics_enabled"):
+            topics = search_group_topics(deps.db, query_embedding, deps.user_id)
+            logger.info(f"Group topic search returned {len(topics)} topics")
+
         # Call pure function for semantic search (uses env defaults)
         messages = await search_conversation_fn(
             db=deps.db,
@@ -64,6 +74,15 @@ async def search_conversation_history(ctx: RunContext[AgentDeps], search_query: 
             exclude_message_ids=deps.recent_message_ids,
             # Omit limit, similarity_threshold, context_window to use env defaults
         )
+
+        # Messages are searched even when topics match: a summary drops details
+        # (a number, a link), and no topic covers messages from before the job
+        # started, newer than its last run, or in a block it skipped.
+        if topics:
+            reply = format_topic_results(topics)
+            if messages:
+                reply += "\n\nMatching messages:\n" + format_conversation_results(messages)
+            return reply
 
         if not messages:
             logger.info("No relevant past messages found.")
