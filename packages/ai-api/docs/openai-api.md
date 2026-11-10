@@ -41,6 +41,8 @@ docker compose exec api python -m ai_api.scripts.api_keys revoke sk-AbCdEfG   # 
 
 **Replies** keep the model's Markdown (`surfaces.py`: `client_id="web"`), minus the `---` burst lines, which would otherwise split a WhatsApp reply into several messages. The formatting guidance asks the model for Markdown. History stores the WhatsApp-markup version, so it stays uniform for a user linked across surfaces; only a web-only `web:` user keeps Markdown in history (`surfaces.stores_markdown`), since a `/link` discards that row and its history. Tools that deliver through a chat client (WhatsApp reaction/message/location/contact, shared-group tools) are hidden; so is the broadcast-subscription tool for a web-only user, who has no broadcast route.
 
+**Pipeline**: a `/v1` job runs alone (no burst merging, no quiet-period wait), is never pushed late to WhatsApp/Telegram, and keeps reply images inline as Markdown `![..](..)` (no image extraction). Scheduled tasks can't be created from the app.
+
 **Non-streaming**: a `chat.completion` with `finish_reason: "stop"` and zero `usage` (token cost lives in Logfire). The route polls the job every 500 ms for up to 120 s, like the chat clients: a failed job is a 502, a timeout a 504 (the job still finishes and its answer lands in history).
 
 **`stream: true`**: `text/event-stream` with a role delta at once, `: ping` comments every 15 s while the worker runs, the reply as one content delta (the worker publishes the reply in one piece), a `finish_reason: "stop"` chunk, a usage chunk if `stream_options.include_usage`, then `data: [DONE]`. A failure or timeout is an `{"error": …}` event before `[DONE]`.

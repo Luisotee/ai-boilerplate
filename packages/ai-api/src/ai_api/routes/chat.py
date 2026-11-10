@@ -5,7 +5,8 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
+from pydantic_ai import UsageLimitExceeded
 from sqlalchemy.orm import Session
 from starlette.requests import Request
 
@@ -26,8 +27,20 @@ from ..formatting import markdown_to_whatsapp
 from ..kb_models import KnowledgeBaseDocument
 from ..logger import logger
 from ..queue.connection import get_redis_client
-from ..queue.schemas import ChunkData, EnqueueResponse, JobStatusResponse
-from ..queue.utils import get_job_chunks, get_job_metadata, save_job_image
+from ..queue.schemas import (
+    ChunkData,
+    DuplicateResponse,
+    EnqueueResponse,
+    JobMedia,
+    JobStatusResponse,
+)
+from ..queue.utils import (
+    get_job_chunks,
+    get_job_media,
+    get_job_metadata,
+    save_job_image,
+    save_job_images,
+)
 from ..runtime_config import runtime_config
 from ..schemas import (
     ChatRequest,
@@ -37,11 +50,13 @@ from ..schemas import (
     SaveMessageRequest,
 )
 from ..services.autolink import try_autolink
+from ..services.dedup import claim_inbound, release_inbound
 from ..services.link import link_command_reply
+from ..streams.delivery import claim_delivery
 from ..streams.manager import add_message_to_stream
 from ..surfaces import is_app_jid, is_cli_jid
 from ..whatsapp import create_whatsapp_client
-from ..whitelist import Whitelist, is_whitelisted, parse_whitelist
+from ..whitelist import Whitelist, chat_in_scope, parse_whitelist
 
 router = APIRouter()
 
@@ -132,9 +147,13 @@ def _is_whitelisted(whatsapp_jid: str, phone: str | None = None) -> bool:
     raw = runtime_config.get("whitelist_phones")
     if not raw:
         return True
-    if settings.group_gating == "membership" and is_group_jid(whatsapp_jid):
-        return True
-    return is_whitelisted(_parse_whitelist(raw), whatsapp_jid, phone)
+    return chat_in_scope(
+        _parse_whitelist(raw),
+        whatsapp_jid,
+        phone,
+        is_group=is_group_jid(whatsapp_jid),
+        group_gating=settings.group_gating,
+    )
 
 
 def _is_allowed(request: Request, whatsapp_jid: str, phone: str | None = None) -> bool:
@@ -245,6 +264,10 @@ async def save_message_only(
         logger.warning(f"Blocked non-whitelisted JID: {request.whatsapp_jid}")
         raise HTTPException(status_code=403, detail="Not authorized")
 
+    async with get_redis_client() as redis_client:
+        if not await claim_inbound(redis_client, request.whatsapp_jid, request.whatsapp_message_id):
+            return {"success": True, "duplicate": True}
+
     try:
         # Format message with sender name if group message
         content = (
@@ -275,18 +298,21 @@ async def save_message_only(
             phone=request.phone,
             whatsapp_lid=request.whatsapp_lid,
             name=_display_name(request),
+            whatsapp_message_id=request.whatsapp_message_id,
         )
 
         return {"success": True}
 
     except Exception as e:
         logger.error(f"Error saving message: {str(e)}", exc_info=True)
+        async with get_redis_client() as redis_client:
+            await release_inbound(redis_client, request.whatsapp_jid, request.whatsapp_message_id)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post(
     "/chat/enqueue",
-    response_model=EnqueueResponse | CommandResponse,
+    response_model=EnqueueResponse | CommandResponse | DuplicateResponse,
     tags=["Chat"],
 )
 @limiter.limit(f"{settings.rate_limit_expensive}/minute")
@@ -331,7 +357,11 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
     - Poll `/chat/job/{job_id}` for status and accumulated chunks
     - Or stream from `/chat/stream/{job_id}` via SSE
     """
-    has_image = chat_request.image_data is not None and chat_request.image_mimetype is not None
+    images: list[dict[str, str]] = []
+    if chat_request.image_data is not None and chat_request.image_mimetype is not None:
+        images.append({"data": chat_request.image_data, "mimetype": chat_request.image_mimetype})
+    images.extend({"data": i.data, "mimetype": i.mimetype} for i in chat_request.images or [])
+    has_image = bool(images)
     logger.info(
         f"Received request from {chat_request.whatsapp_jid}: {chat_request.message[:50]}... (has_image={has_image})"
     )
@@ -340,47 +370,65 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
         logger.warning(f"Blocked non-whitelisted JID: {chat_request.whatsapp_jid}")
         raise HTTPException(status_code=403, detail="Not authorized")
 
-    # Check for commands first (e.g., /settings, /tts on, /help)
-    if is_command(chat_request.message):
-        user = get_or_create_user(
-            db,
-            chat_request.whatsapp_jid,
-            chat_request.conversation_type,
-            phone=chat_request.phone,
-            whatsapp_lid=chat_request.whatsapp_lid,
-            name=_display_name(chat_request),
-        )
-        _record_client(db, user, chat_request.client_id)
+    # Drop a platform redelivery of a message we already took (before commands,
+    # so a replayed `/clean all` or `/link CODE` doesn't run twice either).
+    async with get_redis_client() as redis_client:
+        if not await claim_inbound(
+            redis_client, chat_request.whatsapp_jid, chat_request.whatsapp_message_id
+        ):
+            return DuplicateResponse()
 
-        # /link and /unlink need an async Redis client, so they're handled
-        # here rather than inside the sync `parse_and_execute`.
-        cleaned_message = normalize_command(chat_request.message)
-        link_parts = cleaned_message.split()
-        link_command = link_parts[0].lower() if link_parts else ""
-
-        if link_command in ("/link", "/unlink"):
-            response_text = await link_command_reply(
+    try:
+        # Check for commands first (e.g., /settings, /tts on, /help)
+        if is_command(chat_request.message):
+            user = get_or_create_user(
                 db,
-                get_redis_client,
-                user,
                 chat_request.whatsapp_jid,
                 chat_request.conversation_type,
-                link_parts,
+                phone=chat_request.phone,
+                whatsapp_lid=chat_request.whatsapp_lid,
+                name=_display_name(chat_request),
             )
-            logger.info(f"Command executed for {chat_request.whatsapp_jid}: {link_command}")
-            return CommandResponse(is_command=True, response=response_text)
+            _record_client(db, user, chat_request.client_id)
 
-        result = parse_and_execute(
-            db,
-            str(user.id),
-            chat_request.whatsapp_jid,
-            chat_request.message,
-            conversation_type=chat_request.conversation_type,
-            is_group_admin=chat_request.is_group_admin,
-        )
-        if result.is_command:
-            logger.info(f"Command executed for {chat_request.whatsapp_jid}: {chat_request.message}")
-            return CommandResponse(is_command=True, response=result.response_text)
+            # /link and /unlink need an async Redis client, so they're handled
+            # here rather than inside the sync `parse_and_execute`.
+            cleaned_message = normalize_command(chat_request.message)
+            link_parts = cleaned_message.split()
+            link_command = link_parts[0].lower() if link_parts else ""
+
+            if link_command in ("/link", "/unlink"):
+                response_text = await link_command_reply(
+                    db,
+                    get_redis_client,
+                    user,
+                    chat_request.whatsapp_jid,
+                    chat_request.conversation_type,
+                    link_parts,
+                )
+                logger.info(f"Command executed for {chat_request.whatsapp_jid}: {link_command}")
+                return CommandResponse(is_command=True, response=response_text)
+
+            result = parse_and_execute(
+                db,
+                str(user.id),
+                chat_request.whatsapp_jid,
+                chat_request.message,
+                conversation_type=chat_request.conversation_type,
+                is_group_admin=chat_request.is_group_admin,
+            )
+            if result.is_command:
+                logger.info(
+                    f"Command executed for {chat_request.whatsapp_jid}: {chat_request.message}"
+                )
+                return CommandResponse(is_command=True, response=result.response_text)
+    except Exception:
+        # The command never ran to the end: let the platform's retry through.
+        async with get_redis_client() as redis_client:
+            await release_inbound(
+                redis_client, chat_request.whatsapp_jid, chat_request.whatsapp_message_id
+            )
+        raise
 
     try:
         # Check for document
@@ -393,7 +441,8 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
         # For image messages, store with [Image] marker for history context
         if has_image:
             # Store as [Image: caption] or [Image] for database history
-            content = f"[Image: {chat_request.message}]" if chat_request.message else "[Image]"
+            label = "Image" if len(images) == 1 else f"{len(images)} images"
+            content = f"[{label}: {chat_request.message}]" if chat_request.message else f"[{label}]"
             if chat_request.sender_name:
                 content = f"{chat_request.sender_name}: {content}"
         elif has_document:
@@ -448,6 +497,7 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
             phone=chat_request.phone,
             whatsapp_lid=chat_request.whatsapp_lid,
             name=_display_name(chat_request),
+            whatsapp_message_id=chat_request.whatsapp_message_id,
         )
 
         # Add message to user's Redis Stream for sequential processing
@@ -465,6 +515,9 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
             }
             if chat_request.whatsapp_message_id:
                 job_data["whatsapp_message_id"] = chat_request.whatsapp_message_id
+            if chat_request.sender_jid:
+                # Burst merging keys on the sender id, not the display name
+                job_data["sender_jid"] = chat_request.sender_jid
             if chat_request.sender_name:
                 job_data["sender_name"] = chat_request.sender_name
             if chat_request.client_id:
@@ -477,8 +530,12 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
             # Handle image data if present
             if has_image:
                 # Store image in Redis separately (to avoid large stream messages)
-                await save_job_image(redis_client, job_id, chat_request.image_data)
-                job_data["image_mimetype"] = chat_request.image_mimetype
+                if len(images) == 1:
+                    await save_job_image(redis_client, job_id, images[0]["data"])
+                else:
+                    await save_job_images(redis_client, job_id, images)
+                    job_data["image_count"] = str(len(images))
+                job_data["image_mimetype"] = images[0]["mimetype"]
                 job_data["has_image"] = "true"
 
             if has_document:
@@ -563,6 +620,11 @@ async def enqueue_chat(request: Request, chat_request: ChatRequest, db: Session 
 
     except Exception as e:
         logger.error(f"Error enqueueing chat: {str(e)}", exc_info=True)
+        # Nothing was queued: let the platform's retry of this message through.
+        async with get_redis_client() as redis_client:
+            await release_inbound(
+                redis_client, chat_request.whatsapp_jid, chat_request.whatsapp_message_id
+            )
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -591,6 +653,19 @@ async def get_job_status(request: Request, job_id: str):
             # Infer status from Redis data (job metadata + chunks)
             status = await get_stream_job_status(redis_client, job_id)
 
+            # A finished job's reply is delivered once: by this poll, or by the
+            # worker's push when the job outlived the clients' polling window
+            # (streams/delivery.py). If the push won, or the job was merged into
+            # a later job's reply (a burst), the client sends nothing.
+            if status in ("complete", "failed"):
+                metadata = await get_job_metadata(redis_client, job_id)
+                if (metadata and metadata.get("merged_into")) or await claim_delivery(
+                    redis_client, job_id, "poll"
+                ) == "push":
+                    return JobStatusResponse(
+                        job_id=job_id, status="complete", complete=True, silent=True
+                    )
+
             # Get chunks
             chunks = await get_job_chunks(redis_client, job_id)
             total_chunks = len(chunks)
@@ -610,6 +685,12 @@ async def get_job_status(request: Request, job_id: str):
             if status == "complete" and chunks:
                 response.full_response = "".join(chunk["content"] for chunk in chunks)
 
+            # Images to send after the text (reply_media.py).
+            if status == "complete":
+                metadata = await get_job_metadata(redis_client, job_id)
+                if metadata and metadata.get("media"):
+                    response.media = [JobMedia(**item) for item in metadata["media"]]
+
             # Surface the agent error from metadata so the client can log it.
             if status == "failed":
                 metadata = await get_job_metadata(redis_client, job_id)
@@ -621,6 +702,40 @@ async def get_job_status(request: Request, job_id: str):
     except Exception as e:
         logger.error(f"Error getting job status for {job_id}: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get(
+    "/chat/job/{job_id}/media/{index}",
+    tags=["Chat"],
+    response_class=Response,
+    responses={200: {"content": {"image/jpeg": {}, "image/png": {}}}, 404: {}},
+)
+@limiter.exempt
+async def get_job_media_file(request: Request, job_id: str, index: int):
+    """
+    Raw bytes of reply image `index` of a completed job.
+
+    The chat clients call this for each entry of the job's `media` list and
+    send the image to the chat the job came from. The bytes were downloaded
+    by the SSRF-hardened `safe_fetch.fetch_public_image`, so no client ever
+    fetches a model-chosen URL itself. 404 once the job's data has expired.
+    """
+    try:
+        async with get_redis_client() as redis_client:
+            metadata = await get_job_metadata(redis_client, job_id)
+            items = (metadata or {}).get("media") or []
+            item = next((m for m in items if m.get("index") == index), None)
+            if item is None:
+                raise HTTPException(status_code=404, detail="Media not found")
+            data = await get_job_media(redis_client, job_id, index)
+            if data is None:
+                raise HTTPException(status_code=404, detail="Media not found")
+            return Response(content=data, media_type=item["mimetype"])
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting media {index} for job {job_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error") from e
 
 
 @router.post("/chat", response_model=ChatResponse, tags=["Chat"])
@@ -672,7 +787,7 @@ async def chat(request: Request, chat_request: ChatRequest, db: Session = Depend
                 logger.error(f"Embedding generation error (continuing anyway): {str(e)}")
 
         # Save user message with group context and embedding
-        save_message(
+        user_msg = save_message(
             db,
             chat_request.whatsapp_jid,
             "user",
@@ -684,6 +799,7 @@ async def chat(request: Request, chat_request: ChatRequest, db: Session = Depend
             phone=chat_request.phone,
             whatsapp_lid=chat_request.whatsapp_lid,
             name=_display_name(chat_request),
+            whatsapp_message_id=chat_request.whatsapp_message_id,
         )
 
         # Prepare agent dependencies for semantic search tool (dependency injection)
@@ -712,7 +828,8 @@ async def chat(request: Request, chat_request: ChatRequest, db: Session = Depend
                 db=db,
                 user_id=str(user.id),
                 whatsapp_jid=chat_request.whatsapp_jid,
-                recent_message_ids=[str(msg.id) for msg in history] if history else [],
+                # The current message too, so semantic search never returns it
+                recent_message_ids=[str(msg.id) for msg in history or []] + [str(user_msg.id)],
                 embedding_service=embedding_service,
                 http_client=http_client,
                 whatsapp_client=whatsapp_client,
@@ -747,7 +864,7 @@ async def chat(request: Request, chat_request: ChatRequest, db: Session = Depend
 
         return ChatResponse(response=ai_response)
 
-    except MODEL_ERRORS as e:
+    except (*MODEL_ERRORS, UsageLimitExceeded) as e:
         # Same classification as streams/processor.py: the model chain failed
         # (transient provider outage, both DeepSeek and Gemini down, exhausted
         # retries). 503 tells the caller it is retryable; nothing is saved as the

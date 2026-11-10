@@ -17,6 +17,11 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
+// The whitelist comes from the AI API now; serve WHITELIST_PHONES from the env.
+vi.mock('../../src/services/live-whitelist.js', async () =>
+  (await import('../helpers/live-whitelist-env.js')).envWhitelistMock()
+);
+
 // makeWASocket is referenced inside the baileys mock factory, so hoist it.
 const { makeWASocket } = vi.hoisted(() => ({ makeWASocket: vi.fn() }));
 
@@ -29,6 +34,10 @@ vi.mock('../../src/services/baileys.js', () => ({
   setConnectionStatus: vi.fn(),
   setLatestQr: vi.fn(),
   getConnectionInfo: vi.fn(),
+  noteInbound: vi.fn(),
+  setLastDisconnect: vi.fn(),
+  setReconnectAttempts: vi.fn(),
+  sendSerialized: vi.fn(),
 }));
 
 vi.mock('node:fs/promises', async (importOriginal) => ({
@@ -82,8 +91,8 @@ describe('whitelist gate placement in messages.upsert', () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
-    // config.ts computes whitelistPhones at module load, and loads the root
-    // .env WITHOUT override — so a stubbed process.env value wins.
+    // The live whitelist is served from WHITELIST_PHONES by the test double
+    // (tests/helpers/live-whitelist-env.ts).
     vi.stubEnv('WHITELIST_PHONES', PHONE);
 
     handlers = new Map();
@@ -104,8 +113,8 @@ describe('whitelist gate placement in messages.upsert', () => {
     await initializeWhatsApp();
 
     // Guard against a silent pass on the wrong whitelist.
-    const { config } = await import('../../src/config.js');
-    expect(config.whitelistPhones.phones.has(PHONE)).toBe(true);
+    const { getLiveWhitelist } = await import('../../src/services/live-whitelist.js');
+    expect((await getLiveWhitelist())?.phones.has(PHONE)).toBe(true);
 
     ({ handleTextMessage } = (await import('../../src/handlers/text.js')) as never);
     ({ sendFailureReaction } = (await import('../../src/utils/reactions.js')) as never);
@@ -151,6 +160,15 @@ describe('whitelist gate placement in messages.upsert', () => {
     expect(handleTextMessage).not.toHaveBeenCalled();
     expect(userSpy).not.toHaveBeenCalled(); // gate precedes the sock.user deref
     expect(sendFailureReaction).not.toHaveBeenCalled(); // nothing reacted into a blocked chat
+  });
+
+  it('FAILS CLOSED: drops a whitelisted contact when the whitelist is unavailable', async () => {
+    vi.stubEnv('WHITELIST_UNAVAILABLE', '1');
+    await driveUpsert(makeLidTextMsg(OK_LID, PHONE));
+
+    expect(handleTextMessage).not.toHaveBeenCalled();
+    expect(userSpy).not.toHaveBeenCalled();
+    expect(sendFailureReaction).not.toHaveBeenCalled();
   });
 });
 
@@ -297,5 +315,135 @@ describe.each(['jid', 'membership'] as const)('GROUP_GATING=%s with the group li
     expect(handleTextMessage).toHaveBeenCalledOnce();
     expect(handleTextMessage.mock.calls[0][5]).not.toHaveProperty('saveOnly', true);
     expect(sock.groupMetadata).not.toHaveBeenCalled();
+  });
+});
+
+// "@bot, then the question": the window turns the sender's NEXT message into an
+// addressed one, but never past the gate (membership mode keeps a
+// non-whitelisted sender save-only even inside the window).
+describe('mention window (GROUP_GATING=membership)', () => {
+  let handlers: Map<string, (arg: unknown) => unknown>;
+  let handleTextMessage: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    vi.stubEnv('WHITELIST_PHONES', PHONE);
+    vi.stubEnv('GROUP_GATING', 'membership');
+    vi.stubEnv('BOT_NAME', 'Curupira');
+    vi.stubEnv('GROUP_MENTION_WINDOW_SECONDS', '60');
+
+    handlers = new Map();
+    const sock: Record<string, unknown> = {
+      ev: {
+        on: vi.fn((event: string, cb: (arg: unknown) => unknown) => handlers.set(event, cb)),
+      },
+      sendPresenceUpdate: vi.fn(),
+      groupMetadata: vi.fn().mockResolvedValue({
+        id: GROUP,
+        subject: 'Team',
+        participants: [{ id: MEMBER }, { id: STRANGER }],
+      }),
+      signalRepository: { lidMapping: { getPNForLID: vi.fn().mockResolvedValue(null) } },
+      user: { id: '5511000000000:42@s.whatsapp.net', lid: '123456789:42@lid' },
+    };
+    makeWASocket.mockReturnValue(sock);
+
+    const { initializeWhatsApp } = await import('../../src/whatsapp.js');
+    await initializeWhatsApp();
+    ({ handleTextMessage } = (await import('../../src/handlers/text.js')) as never);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  async function drive(msg: unknown) {
+    await handlers.get('messages.upsert')!({ messages: [msg], type: 'notify' });
+  }
+
+  function plain(participant: string, text = 'and the question') {
+    return {
+      key: { remoteJid: GROUP, participant, fromMe: false, id: 'P1' },
+      message: { conversation: text },
+      pushName: 'Someone',
+    };
+  }
+
+  const saveOnlyOf = (call: number) => handleTextMessage.mock.calls[call][5]?.saveOnly === true;
+
+  it('a reaction or an edit between the mention and the question keeps the window', async () => {
+    await drive(makeGroupMsg(MEMBER, true));
+    await drive({
+      key: { remoteJid: GROUP, participant: MEMBER, fromMe: false, id: 'R1' },
+      message: { reactionMessage: { key: { id: 'X' }, text: '👍' } },
+    });
+    await drive({
+      key: { remoteJid: GROUP, participant: MEMBER, fromMe: false, id: 'E1' },
+      message: {
+        protocolMessage: {
+          type: 14,
+          key: { id: 'M1' },
+          editedMessage: { conversation: '@bot fixed typo' },
+        },
+      },
+    });
+    await drive(plain(MEMBER));
+
+    expect(handleTextMessage).toHaveBeenCalledTimes(2);
+    expect(saveOnlyOf(1)).toBe(false);
+  });
+
+  it("answers the sender's next message after a pill mention, once", async () => {
+    await drive(makeGroupMsg(MEMBER, true));
+    await drive(plain(MEMBER));
+    await drive(plain(MEMBER, 'thanks'));
+
+    expect(handleTextMessage).toHaveBeenCalledTimes(3);
+    expect(saveOnlyOf(0)).toBe(false);
+    expect(saveOnlyOf(1)).toBe(false);
+    expect(saveOnlyOf(2)).toBe(true);
+  });
+
+  it('a typed @Name (no pill) addresses the bot and opens the window', async () => {
+    await drive(plain(MEMBER, '@Curupira'));
+    await drive(plain(MEMBER));
+
+    expect(saveOnlyOf(0)).toBe(false);
+    expect(saveOnlyOf(1)).toBe(false);
+  });
+
+  it("does not open the window for another sender's messages", async () => {
+    await drive(makeGroupMsg(MEMBER, true));
+    await drive(plain(STRANGER));
+
+    expect(saveOnlyOf(1)).toBe(true);
+  });
+
+  it('the protocol-message upsert of an edit or revoke is not handled as a new message', async () => {
+    const protocol = (type: number, extra = {}) => ({
+      key: { remoteJid: GROUP, participant: MEMBER, fromMe: false, id: 'E1' },
+      message: { protocolMessage: { type, key: { id: 'M1' }, ...extra } },
+      pushName: 'Someone',
+    });
+    await drive(protocol(14, { editedMessage: { conversation: '@Curupira edited' } })); // MESSAGE_EDIT
+    await drive({
+      ...protocol(14),
+      message: {
+        editedMessage: {
+          message: { protocolMessage: { type: 14, editedMessage: { conversation: 'x' } } },
+        },
+      },
+    });
+    await drive(protocol(0)); // REVOKE
+    expect(handleTextMessage).not.toHaveBeenCalled();
+  });
+
+  it('PRIVACY: a non-whitelisted sender stays save-only inside the window', async () => {
+    await drive(makeGroupMsg(STRANGER, true));
+    await drive(plain(STRANGER));
+
+    expect(saveOnlyOf(0)).toBe(true);
+    expect(saveOnlyOf(1)).toBe(true);
   });
 });

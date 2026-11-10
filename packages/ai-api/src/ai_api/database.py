@@ -14,6 +14,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     create_engine,
+    or_,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -103,6 +104,11 @@ class ConversationMessage(Base):
 
     timestamp = Column(DateTime, default=datetime.utcnow, nullable=False)
 
+    # The platform's own message id (WhatsApp key.id / wamid, Telegram
+    # message_id), so a later revoke or edit of that message can find the row.
+    # Null for assistant replies and for rows saved before this column existed.
+    whatsapp_message_id = Column(String, nullable=True, index=True)
+
     # Embeddings for semantic search (nullable)
     embedding = Column(Vector(3072), nullable=True)  # Google gemini-embedding-001
     embedding_generated_at = Column(DateTime, nullable=True)
@@ -145,6 +151,12 @@ class CoreMemory(Base):
         UUID(as_uuid=True), ForeignKey("users.id"), unique=True, nullable=False, index=True
     )
     content = Column(Text, nullable=False, default="")
+    # The backup `/memories undo` restores (agent/tools/memory.py backup_after_save).
+    previous_content = Column(Text, nullable=True)
+    # Whether `content` was last written by a trusted source (a private chat, a
+    # confirmed group admin, /memories clear or undo). An untrusted group save
+    # backs up only trusted content, so undo returns the last admin-era state.
+    content_trusted = Column(Boolean, default=True, server_default=text("true"), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -323,6 +335,106 @@ class ApiKey(Base):
     revoked_at = Column(DateTime, nullable=True)
 
 
+class ScheduledTask(Base):
+    """A reminder or scheduled agent run, created by a user in one chat.
+
+    Created by the ``manage_scheduled_tasks`` agent tool, fired by the stream
+    worker's scheduler (``streams/scheduler.py``) and delivered by
+    ``streams/scheduled_runner.py``; listed and managed through
+    ``/admin/scheduled-tasks``. A task always delivers to the chat it was
+    created in (``user_id`` / ``address``): a group's task only to that group.
+    ``status`` and ``kind`` are closed enums once FleetView mirrors them.
+    """
+
+    __tablename__ = "scheduled_tasks"
+    __table_args__ = (
+        Index(
+            "ix_scheduled_tasks_due",
+            "next_run_at",
+            postgresql_where=text("status = 'active'"),
+        ),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    # The chat the task belongs to and delivers to (a group's row in a group).
+    # CASCADE: deleting a chat row (e.g. a /link orphan) drops its tasks.
+    user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    client_id = Column(String(16), nullable=True)  # 'baileys' (NULL) | 'cloud' | 'telegram'
+    address = Column(String, nullable=False)  # chat JID handed to the client's send-text
+    created_by_name = Column(String, nullable=True)  # the asking sender's name, display only
+    # The asking sender's id in a group (sender_jid: phone JID on Baileys, tg:<id>
+    # on Telegram). Under GROUP_GATING=membership a group task sends only while
+    # this sender is still whitelisted.
+    created_by_jid = Column(String, nullable=True)
+    kind = Column(String(16), nullable=False)  # 'reminder' | 'agent'
+    text = Column(Text, nullable=False)  # reminder text, or the agent run's prompt
+    schedule = Column(String(200), nullable=False)  # normalised human description
+    run_at = Column(DateTime, nullable=True)  # one-shot (naive UTC)
+    cron_expr = Column(String(100), nullable=True)  # recurring, in ``timezone``
+    interval_seconds = Column(Integer, nullable=True)  # recurring, every N seconds
+    timezone = Column(String(64), nullable=False)
+    # 'active' | 'completed' | 'cancelled' | 'disabled'
+    status = Column(String(16), nullable=False, index=True, default="active")
+    disabled_reason = Column(String(64), nullable=True)
+    next_run_at = Column(DateTime, nullable=True)  # naive UTC; NULL = nothing armed
+    last_run_at = Column(DateTime, nullable=True)
+    last_status = Column(String(16), nullable=True)
+    last_error = Column(String(64), nullable=True)
+    consecutive_failures = Column(Integer, nullable=False, default=0)
+    run_count = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    runs = relationship(
+        "TaskRun", back_populates="task", cascade="all, delete-orphan", passive_deletes=True
+    )
+
+
+class TaskRun(Base):
+    """One firing of a scheduled task: the slot it was for and what happened.
+
+    UNIQUE(task_id, scheduled_for): one run per slot, so even two schedulers
+    racing over the same row can't fire it twice.
+    """
+
+    __tablename__ = "task_runs"
+    __table_args__ = (
+        UniqueConstraint("task_id", "scheduled_for", name="uq_task_runs_slot"),
+        # The send lanes poll 'ready' every couple of seconds and the sweep
+        # scans the unfinished states: keep both off the (growing) history.
+        Index(
+            "ix_task_runs_open",
+            "status",
+            "created_at",
+            postgresql_where=text("status IN ('dispatched', 'running', 'ready', 'sending')"),
+        ),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    task_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("scheduled_tasks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    user_id = Column(UUID(as_uuid=True), nullable=True, index=True)  # the task's chat row
+    scheduled_for = Column(DateTime, nullable=False)  # the slot (naive UTC)
+    # 'dispatched' (agent run, on the chat stream) | 'running' (agent deciding the
+    # text) | 'ready' (text decided, waiting for a send lane) | 'sending' |
+    # 'sent' | 'silent' | 'skipped' | 'failed' | 'unknown'
+    status = Column(String(16), nullable=False, index=True, default="ready")
+    message = Column(Text, nullable=True)  # the text to send, once decided
+    error_code = Column(String(64), nullable=True)
+    late_seconds = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+
+    task = relationship("ScheduledTask", back_populates="runs")
+
+
 def init_db():
     """Initialize database tables"""
     logger.info("Initializing database...")
@@ -483,8 +595,45 @@ def get_or_create_user(
     return user
 
 
-def get_conversation_history(db, whatsapp_jid: str, conversation_type: str, limit: int = None):
-    """Retrieve recent conversation history for a user by WhatsApp JID"""
+def find_user(db, whatsapp_jid: str, phone: str | None = None) -> User | None:
+    """Look up a conversation's user row WITHOUT creating or merging anything.
+
+    Same resolution order as `get_or_create_user` (primary column, then LID,
+    then phone for WhatsApp), read-only, for callers that must act only on a
+    conversation that already exists (revoke/edit of a saved message).
+    """
+    if is_telegram_jid(whatsapp_jid):
+        return (
+            db.query(User).filter(User.telegram_jid == whatsapp_jid).first()
+            or db.query(User).filter(User.whatsapp_jid == whatsapp_jid).first()
+        )
+    user = db.query(User).filter(User.whatsapp_jid == whatsapp_jid).first()
+    if not user:
+        user = db.query(User).filter(User.whatsapp_lid == whatsapp_jid).first()
+    if not user and not is_group_jid(whatsapp_jid):
+        phone = phone or phone_from_jid(whatsapp_jid)
+        if phone:
+            user = db.query(User).filter(User.phone == phone).first()
+    return user
+
+
+def get_conversation_history(
+    db,
+    whatsapp_jid: str,
+    conversation_type: str,
+    limit: int = None,
+    *,
+    before_message_id: str | None = None,
+    exclude_ids: list[str] | None = None,
+):
+    """Retrieve recent conversation history for a user by WhatsApp JID.
+
+    A chat job passes the message(s) it is answering: ``before_message_id``
+    (the earliest of them) drops every user row saved after it, such as later
+    messages of the same burst (assistant rows stay: a reply to an earlier
+    message may be saved after this one), and ``exclude_ids`` drops the messages
+    themselves, which the job sends as the prompt instead.
+    """
     user = get_or_create_user(db, whatsapp_jid, conversation_type)
 
     # Load limit from runtime config (env default, overridable via /admin)
@@ -501,15 +650,73 @@ def get_conversation_history(db, whatsapp_jid: str, conversation_type: str, limi
 
         logger.info(f"Using history limit {limit} for {user.conversation_type} conversation")
 
+    query = db.query(ConversationMessage).filter(ConversationMessage.user_id == user.id)
+    anchor_id = _as_uuid(before_message_id)
+    if anchor_id is not None:
+        anchor = (
+            db.query(ConversationMessage.timestamp)
+            .filter(ConversationMessage.id == anchor_id)
+            .scalar()
+        )
+        if anchor is not None:
+            # User rows only: the bot's reply to an earlier message is often
+            # saved after this one arrived (the user wrote again while that
+            # job still ran), and the model must still see it.
+            query = query.filter(
+                or_(
+                    ConversationMessage.timestamp <= anchor,
+                    ConversationMessage.role == "assistant",
+                )
+            )
+    excluded = [u for u in (_as_uuid(i) for i in exclude_ids or []) if u is not None]
+    if excluded:
+        query = query.filter(ConversationMessage.id.notin_(excluded))
+
+    # Stepped window (see stepped_window_start): a start that only moves every
+    # `history_window_step` messages, so the history prefix is identical across
+    # runs and the provider's prompt cache can serve it. Either way the fetch is
+    # newest-first with a LIMIT (a bounded top-N sort), reversed to oldest first;
+    # a message saved after count() only shifts the window by one.
+    step = settings.history_window_step
+    size = limit
+    if step > 1:
+        total = query.count()
+        size = total - stepped_window_start(total, limit, step)
     messages = (
-        db.query(ConversationMessage)
-        .filter(ConversationMessage.user_id == user.id)
-        .order_by(ConversationMessage.timestamp.desc())
-        .limit(limit)
+        query.order_by(ConversationMessage.timestamp.desc(), ConversationMessage.id.desc())
+        .limit(size)
         .all()
     )
-
     return list(reversed(messages))
+
+
+def stepped_window_start(total: int, limit: int, step: int) -> int:
+    """Index of the first history message to send, out of ``total``.
+
+    A plain last-``limit`` window starts one message later on every turn, so
+    the history the model sees never repeats and the provider's prompt cache
+    can only reuse the instructions. Here the start moves in jumps of ``step``:
+    the window holds ``limit`` to ``limit + step - 1`` messages and keeps the
+    same first message for ``step`` new messages (about step/2 private turns).
+    Never fewer messages than ``limit``. ``step`` <= 1 is the plain window.
+    """
+    if total <= limit:
+        return 0
+    step = max(step, 1)
+    return ((total - limit) // step) * step
+
+
+def _as_uuid(value) -> uuid.UUID | None:
+    """Message ids travel as strings (stream fields); the column is a UUID.
+
+    None (or a malformed id) means "no such row", never an error.
+    """
+    if value is None or isinstance(value, uuid.UUID):
+        return value
+    try:
+        return uuid.UUID(str(value))
+    except ValueError:
+        return None
 
 
 # Hard cap on get_conversation_messages, whatever the caller asks for: the result
@@ -562,6 +769,7 @@ def save_message(
     phone: str = None,
     whatsapp_lid: str = None,
     name: str = None,
+    whatsapp_message_id: str = None,
 ):
     """Save a message to the database with optional group context and embedding
 
@@ -579,6 +787,7 @@ def save_message(
         sender_name=sender_name,
         embedding=embedding,
         embedding_generated_at=datetime.now(UTC) if embedding else None,
+        whatsapp_message_id=whatsapp_message_id,
     )
     db.add(message)
     db.commit()

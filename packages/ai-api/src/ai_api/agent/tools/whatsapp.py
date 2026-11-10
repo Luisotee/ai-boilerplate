@@ -24,9 +24,6 @@ async def send_whatsapp_reaction(ctx: RunContext[AgentDeps], emoji: str) -> str:
     Args:
         ctx: Run context with WhatsApp client and message info
         emoji: The emoji to react with (e.g., "👍", "❤️", "😂")
-
-    Returns:
-        Success message or error description
     """
     logger.info("=" * 80)
     logger.info("💬 TOOL CALLED: send_whatsapp_reaction")
@@ -78,9 +75,6 @@ async def send_whatsapp_location(
         longitude: Longitude coordinate (-180 to 180)
         name: Optional name for the location (e.g., "Eiffel Tower")
         address: Optional address string
-
-    Returns:
-        Success message or error description
     """
     logger.info("=" * 80)
     logger.info("📍 TOOL CALLED: send_whatsapp_location")
@@ -139,9 +133,6 @@ async def send_whatsapp_contact(
         contact_phone: Phone number with country code (e.g., "+1234567890")
         contact_email: Optional email address
         contact_organization: Optional company/organization name
-
-    Returns:
-        Success message or error description
     """
     logger.info("=" * 80)
     logger.info("👤 TOOL CALLED: send_whatsapp_contact")
@@ -190,9 +181,6 @@ async def send_whatsapp_message(ctx: RunContext[AgentDeps], text: str) -> str:
     Args:
         ctx: Run context with WhatsApp client
         text: The message text to send
-
-    Returns:
-        Success message or error description
     """
     logger.info("=" * 80)
     logger.info("📝 TOOL CALLED: send_whatsapp_message")

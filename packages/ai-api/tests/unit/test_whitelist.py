@@ -328,3 +328,28 @@ class TestGroupGatingMode:
 
         with pytest.raises(pydantic.ValidationError):
             Settings(group_gating="members")
+
+
+class TestChatInScope:
+    """``whitelist.chat_in_scope``: the one chat rule, shared by the chat route and
+    the scheduled-task sender (``streams/scheduled_runner.run_allowed``)."""
+
+    def test_pure_rule(self):
+        from ai_api.whitelist import chat_in_scope
+
+        wl = parse_whitelist("5491126726818")
+        group = "120363000000000000@g.us"
+        assert chat_in_scope(wl, group, is_group=True, group_gating="membership")
+        assert not chat_in_scope(wl, group, is_group=True, group_gating="jid")
+        assert chat_in_scope(
+            wl, "1@lid", "+5491126726818", is_group=False, group_gating="membership"
+        )
+        assert chat_in_scope(parse_whitelist(" , "), "x", is_group=False, group_gating="jid")
+
+    def test_chat_route_uses_it(self):
+        with (
+            _patch_whitelist("5491126726818"),
+            patch("ai_api.routes.chat.chat_in_scope", return_value=False) as rule,
+        ):
+            assert _is_whitelisted("5491126726818@s.whatsapp.net", "+5491126726818") is False
+        assert rule.call_args.args[1:] == ("5491126726818@s.whatsapp.net", "+5491126726818")

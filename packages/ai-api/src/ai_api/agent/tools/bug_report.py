@@ -46,9 +46,6 @@ async def report_bug(
         category: "user_request" if the user asked you to report it;
             "wrong_answer" if you realised you were wrong; "user_complaint" if
             the user complained; "tool_failure" if a tool kept failing; else "other"
-
-    Returns:
-        The report's reference, or why it was not filed
     """
     logger.info(f"🐞 TOOL CALLED: report_bug (category={category})")
     deps = ctx.deps

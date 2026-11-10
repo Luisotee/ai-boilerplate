@@ -139,6 +139,14 @@ DISCONNECT_PAUSE_AFTER = timedelta(minutes=30)
 #: Fast lanes: Telegram allows ~30 msg/s per bot; Cloud API has generous limits.
 LANE_DELAY_SECONDS = {"telegram": 0.05, "cloud": 0.2}
 
+#: WhatsApp's reach-out timelock (it restricts messaging new contacts): the
+#: Baileys lane waits it out between sends, clamped to this range; an active
+#: lock with no end time is re-checked after the "unknown" wait. No new pause
+#: reason: the broadcast stays ``running`` (pause reasons are a FleetView enum).
+TIMELOCK_MIN_WAIT_SECONDS = 60.0
+TIMELOCK_MAX_WAIT_SECONDS = 6 * 3600.0
+TIMELOCK_UNKNOWN_END_WAIT_SECONDS = 3600.0
+
 PAUSE_CONSECUTIVE_FAILURES = "consecutive_failures"
 PAUSE_CLIENT_DISCONNECTED = "client_disconnected"
 
@@ -424,6 +432,11 @@ class _Claimed:
     attempts: int
 
 
+def _has_pending(broadcast_id: uuid.UUID, platform: str) -> bool:
+    """Whether this lane still has a recipient to send to (eligibility re-checked)."""
+    return _next_recipient(broadcast_id, platform) is not None
+
+
 def _next_recipient(broadcast_id: uuid.UUID, platform: str) -> _Claimed | None:
     """Next pending recipient on this lane, re-checking eligibility right before sending.
 
@@ -577,6 +590,29 @@ def _baileys_wait_seconds() -> float:
     return max(_window_wait_seconds(), _baileys_cap_wait_seconds())
 
 
+async def _timelock_wait_seconds(client: WhatsAppClient) -> float:
+    """How long to wait out WhatsApp's reach-out timelock (0 = send now).
+
+    Fails open: an older client without the route (404), a disconnected one or
+    a failed query must not stall the broadcast, since the check is advisory.
+    """
+    try:
+        lock = await client.get_reachout_timelock()
+    except Exception as e:
+        logger.debug("Broadcast: reach-out timelock check failed (%s); sending", type(e).__name__)
+        return 0.0
+    if not lock.active:
+        return 0.0
+    if lock.ends_at is None:
+        return TIMELOCK_UNKNOWN_END_WAIT_SECONDS
+    seconds = (lock.ends_at - _utcnow()).total_seconds()
+    if seconds <= 0:
+        # Already over: send now. The client re-queries a lock past its ends_at,
+        # so a renewed lock comes back with a new end.
+        return 0.0
+    return min(max(seconds, TIMELOCK_MIN_WAIT_SECONDS), TIMELOCK_MAX_WAIT_SECONDS)
+
+
 # --- Lanes ------------------------------------------------------------------
 
 
@@ -693,7 +729,18 @@ async def run_lane(
     disconnect_key = (broadcast_id, platform)
     logger.info("Broadcast %s: %s lane started", broadcast_id, platform)
 
+    async def nothing_left() -> bool:
+        # Checked before any Baileys wait: a lane with no pending recipient must
+        # finish now, not sleep out a gap or a timelock (up to 6 h) first while
+        # the broadcast stays `running` and its heartbeat holds the sender lock.
+        if not await asyncio.to_thread(_has_pending, broadcast_id, platform):
+            logger.info("Broadcast %s: %s lane finished", broadcast_id, platform)
+            return True
+        return False
+
     if platform == "baileys":
+        if await nothing_left():
+            return
         # Pick up the schedule where the last Baileys lane left it.
         pacing = await asyncio.to_thread(_pacing_settings)
         recent = await asyncio.to_thread(_recent_baileys_sends, pacing.batch_size)
@@ -710,10 +757,22 @@ async def run_lane(
             return
 
         if platform == "baileys":
+            if await nothing_left():
+                return
             wait = await asyncio.to_thread(_baileys_wait_seconds)
             if wait > 0:
                 logger.info("Broadcast %s: baileys lane waiting %.0fs", broadcast_id, wait)
                 if not await _sleep_while_running(broadcast_id, wait, stop):
+                    return
+                continue
+            lock_wait = await _timelock_wait_seconds(client)
+            if lock_wait > 0:
+                logger.warning(
+                    "Broadcast %s: WhatsApp reach-out timelock active; baileys lane waiting %.0fs",
+                    broadcast_id,
+                    lock_wait,
+                )
+                if not await _sleep_while_running(broadcast_id, lock_wait, stop):
                     return
                 continue
 

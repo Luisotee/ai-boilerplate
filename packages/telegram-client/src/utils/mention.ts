@@ -1,9 +1,18 @@
 import type { Message, MessageEntity } from 'grammy/types';
+import { isTypedMention, normalizeMentionNames } from './typed-mention.js';
 
 export interface BotIdentity {
   id: number;
   username: string;
+  /**
+   * Names a typed `@Name` may use for the bot (BOT_NAME, its first_name). The
+   * username itself is covered by the `mention` entity check.
+   */
+  typedNames?: readonly (string | undefined | null)[];
 }
+
+/** How a group message addresses the bot, if it does. */
+export type Addressing = 'mention' | 'reply' | 'command' | null;
 
 /**
  * A group message is considered "addressed to the bot" when any of:
@@ -13,6 +22,8 @@ export interface BotIdentity {
  *     equals the bot's username
  *   - it opens with a `bot_command` that is either unqualified (`/settings`) or
  *     qualified with our username (`/settings@MyBot`)
+ *   - it contains a typed `@Name` for one of `bot.typedNames` and no mention of
+ *     anyone else (see `addressingOf`)
  *
  * The command case matters more than it looks. Telegram emits `/settings@Bot`
  * as a SINGLE `bot_command` entity — there is no separate `mention` entity for
@@ -25,32 +36,66 @@ export interface BotIdentity {
  * case-insensitive, so `@mybot` addresses `@MyBot`.
  */
 export function isAddressedToBot(message: Message, bot: BotIdentity): boolean {
-  if (message.reply_to_message?.from?.id === bot.id) return true;
+  return addressingOf(message, bot) !== null;
+}
+
+/**
+ * Like `isAddressedToBot`, but says HOW: `'mention'` (an @username / text
+ * mention, or a typed `@Name`), `'reply'` or `'command'`. Only a mention opens
+ * the "@bot, then the question" window (utils/mention-window.ts).
+ *
+ * Typed `@Name`: Telegram tags any `@word` that looks like a username as a
+ * `mention` entity, whether or not it is one, so `@Curupira` for a bot named
+ * `@curupira_bot` arrives as an unrelated mention. It counts when no entity
+ * points at someone else: no `text_mention` for another user, and every
+ * `mention` entity is one of the typed names.
+ */
+export function addressingOf(message: Message, bot: BotIdentity): Addressing {
+  if (message.reply_to_message?.from?.id === bot.id) return 'reply';
 
   const text = message.text ?? message.caption ?? '';
   const entities: MessageEntity[] = message.entities ?? message.caption_entities ?? [];
-  if (!text || entities.length === 0) return false;
+  if (!text) return null;
 
   const username = bot.username.toLowerCase();
+  let command = false;
+  let mention = false;
 
-  return entities.some((entity) => {
-    if (entity.type === 'text_mention' && entity.user?.id === bot.id) return true;
+  for (const entity of entities) {
+    if (entity.type === 'text_mention' && entity.user?.id === bot.id) mention = true;
 
     if (entity.type === 'mention') {
       const slice = text.slice(entity.offset + 1, entity.offset + entity.length);
-      return slice.toLowerCase() === username;
+      if (slice.toLowerCase() === username) mention = true;
     }
 
     if (entity.type === 'bot_command' && entity.offset === 0) {
-      const command = text.slice(entity.offset, entity.offset + entity.length);
-      const at = command.indexOf('@');
+      const cmd = text.slice(entity.offset, entity.offset + entity.length);
+      const at = cmd.indexOf('@');
       // Unqualified `/foo` in a group is for us; `/foo@other` is not.
-      if (at === -1) return true;
-      return command.slice(at + 1).toLowerCase() === username;
+      if (at === -1 || cmd.slice(at + 1).toLowerCase() === username) command = true;
     }
+  }
 
+  if (mention) return 'mention';
+  if (command) return 'command';
+  if (isTypedBotMention(text, entities, bot)) return 'mention';
+  return null;
+}
+
+function isTypedBotMention(text: string, entities: MessageEntity[], bot: BotIdentity): boolean {
+  const names = normalizeMentionNames(bot.typedNames ?? []);
+  if (names.length === 0) return false;
+  const lowered = new Set(names.map((n) => n.toLowerCase()));
+  const pointsElsewhere = entities.some((entity) => {
+    if (entity.type === 'text_mention') return entity.user?.id !== bot.id;
+    if (entity.type === 'mention') {
+      const slice = text.slice(entity.offset + 1, entity.offset + entity.length);
+      return !lowered.has(slice.toLowerCase());
+    }
     return false;
   });
+  return !pointsElsewhere && isTypedMention(text, names);
 }
 
 /**

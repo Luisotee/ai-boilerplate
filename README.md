@@ -72,6 +72,7 @@ A production-ready AI agent system that brings conversational AI to WhatsApp wit
 | `/clean all` | Full reset (messages, documents, memories, preferences; bug reports keep only their metadata) |
 | `/memories` | Show saved core memories |
 | `/memories clear` | Delete all core memories |
+| `/memories undo` | Undo the last change to core memories (one level) |
 | `/link` | Get a code to link this account to your other platform (WhatsApp ↔ Telegram) |
 | `/link [code]` | Enter a code from the other platform to finish linking |
 | `/linkphone` | Telegram only: link by sharing your phone number (must match your WhatsApp number) |
@@ -203,7 +204,7 @@ Starting the profile also launches a one-shot `whisper-init` sidecar that pulls 
 docker compose up -d postgres redis     # just infra in containers
 pnpm dev:server                          # Terminal 1: AI API
 pnpm dev:whatsapp                        # Terminal 2: WhatsApp client (scan QR)
-pnpm dev:queue                           # Terminal 3: stream worker (chat replies + PDF parsing)
+pnpm dev:queue                           # Terminal 3: stream worker (chat replies, PDF parsing, broadcasts, scheduled tasks)
 ```
 
 ### Verify
@@ -280,6 +281,16 @@ Broadcasts go to every chat the bot has talked to that hasn't opted out (users s
 | PATCH | `/admin/bug-reports/{id}` | Set `status` (`open`/`resolved`/`ignored`) and a `resolution_note` |
 | DELETE | `/admin/bug-reports/{id}` | Delete a report |
 
+### Scheduled tasks (admin)
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/admin/scheduled-tasks` | List reminders and scheduled agent runs (`status`, `kind`, paging) with counts per status |
+| GET | `/admin/scheduled-tasks/{id}` | One task with its latest runs |
+| PATCH | `/admin/scheduled-tasks/{id}` | `status`: `active` re-enables a disabled task, `cancelled` stops it |
+| DELETE | `/admin/scheduled-tasks/{id}` | Delete a task and its runs |
+
+Users create, list and cancel their own reminders by asking the bot ("remind me tomorrow at 9 to call Ana"); details in [packages/ai-api/docs/scheduled-tasks.md](packages/ai-api/docs/scheduled-tasks.md).
+
 ### Speech
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -326,12 +337,19 @@ pnpm format          # Format all code
 | `DATABASE_URL` | PostgreSQL connection string |
 | `REDIS_URL` | Redis connection string |
 | `AI_API_URL` | AI API endpoint for WhatsApp client |
-| `WHITELIST_PHONES` | Comma-separated phones / chat ids allowed to use the bot (empty = everyone) |
+| `WHITELIST_PHONES` | Comma-separated phones / chat ids allowed to use the bot (empty = everyone). Read by the AI API; the chat clients fetch its effective value live (`GET /chat/whitelist`) and drop messages if they can't |
 | `SHARED_GROUP_TOOLS_ENABLED` | `false` (default). When `true`, users can, in a private chat, read/search groups they share with the bot and ask it to post into one (Baileys + Telegram). Group transcripts then reach the LLM provider inside private conversations — see CLAUDE.md "Shared-group tools". Hot via `PATCH /admin/settings` |
 | `TELEGRAM_MODE` | `webhook` (default — Telegram POSTs to `/webhook`, needs a public HTTPS URL + `TELEGRAM_WEBHOOK_SECRET`) or `polling` (long polling via `@grammyjs/runner`: no public URL or tunnel; one process per bot token). Group chats need privacy mode OFF in @BotFather (`/setprivacy` → Disable; then remove and re-add the bot) |
 | `GROUP_GATING` | How a group gets in scope when the whitelist is set: `jid` (default — the group's own id must be listed) or `membership` (Baileys: any group with a whitelisted member; Telegram: any group; the bot saves all messages there but replies only to whitelisted senders). Read by the AI API and the Baileys/Telegram clients |
+| `GROUP_MENTION_WINDOW_SECONDS` | After a group message mentions the bot, that sender's next message within this many seconds also counts as addressed ("@bot", then a voice note). Default 60; 0 disables. Baileys and Telegram |
+| `POLL_MAX_DURATION_MS` | How long a client waits for a reply (default `120000`). Read by the AI API too: a reply ready later is pushed to the chat, and the client tells the user it is coming |
+| `CHAT_BURST_QUIET_MS` / `CHAT_BURST_MAX_WAIT_MS` | Burst merging: once a user's message is pending, the worker waits for this much quiet (default `2000`; `0` = off), at most `8000` ms in total, and answers the sender's pending messages (and their images) in one run with one reply. The Telegram client uses the quiet period for albums |
+| `AGENT_REQUEST_LIMIT` | Most model requests one agent run may make (default `10`); a model looping on tools gets the fallback reply instead |
+| `CHAT_JOB_MAX_AGE_SECONDS` | A chat job older than this when the worker reaches it (an outage backlog) is not run; the user is asked to resend (default `3600`) |
 | `BUG_REPORTS_ENABLED` | `true` (default). The `report_bug` agent tool plus automatic reports of model errors, crashed jobs and failed PDFs. Hot via `PATCH /admin/settings` |
 | `BUG_REPORTS_PER_USER_PER_HOUR` | Cap on reports the agent files per chat per hour (default `5`) |
+| `BOT_TIMEZONE` | IANA time zone for scheduled tasks ("every day at 9:00"), e.g. `America/Rio_Branco`. Empty = `BROADCAST_TIMEZONE`. Hot via `PATCH /admin/settings` |
+| `SCHEDULED_TASKS_*` | Reminders and scheduled agent runs: on/off (`_ENABLED`, default `true`), active tasks per chat (`_MAX_PER_CHAT`, 10), shortest repeat (`_MIN_INTERVAL_MINUTES`, 60), messages per chat per 24h (`_MAX_RUNS_PER_DAY`, 24). Hot via `PATCH /admin/settings` |
 | `BROADCAST_*` | Broadcast footer and Baileys anti-ban pacing (delays, batch pause, daily cap, send window, time zone). Hot via `PATCH /admin/settings` |
 | `OPENAI_API_MODEL_ID` | Model id `GET /v1/models` lists for the OpenAI-compatible API (default `ai-agent`) |
 | `LOGFIRE_TOKEN` | Pydantic Logfire write token for LLM token/cost tracking (optional; empty disables it) |

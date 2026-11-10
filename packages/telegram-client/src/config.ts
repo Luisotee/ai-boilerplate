@@ -2,7 +2,6 @@ import { config as dotenvConfig, parse as dotenvParse } from 'dotenv';
 import { existsSync, readFileSync } from 'fs';
 import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
-import { parseWhitelist } from './utils/whitelist.js';
 import { parseGroupGating } from './utils/gating.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -31,8 +30,6 @@ if (existsSync(localEnvPath)) {
   dotenvConfig({ path: localEnvPath, override: true });
 }
 
-const whitelistPhones = parseWhitelist(process.env.WHITELIST_PHONES || '');
-
 /**
  * TELEGRAM_MODE: how updates arrive. `webhook` (default) — Telegram POSTs to
  * /webhook, which needs a public HTTPS URL. `polling` — long polling via
@@ -59,8 +56,21 @@ function parseNonNegativeInt(name: string, defaultValue: number): number {
   return n;
 }
 
+/** A positive integer from an env value, or the default (unset, 0, negative, junk). */
+export function positiveInt(raw: string | undefined, defaultValue: number): number {
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : defaultValue;
+}
+
 export const config = {
-  whitelistPhones,
+  // The bot's name, shared with the AI API. Here it is one of the names a typed
+  // `@Name` group mention is matched against (utils/typed-mention.ts), next to
+  // the bot's Telegram first_name.
+  botName: (process.env.BOT_NAME || '').trim(),
+  // GROUP_MENTION_WINDOW_SECONDS: after a group message mentions the bot, the
+  // same sender's next message within this window counts as addressed (e.g. a
+  // voice note after "@bot"). 0 disables it.
+  mentionWindowMs: parseNonNegativeInt('GROUP_MENTION_WINDOW_SECONDS', 60) * 1000,
   groupGating: groupGating.mode,
   aiApiUrl: process.env.AI_API_URL || 'http://localhost:8000',
   logLevel: process.env.LOG_LEVEL || 'info',
@@ -86,6 +96,15 @@ export const config = {
     intervalMs: parseInt(process.env.POLL_INTERVAL_MS || '500', 10),
     maxIterations: parseInt(process.env.POLL_MAX_ITERATIONS || '240', 10),
     maxDurationMs: parseInt(process.env.POLL_MAX_DURATION_MS || '120000', 10),
+  },
+  // Album grouping: photos sharing a media_group_id are sent to the AI API
+  // together once none arrived for quietMs (the AI API's CHAT_BURST_QUIET_MS;
+  // 0 = every photo on its own), waiting at most maxWaitMs in total (its
+  // CHAT_BURST_MAX_WAIT_MS).
+  album: {
+    quietMs: parseInt(process.env.CHAT_BURST_QUIET_MS || '2000', 10),
+    maxWaitMs: positiveInt(process.env.CHAT_BURST_MAX_WAIT_MS, 8000),
+    maxItems: 10,
   },
   // Telegram Bot API
   telegram: {

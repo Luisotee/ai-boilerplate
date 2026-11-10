@@ -1,11 +1,14 @@
 """Tests for the WhatsApp HTTP client wrapper."""
 
-from unittest.mock import AsyncMock, MagicMock
+from datetime import datetime
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
+from ai_api.safe_fetch import FetchedImage, ImageFetchError
 from ai_api.whatsapp.client import (
+    ReachoutTimelock,
     SendMessageResponse,
     SuccessResponse,
     WhatsAppClient,
@@ -247,79 +250,61 @@ class TestURLConstruction:
 
 
 class TestSendImageFromUrl:
+    """The download itself is covered by tests/unit/test_safe_fetch.py."""
+
     @pytest.mark.asyncio
-    async def test_rejects_http_urls(self, whatsapp_client):
-        with pytest.raises(WhatsAppClientError, match="HTTPS"):
+    async def test_rejects_http_urls(self, whatsapp_client, mock_http_client):
+        with pytest.raises(WhatsAppClientError, match="only https"):
             await whatsapp_client.send_image_from_url(
                 "5511999999999@s.whatsapp.net",
                 "http://example.com/image.png",
             )
+        mock_http_client.get.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_rejects_non_image_content_type(self, whatsapp_client, mock_http_client):
-        mock_img_response = MagicMock(spec=httpx.Response)
-        mock_img_response.status_code = 200
-        mock_img_response.headers = {"content-type": "text/html"}
-        mock_img_response.raise_for_status = MagicMock()
-        mock_http_client.get.return_value = mock_img_response
-
-        with pytest.raises(WhatsAppClientError, match="does not point to an image"):
-            await whatsapp_client.send_image_from_url(
-                "5511999999999@s.whatsapp.net",
-                "https://example.com/page.html",
-            )
-
-    @pytest.mark.asyncio
-    async def test_rejects_oversized_image(self, whatsapp_client, mock_http_client):
-        mock_img_response = MagicMock(spec=httpx.Response)
-        mock_img_response.status_code = 200
-        mock_img_response.headers = {"content-type": "image/jpeg"}
-        mock_img_response.raise_for_status = MagicMock()
-        # 17 MB image (over default 16 MB limit)
-        mock_img_response.content = b"\x00" * (17 * 1024 * 1024)
-        mock_http_client.get.return_value = mock_img_response
-
-        with pytest.raises(WhatsAppClientError, match="too large"):
-            await whatsapp_client.send_image_from_url(
-                "5511999999999@s.whatsapp.net",
-                "https://example.com/huge.jpg",
-            )
+    async def test_fetch_error_becomes_client_error(self, whatsapp_client, mock_http_client):
+        with patch(
+            "ai_api.whatsapp.client.fetch_public_image",
+            AsyncMock(side_effect=ImageFetchError("host is not allowed")),
+        ):
+            with pytest.raises(WhatsAppClientError, match="host is not allowed"):
+                await whatsapp_client.send_image_from_url(
+                    "5511999999999@s.whatsapp.net",
+                    "https://redis.internal.example/x.png",
+                )
+        mock_http_client.post.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_download_failure_raises_client_error(self, whatsapp_client, mock_http_client):
-        mock_http_client.get.side_effect = httpx.HTTPError("Connection refused")
-
-        with pytest.raises(WhatsAppClientError, match="Failed to download"):
-            await whatsapp_client.send_image_from_url(
-                "5511999999999@s.whatsapp.net",
-                "https://example.com/missing.jpg",
-            )
+    async def test_size_limit_is_capped_at_whatsapp_limit(self, whatsapp_client):
+        fetch = AsyncMock(side_effect=ImageFetchError("image is too large"))
+        with patch("ai_api.whatsapp.client.fetch_public_image", fetch):
+            with pytest.raises(WhatsAppClientError):
+                await whatsapp_client.send_image_from_url(
+                    "5511999999999@s.whatsapp.net", "https://example.com/huge.jpg"
+                )
+        assert fetch.call_args.kwargs["max_bytes"] == 5 * 1024 * 1024
 
     @pytest.mark.asyncio
     async def test_successful_download_sends_image(self, whatsapp_client, mock_http_client):
-        # Mock the download response
-        mock_img_response = MagicMock(spec=httpx.Response)
-        mock_img_response.status_code = 200
-        mock_img_response.headers = {"content-type": "image/png"}
-        mock_img_response.raise_for_status = MagicMock()
-        mock_img_response.content = b"\x89PNG\r\n" * 10
-
-        # Mock the send_image response
         mock_send_response = MagicMock(spec=httpx.Response)
         mock_send_response.status_code = 200
         mock_send_response.json.return_value = {"success": True, "message_id": "img1"}
-
-        mock_http_client.get.return_value = mock_img_response
         mock_http_client.post.return_value = mock_send_response
 
-        result = await whatsapp_client.send_image_from_url(
-            "5511999999999@s.whatsapp.net",
-            "https://example.com/photo.png",
-            caption="A photo",
-        )
+        fetched = FetchedImage(data=b"\x89PNG\r\n\x1a\n" + b"0" * 10, mimetype="image/png")
+        with patch("ai_api.whatsapp.client.fetch_public_image", AsyncMock(return_value=fetched)):
+            result = await whatsapp_client.send_image_from_url(
+                "5511999999999@s.whatsapp.net",
+                "https://example.com/photo.png",
+                caption="A photo",
+            )
 
         assert result.success is True
         assert result.message_id == "img1"
+        files = mock_http_client.post.call_args.kwargs["files"]
+        assert files["file"][1] == fetched.data
+        assert files["file"][2] == "image/png"
+        mock_http_client.get.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -563,3 +548,38 @@ class TestGetClientStatus:
         args, kwargs = mock_http_client.get.call_args
         assert args[0] == "http://localhost:3001/whatsapp/status"
         assert kwargs["headers"] == {"X-API-Key": "test-api-key-123"}
+
+
+# ---------------------------------------------------------------------------
+# get_reachout_timelock
+# ---------------------------------------------------------------------------
+
+
+def _json_response(status: int, body: dict) -> MagicMock:
+    response = MagicMock()
+    response.status_code = status
+    response.json.return_value = body
+    return response
+
+
+class TestGetReachoutTimelock:
+    async def test_active_with_end_time_as_naive_utc(self, whatsapp_client, mock_http_client):
+        mock_http_client.get.return_value = _json_response(
+            200,
+            {"active": True, "ends_at": "2026-11-10T03:00:00.000Z", "enforcement_type": "X"},
+        )
+        lock = await whatsapp_client.get_reachout_timelock()
+        assert lock == ReachoutTimelock(active=True, ends_at=datetime(2026, 11, 10, 3, 0))
+        url = mock_http_client.get.call_args.args[0]
+        assert url == "http://localhost:3001/whatsapp/reachout-timelock"
+
+    async def test_inactive(self, whatsapp_client, mock_http_client):
+        mock_http_client.get.return_value = _json_response(
+            200, {"active": False, "ends_at": None, "enforcement_type": None}
+        )
+        assert await whatsapp_client.get_reachout_timelock() == ReachoutTimelock(active=False)
+
+    async def test_not_connected_raises(self, whatsapp_client, mock_http_client):
+        mock_http_client.get.return_value = _json_response(503, {"error": "x"})
+        with pytest.raises(WhatsAppNotConnectedError):
+            await whatsapp_client.get_reachout_timelock()

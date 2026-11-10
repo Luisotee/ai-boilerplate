@@ -491,3 +491,68 @@ class TestAutomaticBugReports:
         with patch.object(proc_module, "record_auto_report") as record:
             await _run_processor(_make_streaming_agent(["ok"]))
         record.assert_not_called()
+
+
+class TestHistoryExcludesAnsweredMessages:
+    """The message being answered goes to the model once, as the prompt."""
+
+    async def _run(self, **job_kwargs):
+        from ai_api.streams import processor as proc_module
+
+        mock_redis = AsyncMock()
+
+        @asynccontextmanager
+        async def mock_get_redis_client():
+            yield mock_redis
+
+        captured = {}
+
+        async def agent(message, history, **kwargs):
+            captured["message"] = message
+            captured["deps"] = kwargs["agent_deps"]
+            yield "ok"
+
+        older = MagicMock(id=uuid.uuid4(), role="user", content="earlier")
+        with (
+            patch.object(proc_module, "SessionLocal", return_value=MagicMock()),
+            patch.object(
+                proc_module, "get_conversation_history", return_value=[older]
+            ) as mock_history,
+            patch.object(proc_module, "create_embedding_service", return_value=None),
+            patch.object(proc_module, "create_whatsapp_client", return_value=AsyncMock()),
+            patch.object(proc_module, "get_ai_response", agent),
+            patch.object(proc_module, "get_redis_client", mock_get_redis_client),
+            patch.object(proc_module, "save_message", return_value=MagicMock(id=uuid.uuid4())),
+            patch.object(proc_module, "save_job_chunk", new_callable=AsyncMock),
+            patch.object(proc_module, "set_job_metadata", new_callable=AsyncMock),
+        ):
+            await proc_module.process_chat_job_direct(
+                user_id=str(uuid.uuid4()),
+                whatsapp_jid="5511999999999@s.whatsapp.net",
+                message="the question",
+                conversation_type="private",
+                job_id="job-hist",
+                **job_kwargs,
+            )
+        return mock_history, captured, older
+
+    async def test_current_message_is_cut_out_of_the_history(self):
+        current = str(uuid.uuid4())
+        mock_history, captured, older = await self._run(user_message_id=current)
+
+        kwargs = mock_history.call_args.kwargs
+        assert kwargs["before_message_id"] == current
+        assert kwargs["exclude_ids"] == [current]
+        assert captured["message"] == "the question"
+        # The search tool must not return the message being answered either.
+        assert captured["deps"].recent_message_ids == [str(older.id), current]
+
+    async def test_a_merged_run_cuts_from_its_first_message(self):
+        ids = [str(uuid.uuid4()) for _ in range(3)]
+        mock_history, _captured, _older = await self._run(
+            user_message_id=ids[-1], run_user_message_ids=ids
+        )
+
+        kwargs = mock_history.call_args.kwargs
+        assert kwargs["before_message_id"] == ids[0]
+        assert kwargs["exclude_ids"] == ids

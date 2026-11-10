@@ -4,6 +4,11 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
+class ImageInput(BaseModel):
+    data: str = Field(..., description="Base64-encoded image data")
+    mimetype: str = Field(..., description="Image MIME type (e.g., image/jpeg)")
+
+
 class ChatRequest(BaseModel):
     whatsapp_jid: str = Field(..., description="User's WhatsApp JID")
     message: str = Field(..., description="User's message text")
@@ -19,6 +24,12 @@ class ChatRequest(BaseModel):
     whatsapp_message_id: str | None = Field(None, description="WhatsApp message ID for reactions")
     image_data: str | None = Field(None, description="Base64-encoded image data for vision")
     image_mimetype: str | None = Field(None, description="Image MIME type (e.g., image/jpeg)")
+    images: list[ImageInput] | None = Field(
+        None,
+        max_length=10,
+        description="Several images sent together (an album), answered in one run; "
+        "added after image_data when both are set",
+    )
     document_data: str | None = Field(None, description="Base64-encoded PDF document data")
     document_mimetype: str | None = Field(
         None, description="Document MIME type (e.g., application/pdf)"
@@ -56,6 +67,46 @@ class SaveMessageRequest(BaseModel):
     whatsapp_message_id: str | None = Field(None, description="WhatsApp message ID for reactions")
     phone: str | None = Field(None, description="E.164 phone number (e.g., +5491126726818)")
     whatsapp_lid: str | None = Field(None, description="WhatsApp LID if known")
+
+
+class RevokeMessageRequest(BaseModel):
+    """A message was deleted for everyone on the platform: forget the saved copy."""
+
+    whatsapp_jid: str = Field(..., description="Conversation JID (group or private)")
+    whatsapp_message_id: str = Field(..., description="Platform id of the deleted message")
+    sender_jid: str | None = Field(
+        None, description="Who deleted it (group participant JID, resolved like on save)"
+    )
+    is_group_admin: bool | None = Field(
+        None, description="Whether the deleter is a group admin (may delete others' messages)"
+    )
+    phone: str | None = Field(None, description="E.164 phone of a private chat, if known")
+
+
+class EditMessageRequest(BaseModel):
+    """A message was edited on the platform: update the saved copy and its embedding."""
+
+    whatsapp_jid: str = Field(..., description="Conversation JID (group or private)")
+    whatsapp_message_id: str = Field(..., description="Platform id of the edited message")
+    message: str = Field(..., min_length=1, description="The new text")
+    sender_jid: str | None = Field(
+        None, description="Who edited it (group participant JID, resolved like on save)"
+    )
+    phone: str | None = Field(None, description="E.164 phone of a private chat, if known")
+
+
+class MessageEventResponse(BaseModel):
+    """How many saved rows a revoke or edit changed (0 = not found or not allowed)."""
+
+    changed: int
+
+
+class WhitelistResponse(BaseModel):
+    """The effective whitelist, unparsed (GET /chat/whitelist)."""
+
+    whitelist_phones: str = Field(
+        ..., description="Comma-separated entries, as WHITELIST_PHONES; empty = disabled"
+    )
 
 
 class UploadPDFResponse(BaseModel):
@@ -248,6 +299,7 @@ class OverviewResponse(BaseModel):
     messages: int
     knowledge_base_documents: int
     open_bug_reports: int = 0
+    disabled_scheduled_tasks: int = 0
 
 
 class WhatsAppStatusResponse(BaseModel):
@@ -475,6 +527,81 @@ class BugReportsResponse(BaseModel):
 class BugReportUpdateRequest(BaseModel):
     status: BugReportStatus
     resolution_note: str | None = Field(None, max_length=4000)
+
+
+# --- Scheduled tasks (/admin/scheduled-tasks) ---
+# ScheduledTaskStatus, ScheduledTaskKind and TaskRunStatus become a FleetView
+# contract once it mirrors them (closed enums): adding a value would break it.
+# last_error / error_code / disabled_reason are open strings.
+
+ScheduledTaskStatus = Literal["active", "completed", "cancelled", "disabled"]
+ScheduledTaskKind = Literal["reminder", "agent"]
+TaskRunStatus = Literal[
+    "dispatched",
+    "running",
+    "ready",
+    "sending",
+    "sent",
+    "silent",
+    "skipped",
+    "failed",
+    "unknown",
+]
+
+
+class ScheduledTaskSummary(BaseModel):
+    id: str
+    status: ScheduledTaskStatus
+    kind: ScheduledTaskKind
+    text: str
+    schedule: str = Field(
+        ..., description="Normalised human description, e.g. 'every day at 09:00'"
+    )
+    timezone: str
+    whatsapp_jid: str = Field(..., description="The chat it delivers to")
+    user_name: str | None = None
+    client_id: str | None = None
+    conversation_type: str | None = None
+    next_run_at: datetime | None = None
+    last_run_at: datetime | None = None
+    last_status: TaskRunStatus | None = None
+    last_error: str | None = None
+    disabled_reason: str | None = None
+    consecutive_failures: int
+    run_count: int
+    created_at: datetime
+
+
+class TaskRunItem(BaseModel):
+    id: str
+    scheduled_for: datetime
+    status: TaskRunStatus
+    error_code: str | None = None
+    late_seconds: int
+    created_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+class ScheduledTaskDetail(ScheduledTaskSummary):
+    cron_expr: str | None = None
+    interval_seconds: int | None = None
+    run_at: datetime | None = None
+    runs: list[TaskRunItem] = Field(default_factory=list, description="Latest runs, newest first")
+
+
+class ScheduledTasksResponse(BaseModel):
+    tasks: list[ScheduledTaskSummary]
+    total: int
+    limit: int
+    offset: int
+    counts_by_status: dict[ScheduledTaskStatus, int]
+
+
+class ScheduledTaskUpdateRequest(BaseModel):
+    status: Literal["active", "cancelled"] = Field(
+        ..., description="active re-enables a disabled task; cancelled stops it"
+    )
 
 
 # --- Public Bot Contact ---

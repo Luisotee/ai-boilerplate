@@ -27,9 +27,6 @@ async def calculate(ctx: RunContext[AgentDeps], expression: str) -> str:
     Args:
         ctx: Run context (unused but required by decorator)
         expression: Math expression to evaluate (e.g., "2 + 2", "15 * 0.15")
-
-    Returns:
-        Result of the calculation or error message
     """
     logger.info("=" * 80)
     logger.info("🧮 TOOL CALLED: calculate")
@@ -65,9 +62,6 @@ async def get_weather(ctx: RunContext[AgentDeps], city: str) -> str:
     Args:
         ctx: Run context with HTTP client
         city: City name (e.g., "Berlin", "New York", "Tokyo")
-
-    Returns:
-        Current weather conditions including temperature, wind, humidity
     """
     logger.info("=" * 80)
     logger.info("🌤️ TOOL CALLED: get_weather")
@@ -174,9 +168,6 @@ async def wikipedia_lookup(ctx: RunContext[AgentDeps], topic: str) -> str:
     Args:
         ctx: Run context (unused but required by decorator)
         topic: The topic to look up (e.g., "Albert Einstein", "Python programming")
-
-    Returns:
-        Summary from Wikipedia or not found message
     """
     logger.info("=" * 80)
     logger.info("📖 TOOL CALLED: wikipedia_lookup")
@@ -254,9 +245,6 @@ async def convert_units(
         value: The numeric value to convert
         from_unit: Source unit (e.g., "km", "lb", "celsius")
         to_unit: Target unit (e.g., "miles", "kg", "fahrenheit")
-
-    Returns:
-        Converted value with units
     """
     logger.info("=" * 80)
     logger.info("🔄 TOOL CALLED: convert_units")

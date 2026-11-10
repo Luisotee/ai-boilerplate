@@ -11,7 +11,7 @@ hidden there, so the model never offers them.
 from pydantic_ai import RunContext
 from pydantic_ai.tools import ToolDefinition
 
-from ...surfaces import delivers_through_chat_client, is_app_jid
+from ...surfaces import delivers_through_chat_client
 from ..core import AgentDeps
 
 
@@ -21,10 +21,3 @@ async def chat_client_only(
     """Hide the tool unless the job came through a chat client."""
     deps = ctx.deps
     return tool_def if delivers_through_chat_client(deps.client_id, deps.whatsapp_jid) else None
-
-
-async def not_app_only_chat(
-    ctx: RunContext[AgentDeps], tool_def: ToolDefinition
-) -> ToolDefinition | None:
-    """Hide the tool for a web-only/terminal row: it has no chat route at all."""
-    return None if is_app_jid(ctx.deps.whatsapp_jid) else tool_def
