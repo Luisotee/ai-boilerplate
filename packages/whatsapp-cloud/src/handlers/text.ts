@@ -5,7 +5,9 @@ import {
   textToSpeech,
   LATE_REPLY_NOTICE,
   PollTimeoutError,
+  type JobMedia,
 } from '../api-client.js';
+import { sendReplyMedia } from '../utils/reply-media.js';
 import { config } from '../config.js';
 import { phoneToJid, isGroupChat, phoneFromJid } from '../utils/jid.js';
 import { logger } from '../logger.js';
@@ -84,7 +86,11 @@ export async function handleTextMessage(
   try {
     // Typing indicator is fired from the webhook router before dispatch so
     // media messages get immediate feedback during download/transcription.
+    let replyMedia: { jobId: string; media: JobMedia[] } | undefined;
     const response = await sendMessageToAI(whatsappJid, text, {
+      onMedia: (jobId, media) => {
+        replyMedia = { jobId, media };
+      },
       conversationType,
       senderJid: options?.senderJid,
       senderName,
@@ -95,14 +101,18 @@ export async function handleTextMessage(
       document,
     });
 
-    if (!response) return; // saveOnly mode or empty response
+    if (response === null) return; // blocked by the API whitelist
+    if (!response && !replyMedia) return; // saveOnly mode or empty response
 
     // Cloud API typing indicator only attaches to the inbound message ID and is
     // consumed on the first outbound send, so we do not re-trigger it between chunks.
-    const chunks = splitResponseIntoBursts(response, {
-      disabled: !config.messageSplit.enabled || conversationType === 'group',
-      maxChunks: config.messageSplit.maxChunks,
-    });
+    // An images-only reply has no text: send no empty message.
+    const chunks = !response.trim()
+      ? []
+      : splitResponseIntoBursts(response, {
+          disabled: !config.messageSplit.enabled || conversationType === 'group',
+          maxChunks: config.messageSplit.maxChunks,
+        });
 
     let sentCount = 0;
     try {
@@ -135,7 +145,8 @@ export async function handleTextMessage(
 
     // Check if TTS is enabled and send voice message
     try {
-      const prefs = await getUserPreferences(whatsappJid);
+      // No voice note for an images-only reply (there is no text to read).
+      const prefs = response.trim() ? await getUserPreferences(whatsappJid) : null;
       if (prefs?.tts_enabled) {
         logger.info({ whatsappJid }, 'TTS enabled, generating voice message');
         const audioBuffer = await textToSpeech(stripSplitDelimiters(response), whatsappJid);
@@ -148,6 +159,16 @@ export async function handleTextMessage(
       }
     } catch (ttsError) {
       logger.warn({ error: ttsError, whatsappJid }, 'TTS delivery failed, text-only sent');
+    }
+
+    // Images last, uploaded as bytes (never by `link`: Meta reports a failed
+    // fetch only later by webhook, so the text fallback could not run). Never throws.
+    if (replyMedia) {
+      await sendReplyMedia(replyMedia.jobId, replyMedia.media, {
+        image: (buffer, item) =>
+          graphApi.sendImage(to, buffer, item.mimetype, item.caption || undefined),
+        text: (fallback) => graphApi.sendText(to, fallback),
+      });
     }
   } catch (error) {
     if (error instanceof PollTimeoutError) {

@@ -48,3 +48,19 @@ describe('gating.ts copies', () => {
     ).toBe(reference);
   });
 });
+
+// utils/reply-media.ts (sending reply images, with the link fallback) is shared
+// the same way by all three clients.
+describe('reply-media.ts copies', () => {
+  const reference = readFileSync(
+    resolve(REPO_ROOT, 'packages/whatsapp-client/src/utils/reply-media.ts'),
+    'utf8'
+  );
+
+  it.each([
+    'packages/whatsapp-cloud/src/utils/reply-media.ts',
+    'packages/telegram-client/src/utils/reply-media.ts',
+  ])('%s is byte-identical to the reference', (copy) => {
+    expect(readFileSync(resolve(REPO_ROOT, copy), 'utf8')).toBe(reference);
+  });
+});

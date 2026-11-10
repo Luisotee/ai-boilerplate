@@ -51,6 +51,25 @@ export const ErrorResponseSchema = z.object({
 export const HealthResponseSchema = z.object({
   status: z.string(),
   whatsapp_connected: z.boolean(),
+  // When the last message arrived from WhatsApp (ISO); null since start
+  lastInboundAt: z.string().nullable(),
+  // The last time the link dropped: Baileys status code (440 = session
+  // conflict, 401 = logged out) or a reason such as 'transport_watchdog'
+  lastDisconnect: z
+    .object({
+      at: z.string(),
+      statusCode: z.number().nullable(),
+      reason: z.string().nullable(),
+    })
+    .nullable(),
+  // Failed reconnect attempts in a row (resets after a stable connection)
+  reconnectAttempts: z.number(),
+});
+
+export const ReachoutTimelockResponseSchema = z.object({
+  active: z.boolean(),
+  ends_at: z.string().nullable(),
+  enforcement_type: z.string().nullable(),
 });
 
 export const ReadyResponseSchema = z.object({

@@ -13,6 +13,9 @@ Redis and never read. Now whoever delivers a job's reply first claims
   ``/whatsapp/send-text`` route; the poll route then answers ``silent``.
 
 ``SET NX`` makes the two exclusive, so the user gets the reply exactly once.
+A pushed reply carries its images too (the job metadata's ``media``, see
+``reply_media.py``): each is sent through ``/whatsapp/send-image``, or as its
+link when that fails (the Telegram client has no such route).
 """
 
 import re
@@ -23,6 +26,7 @@ from redis.asyncio import Redis
 
 from ..config import get_whatsapp_api_key, get_whatsapp_client_url, settings
 from ..logger import logger
+from ..queue.utils import get_job_media, get_job_metadata
 from ..whatsapp import WhatsAppClient, create_whatsapp_client
 
 #: Start pushing this long before the clients' budget runs out. The claim keeps
@@ -86,6 +90,45 @@ def strip_burst_delimiters(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
 
 
+def media_fallback_text(item: dict) -> str:
+    """The link sent instead of an image that could not be sent (as the clients do)."""
+    caption, url = item.get("caption") or "", item.get("url") or ""
+    return f"{caption}: {url}" if caption else url
+
+
+async def job_media_items(redis: Redis, job_id: str) -> list[dict]:
+    """The images listed in a finished job's metadata (empty when none)."""
+    metadata = await get_job_metadata(redis, job_id) or {}
+    media = metadata.get("media")
+    return media if isinstance(media, list) else []
+
+
+async def _push_media(
+    redis: Redis, whatsapp_client: WhatsAppClient, job_id: str, whatsapp_jid: str, media: list
+) -> None:
+    """Send a pushed reply's images in order; a failed one goes as its link."""
+    for item in media:
+        try:
+            data = await get_job_media(redis, job_id, int(item["index"]))
+            if data is None:
+                raise LookupError("image bytes expired")
+            await whatsapp_client.send_image(
+                whatsapp_jid,
+                data,
+                item.get("mimetype") or "image/jpeg",
+                item.get("caption") or None,
+            )
+        except Exception:
+            logger.warning(
+                f"[Job {job_id}] Pushed reply image {item.get('index')} failed; sending its link",
+                exc_info=True,
+            )
+            try:
+                await whatsapp_client.send_text(whatsapp_jid, media_fallback_text(item))
+            except Exception:
+                logger.error(f"[Job {job_id}] Image fallback text failed", exc_info=True)
+
+
 async def deliver_if_late(
     redis: Redis,
     whatsapp_client: WhatsAppClient | None,
@@ -96,19 +139,26 @@ async def deliver_if_late(
 ) -> bool:
     """Push a finished job's reply if its poller may have given up.
 
-    Call it after the job's terminal metadata is written. Never raises: a
-    failed push is logged, and the reply stays readable at /chat/job.
+    Call it after the job's terminal metadata is written: the reply's images
+    are read from it and sent after the text. Never raises: a failed push is
+    logged, and the reply stays readable at /chat/job.
 
     Returns:
         True if this call delivered the reply.
     """
-    if not text or whatsapp_client is None or not is_late(enqueued_at_ms):
+    if whatsapp_client is None or not is_late(enqueued_at_ms):
         return False
     try:
+        media = await job_media_items(redis, job_id)
+        body = strip_burst_delimiters(text) if text else ""
+        if not body and not media:
+            return False
         # Only a fresh claim pushes: an existing "push" claim means it was sent.
         if not await redis.set(claim_key(job_id), "push", nx=True, ex=settings.arq_keep_result):
             return False  # already delivered, by the poller or an earlier push
-        await whatsapp_client.send_text(whatsapp_jid, strip_burst_delimiters(text))
+        if body:
+            await whatsapp_client.send_text(whatsapp_jid, body)
+        await _push_media(redis, whatsapp_client, job_id, whatsapp_jid, media)
         logger.info(
             f"[Job {job_id}] Reply pushed after the polling window "
             f"({job_age_seconds(enqueued_at_ms):.0f}s after enqueue)"

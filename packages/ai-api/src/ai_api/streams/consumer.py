@@ -403,7 +403,7 @@ async def _push_unconfirmed_late_reply(redis: Redis, message_id: str, data: dict
         if metadata.get("merged_into"):
             return  # nothing of its own to send
         text = "".join(c["content"] for c in await get_job_chunks(redis, job_id))
-        if not text:
+        if not text and not metadata.get("media"):
             return
         client_id = data.get(b"client_id")
         await push_text_once(

@@ -14,6 +14,7 @@ How a WhatsApp message traverses the system:
 8. `streams/processor.py`: fetches conversation history → runs Pydantic AI agent with tools → streams response chunks to Redis
 9. `api-client.ts` polls GET `/chat/job/{id}` (500ms interval, max 120s) until complete
 10. WhatsApp client sends text reply; optionally generates TTS audio if user preference enabled
+11. Reply images, if any: the job's `media` list (from `![caption](https://…)` directives or `AgentDeps.reply_media`, see `packages/ai-api/docs/markdown-formatting.md`) is sent after the text. The client fetches each image's bytes from GET `/chat/job/{id}/media/{index}`; it never fetches the source URL itself. On failure it sends the caption and link as text
 
 ## Database tables
 

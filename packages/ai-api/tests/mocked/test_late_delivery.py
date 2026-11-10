@@ -81,6 +81,46 @@ class TestDeliverIfLate:
         client.send_text.assert_awaited_once_with(JID, "one\n\ntwo")
 
 
+class TestLateReplyImages:
+    """A pushed reply carries the images listed in the job metadata."""
+
+    MEDIA = [
+        {"index": 0, "caption": "Map", "mimetype": "image/png", "url": "https://x.example/a.png"},
+        {"index": 1, "caption": "", "mimetype": "image/jpeg", "url": "https://x.example/b.jpg"},
+    ]
+
+    async def _job(self, redis, media):
+        from ai_api.queue.utils import save_job_media, set_job_metadata
+
+        await set_job_metadata(redis, "j1", {"status": "complete", "media": media})
+        await save_job_media(redis, "j1", 0, b"png")
+
+    async def test_images_follow_the_text(self, redis):
+        await self._job(redis, self.MEDIA)
+        client = AsyncMock()
+        assert await deliver_if_late(redis, client, "j1", JID, "hello", _ms_ago(130))
+        client.send_image.assert_awaited_once_with(JID, b"png", "image/png", "Map")
+        # Image 1's bytes are gone: its link goes as text instead.
+        assert [c.args for c in client.send_text.await_args_list] == [
+            (JID, "hello"),
+            (JID, "https://x.example/b.jpg"),
+        ]
+
+    async def test_images_only_reply_is_pushed(self, redis):
+        await self._job(redis, self.MEDIA[:1])
+        client = AsyncMock()
+        assert await deliver_if_late(redis, client, "j1", JID, "", _ms_ago(130))
+        client.send_text.assert_not_called()
+        client.send_image.assert_awaited_once()
+
+    async def test_failed_image_send_falls_back_to_its_link(self, redis):
+        await self._job(redis, self.MEDIA[:1])
+        client = AsyncMock()
+        client.send_image.side_effect = RuntimeError("no send-image route")
+        assert await deliver_if_late(redis, client, "j1", JID, "hello", _ms_ago(130))
+        assert client.send_text.await_args_list[-1].args == (JID, "Map: https://x.example/a.png")
+
+
 def test_strip_burst_delimiters_keeps_code_fences():
     text = "a\n---\nb\n```\n---\n```"
     assert strip_burst_delimiters(text) == "a\n\nb\n```\n---\n```"

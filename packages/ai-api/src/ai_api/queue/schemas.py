@@ -38,6 +38,18 @@ class DuplicateResponse(BaseModel):
     is_command: bool = Field(default=False, description="Always false")
 
 
+class JobMedia(BaseModel):
+    """
+    One image to send after the reply text. Fetch its bytes from
+    `GET /chat/job/{job_id}/media/{index}`.
+    """
+
+    index: int = Field(..., description="Position, used in the media URL")
+    caption: str = Field(default="", description="Caption (max 1024 chars), may be empty")
+    mimetype: str = Field(..., description="image/jpeg or image/png")
+    url: str = Field(..., description="Source URL, for a text fallback if sending fails")
+
+
 class JobStatusResponse(BaseModel):
     """
     Response for job status polling.
@@ -66,6 +78,10 @@ class JobStatusResponse(BaseModel):
             "another way (pushed after the polling window, or merged into another "
             "job's reply)"
         ),
+    )
+    media: list[JobMedia] | None = Field(
+        default=None,
+        description="Images to send after the text (only present when status=complete)",
     )
 
 

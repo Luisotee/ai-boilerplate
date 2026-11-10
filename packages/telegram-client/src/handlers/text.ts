@@ -6,7 +6,9 @@ import {
   textToSpeech,
   LATE_REPLY_NOTICE,
   PollTimeoutError,
+  type JobMedia,
 } from '../api-client.js';
+import { sendReplyMedia } from '../utils/reply-media.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { sleep, splitResponseIntoBursts, stripSplitDelimiters } from '../utils/message-split.js';
@@ -126,7 +128,11 @@ export async function handleTextMessage(
   );
 
   try {
+    let replyMedia: { jobId: string; media: JobMedia[] } | undefined;
     const response = await sendMessageToAI(jid, text, {
+      onMedia: (jobId, media) => {
+        replyMedia = { jobId, media };
+      },
       conversationType,
       senderJid: options.senderJid,
       senderName,
@@ -140,10 +146,14 @@ export async function handleTextMessage(
 
     if (response === null) return; // Silently blocked by API whitelist
 
-    const chunks = splitResponseIntoBursts(response, {
-      disabled: !config.messageSplit.enabled || conversationType === 'group',
-      maxChunks: config.messageSplit.maxChunks,
-    });
+    // An images-only reply has no text: send no empty message.
+    const chunks =
+      replyMedia && !response.trim()
+        ? []
+        : splitResponseIntoBursts(response, {
+            disabled: !config.messageSplit.enabled || conversationType === 'group',
+            maxChunks: config.messageSplit.maxChunks,
+          });
 
     let sentCount = 0;
     try {
@@ -178,7 +188,8 @@ export async function handleTextMessage(
     // --- Text delivered; failures below must NOT trigger the failure reaction ---
 
     try {
-      const prefs = await getUserPreferences(jid);
+      // No voice note for an images-only reply (there is no text to read).
+      const prefs = replyMedia && !response.trim() ? null : await getUserPreferences(jid);
       if (prefs?.tts_enabled) {
         logger.info({ jid }, 'TTS enabled, generating voice message');
         const audioBuffer = await textToSpeech(stripSplitDelimiters(response), jid);
@@ -191,6 +202,29 @@ export async function handleTextMessage(
       }
     } catch (ttsError) {
       logger.warn({ error: ttsError, jid }, 'TTS delivery failed, text-only sent');
+    }
+
+    // Images last (sendPhoto with the bytes; captions max 1024 chars). Never throws.
+    // With no text sent (images-only reply), the first image quotes the
+    // triggering message, as the first text chunk would have.
+    if (replyMedia) {
+      let quote: number | undefined = sentCount === 0 ? messageId : undefined;
+      await sendReplyMedia(replyMedia.jobId, replyMedia.media, {
+        image: async (buffer, item) => {
+          await telegramApi.sendImage(
+            chatId,
+            buffer,
+            item.mimetype === 'image/png' ? 'image.png' : 'image.jpg',
+            item.caption || undefined,
+            quote
+          );
+          quote = undefined;
+        },
+        text: async (fallback) => {
+          await telegramApi.sendText(chatId, fallback, quote);
+          quote = undefined;
+        },
+      });
     }
   } catch (error) {
     if (error instanceof PollTimeoutError) {
