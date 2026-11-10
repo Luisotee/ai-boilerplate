@@ -258,3 +258,68 @@ class TestCreateEmbeddingService:
         mock_client_cls.side_effect = Exception("Auth failed")
         result = create_embedding_service("bad-key")
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# embed_documents — one batchEmbedContents call for KB chunks
+# ---------------------------------------------------------------------------
+
+
+class TestEmbedDocuments:
+    @pytest.fixture
+    def aio_embed(self, mock_genai_client):
+        from unittest.mock import AsyncMock
+
+        mock_genai_client.aio.models.embed_content = AsyncMock()
+        return mock_genai_client.aio.models.embed_content
+
+    async def test_one_call_with_title_and_document_task(self, embedding_service, aio_embed):
+        aio_embed.return_value = MagicMock(
+            embeddings=[MagicMock(values=[0.1]), MagicMock(values=[0.2])]
+        )
+        vectors = await embedding_service.embed_documents(["a", "b"], title="Manual")
+        assert vectors == [[0.1], [0.2]]
+        aio_embed.assert_awaited_once()
+        kwargs = aio_embed.call_args.kwargs
+        assert kwargs["contents"] == ["a", "b"]
+        assert kwargs["config"].task_type == "RETRIEVAL_DOCUMENT"
+        assert kwargs["config"].title == "Manual"
+        assert kwargs["config"].output_dimensionality == EMBEDDING_DIMENSIONS
+
+    async def test_truncates_each_text(self, embedding_service, aio_embed):
+        aio_embed.return_value = MagicMock(embeddings=[MagicMock(values=[0.1])])
+        await embedding_service.embed_documents(["x" * (MAX_EMBEDDING_LENGTH + 10)])
+        assert len(aio_embed.call_args.kwargs["contents"][0]) == MAX_EMBEDDING_LENGTH
+
+    async def test_count_mismatch_raises(self, embedding_service, aio_embed):
+        aio_embed.return_value = MagicMock(embeddings=[MagicMock(values=[0.1])])
+        with pytest.raises(ValueError):
+            await embedding_service.embed_documents(["a", "b"])
+
+    async def test_api_error_raises(self, embedding_service, aio_embed):
+        # Unlike generate(), errors propagate so the caller can fall back.
+        aio_embed.side_effect = RuntimeError("quota")
+        with pytest.raises(RuntimeError):
+            await embedding_service.embed_documents(["a"])
+
+    async def test_empty_text_raises(self, embedding_service, aio_embed):
+        with pytest.raises(ValueError):
+            await embedding_service.embed_documents(["a", "  "])
+        aio_embed.assert_not_called()
+
+    async def test_no_texts_no_call(self, embedding_service, aio_embed):
+        assert await embedding_service.embed_documents([]) == []
+        aio_embed.assert_not_called()
+
+
+class TestGenerateTitle:
+    async def test_title_sent_for_documents(self, embedding_service, mock_genai_client):
+        mock_genai_client.models.embed_content.return_value = _make_embed_response([0.1])
+        await embedding_service.generate("text", title="Manual")
+        assert mock_genai_client.models.embed_content.call_args.kwargs["config"].title == "Manual"
+
+    async def test_title_never_sent_for_queries(self, embedding_service, mock_genai_client):
+        # Gemini accepts `title` only with RETRIEVAL_DOCUMENT.
+        mock_genai_client.models.embed_content.return_value = _make_embed_response([0.1])
+        await embedding_service.generate("q", task_type="RETRIEVAL_QUERY", title="Manual")
+        assert mock_genai_client.models.embed_content.call_args.kwargs["config"].title is None

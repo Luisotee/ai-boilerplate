@@ -1,8 +1,8 @@
 """
 Knowledge base RAG implementation for PDF documents.
 
-Provides semantic search over globally accessible PDF documents
-with source attribution and citation.
+Hybrid search (vector + keyword, fused with RRF) over knowledge-base
+documents, with source attribution and citation.
 """
 
 from sqlalchemy import text
@@ -10,6 +10,192 @@ from sqlalchemy.orm import Session
 
 from ..logger import logger
 from ..runtime_config import runtime_config
+from .vector import HNSW_EF_SEARCH_MAX, halfvec_distance, prepare_hnsw_search
+
+# Reciprocal rank fusion constant (the usual 60): a hit's score from one ranked
+# list is 1 / (RRF_K + rank), so the top few ranks of either list dominate.
+RRF_K = 60
+
+# Candidates each arm contributes before fusion: max(4 x limit, this), capped
+# at HNSW_EF_SEARCH_MAX (the vector arm can't see further than ef_search).
+MIN_CANDIDATE_POOL = 20
+
+# The keyword arm ranks every chunk matching any query word, but counts words
+# matched (the half rule) only for the best pool x this by ts_rank_cd, which
+# already favours chunks holding more of the words. Bounds the cost when a
+# word appears in most of the KB.
+KEYWORD_PRELIMIT_FACTOR = 10
+
+# Rows in scope for any KB search: completed documents that are global or scoped
+# to this conversation, and not expired.
+_SCOPE_SQL = """
+    d.status = 'completed'
+    AND (d.whatsapp_jid IS NULL OR d.whatsapp_jid = :whatsapp_jid)
+    AND (d.expires_at IS NULL OR d.expires_at > NOW())
+"""
+
+
+def rrf_fuse(
+    vector_ids: list[str],
+    keyword_ids: list[str],
+    *,
+    k: int = RRF_K,
+    limit: int | None = None,
+) -> list[tuple[str, float]]:
+    """Fuse two ranked id lists (best first) with reciprocal rank fusion.
+
+    Each list contributes ``1 / (k + rank)`` (rank starts at 1) to every id it
+    holds; ids in both lists add up. Returns ``(id, score)`` best first. Ties
+    are broken by vector rank, then keyword rank, then id, so the order is
+    deterministic.
+
+    Plain RRF lets ids found by both arms, even far down each list, outscore
+    the top hit of a single arm (2/80 beats 1/61). With a ``limit``, the top
+    hit of each arm therefore keeps a slot: it replaces the lowest-scoring
+    other id when it would fall outside the limit. So the nearest chunk and
+    the best keyword match (an exact law number, say) always come back when
+    ``limit`` >= 2.
+    """
+    vec_rank = {cid: i for i, cid in enumerate(vector_ids, 1)}
+    kw_rank = {cid: i for i, cid in enumerate(keyword_ids, 1)}
+    missing = float("inf")
+    scores: dict[str, float] = {}
+    for ranks in (vec_rank, kw_rank):
+        for cid, rank in ranks.items():
+            scores[cid] = scores.get(cid, 0.0) + 1.0 / (k + rank)
+
+    def order(item: tuple[str, float]):
+        return (
+            -item[1],
+            vec_rank.get(item[0], missing),
+            kw_rank.get(item[0], missing),
+            item[0],
+        )
+
+    fused = sorted(scores.items(), key=order)
+    if limit is None or len(fused) <= limit:
+        return fused
+    chosen = fused[:limit]
+    tops = list(dict.fromkeys(vector_ids[:1] + keyword_ids[:1]))
+    if limit < len(tops):
+        return chosen  # no room for both: plain RRF decides
+    for top in tops:
+        if top not in {cid for cid, _ in chosen}:
+            # Drop the lowest-scoring id that isn't one of the tops.
+            weakest = next(item for item in reversed(chosen) if item[0] not in tops)
+            chosen.remove(weakest)
+            chosen.append((top, scores[top]))
+    return sorted(chosen, key=order)
+
+
+def _hybrid_search_sql() -> str:
+    """Both arms in one statement; returns each candidate once with its ranks.
+
+    - ``vec``: the nearest ``:pool`` chunks by the halfvec distance the HNSW
+      index is built on, then only those at or above ``:threshold``.
+    - ``words``: the query's words (``ts_debug``; hyphenated parts belong to
+      their compound), each with its lexemes in both ``kb_stem`` (full
+      stemming: licitação and licitações -> ``licit``) and ``kb_fold``
+      (accents folded: "licitacao" -> ``licitaca``, as "licitação" folds).
+      Stop words have no lexemes and drop out.
+    - ``kw``: chunks whose ``content_tsv`` (both configs' lexemes) matches ANY
+      word (an OR tsquery, found through the GIN index), kept only when they
+      hold at least half of the query's words, and ranked by how many they
+      hold, then ``ts_rank_cd``. OR keeps a chunk that lacks one word of the
+      model's natural-language query; the half rule keeps a word common to
+      the whole KB from filling the results on its own. The threshold doesn't
+      apply here, so an exact term (a law number, a place, a product) survives
+      when no vector hit passes it.
+    """
+    distance = halfvec_distance("c.embedding")
+    return f"""
+        WITH vec AS (
+            SELECT id, row_number() OVER (ORDER BY dist, id) AS vec_rank
+            FROM (
+                SELECT c.id, {distance} AS dist
+                FROM knowledge_base_chunks c
+                JOIN knowledge_base_documents d ON c.document_id = d.id
+                WHERE {_SCOPE_SQL}
+                  AND c.embedding IS NOT NULL
+                ORDER BY {distance}
+                LIMIT :pool
+            ) nearest
+            WHERE 1 - dist >= :threshold
+        ),
+        words AS (
+            SELECT DISTINCT ON (alts) alts, tsq
+            FROM (
+                SELECT
+                    ARRAY(
+                        SELECT DISTINCT lexeme
+                        FROM unnest(
+                            tsvector_to_array(to_tsvector('kb_stem', t.token))
+                            || tsvector_to_array(to_tsvector('kb_fold', t.token))
+                        ) AS lexeme
+                        ORDER BY lexeme
+                    ) AS alts,
+                    replace(
+                        (plainto_tsquery('kb_stem', t.token)
+                         || plainto_tsquery('kb_fold', t.token))::text,
+                        ' & ', ' | '
+                    )::tsquery AS tsq
+                FROM ts_debug('kb_stem', :query_text) t
+                WHERE t.alias NOT IN ('blank', 'hword_part', 'hword_asciipart', 'hword_numpart')
+            ) parsed
+            WHERE cardinality(alts) > 0
+        ),
+        q AS (
+            SELECT
+                (SELECT string_agg(tsq::text, ' | ') FROM words)::tsquery AS query,
+                (SELECT count(*) FROM words) AS total
+        ),
+        kw_ranked AS (
+            SELECT c.id, c.content_tsv, ts_rank_cd(c.content_tsv, q.query) AS rank
+            FROM knowledge_base_chunks c
+            JOIN knowledge_base_documents d ON c.document_id = d.id
+            CROSS JOIN q
+            WHERE {_SCOPE_SQL}
+              AND c.content_tsv @@ q.query
+            ORDER BY rank DESC, c.id
+            LIMIT :pool * {KEYWORD_PRELIMIT_FACTOR}
+        ),
+        kw AS (
+            SELECT id, row_number() OVER (ORDER BY matched DESC, rank DESC, id) AS kw_rank
+            FROM (
+                SELECT
+                    r.id,
+                    r.rank,
+                    (SELECT count(*) FROM words w WHERE r.content_tsv @@ w.tsq) AS matched
+                FROM kw_ranked r
+            ) hits
+            WHERE matched * 2 >= (SELECT total FROM q)
+            ORDER BY matched DESC, rank DESC, id
+            LIMIT :pool
+        )
+        SELECT
+            c.id,
+            c.document_id,
+            c.chunk_index,
+            c.content,
+            c.content_type,
+            c.page_number,
+            c.heading,
+            c.token_count,
+            c.chunk_metadata,
+            d.filename,
+            d.original_filename,
+            d.upload_date,
+            d.doc_metadata AS document_metadata,
+            d.is_conversation_scoped,
+            CASE WHEN c.embedding IS NULL THEN NULL ELSE 1 - {distance} END AS similarity,
+            vec.vec_rank,
+            kw.kw_rank
+        FROM (SELECT id FROM vec UNION SELECT id FROM kw) ids
+        JOIN knowledge_base_chunks c ON c.id = ids.id
+        JOIN knowledge_base_documents d ON c.document_id = d.id
+        LEFT JOIN vec ON vec.id = c.id
+        LEFT JOIN kw ON kw.id = c.id
+    """
 
 
 async def search_knowledge_base(
@@ -22,22 +208,29 @@ async def search_knowledge_base(
     **kwargs,
 ) -> list[dict]:
     """
-    Search for semantically similar document chunks.
+    Hybrid search over document chunks: vector similarity plus keywords.
+
+    One SQL statement runs both arms (see ``_hybrid_search_sql``); the two
+    rankings are fused with reciprocal rank fusion (``rrf_fuse``). The
+    similarity threshold filters the vector arm only, so keyword hits survive
+    when no vector hit passes it.
 
     Args:
         db: Database session
         query_embedding: Pre-generated embedding vector for the query
-        query_text: Optional query text (for logging only)
+        query_text: Query text for the keyword arm (without it, vector only)
         limit: Maximum results to return (default from KB_SEARCH_LIMIT env)
-        similarity_threshold: Minimum similarity score (default from KB_SIMILARITY_THRESHOLD env)
+        similarity_threshold: Minimum similarity for the vector arm (default from KB_SIMILARITY_THRESHOLD env)
         whatsapp_jid: Optional WhatsApp JID to include conversation-scoped documents
         **kwargs: Additional parameters
 
     Returns:
-        List of dicts, each containing:
+        List of dicts, best first, each containing:
         - 'chunk': Dict with chunk data (id, content, page_number, etc.)
         - 'document': Dict with document metadata (filename, upload_date, etc.)
-        - 'similarity_score': Cosine similarity score
+        - 'similarity_score': Cosine similarity to the query (also for keyword-only hits)
+        - 'rrf_score': Fused score the results are ordered by
+        - 'match': 'vector', 'keyword' or 'both'
     """
     # Apply defaults from runtime config (env default, overridable via /admin)
     if similarity_threshold is None:
@@ -52,65 +245,47 @@ async def search_knowledge_base(
     query_preview = query_text[:50] if query_text else "embedding"
     logger.info(f"Knowledge base search: '{query_preview}...' (limit: {limit})")
 
-    # Vector similarity query using cosine distance
-    # JOIN with documents to get metadata and filter by status
-    # pgvector uses <=> for cosine distance (lower = more similar)
-    # We convert to similarity score: 1 - distance
-    #
-    # Conversation scope filtering:
-    # - Global documents (whatsapp_jid IS NULL) are always included
-    # - If whatsapp_jid is provided, also include documents scoped to that conversation
-    # - Exclude expired documents (expires_at < NOW())
-    query_sql = text("""
-        SELECT
-            c.id,
-            c.document_id,
-            c.chunk_index,
-            c.content,
-            c.content_type,
-            c.page_number,
-            c.heading,
-            c.token_count,
-            c.chunk_metadata,
-            d.filename,
-            d.original_filename,
-            d.upload_date,
-            d.doc_metadata as document_metadata,
-            d.is_conversation_scoped,
-            (1 - (c.embedding <=> CAST(:embedding AS vector))) AS similarity
-        FROM knowledge_base_chunks c
-        JOIN knowledge_base_documents d ON c.document_id = d.id
-        WHERE d.status = 'completed'
-          AND c.embedding IS NOT NULL
-          AND (1 - (c.embedding <=> CAST(:embedding AS vector))) >= :threshold
-          AND (d.whatsapp_jid IS NULL OR d.whatsapp_jid = :whatsapp_jid)
-          AND (d.expires_at IS NULL OR d.expires_at > NOW())
-        ORDER BY similarity DESC
-        LIMIT :limit
-    """)
-
-    result = db.execute(
-        query_sql,
+    pool = min(max(4 * limit, MIN_CANDIDATE_POOL), HNSW_EF_SEARCH_MAX)
+    prepare_hnsw_search(db, ef_search=pool)
+    rows = db.execute(
+        text(_hybrid_search_sql()),
         {
             "embedding": query_embedding,
+            "query_text": query_text or "",
             "threshold": similarity_threshold,
-            "limit": limit,
+            "pool": pool,
             "whatsapp_jid": whatsapp_jid,
         },
-    )
-    rows = result.fetchall()
+    ).fetchall()
+
+    by_id = {str(row.id): row for row in rows}
+    vector_ids = [
+        str(r.id) for r in sorted((r for r in rows if r.vec_rank), key=lambda r: r.vec_rank)
+    ]
+    keyword_ids = [
+        str(r.id) for r in sorted((r for r in rows if r.kw_rank), key=lambda r: r.kw_rank)
+    ]
+    fused = rrf_fuse(vector_ids, keyword_ids, limit=limit)
 
     logger.info(
-        f"Knowledge base search found {len(rows)} results (threshold: {similarity_threshold})"
+        f"Knowledge base search found {len(fused)} results "
+        f"({len(vector_ids)} vector >= {similarity_threshold}, {len(keyword_ids)} keyword)"
     )
 
-    # Convert to structured results
     results = []
-    for row in rows:
+    for chunk_id, rrf_score in fused:
+        row = by_id[chunk_id]
+        if row.vec_rank and row.kw_rank:
+            match = "both"
+        elif row.vec_rank:
+            match = "vector"
+        else:
+            match = "keyword"
+        similarity = float(row.similarity) if row.similarity is not None else 0.0
         results.append(
             {
                 "chunk": {
-                    "id": str(row.id),
+                    "id": chunk_id,
                     "content": row.content,
                     "content_type": row.content_type,
                     "page_number": row.page_number,
@@ -126,12 +301,15 @@ async def search_knowledge_base(
                     "upload_date": row.upload_date,
                     "metadata": row.document_metadata,
                 },
-                "similarity_score": float(row.similarity),
+                "similarity_score": similarity,
+                "rrf_score": rrf_score,
+                "match": match,
             }
         )
 
         logger.debug(
-            f"  - [{row.original_filename}] (similarity: {row.similarity:.3f})\n{row.content}"
+            f"  - [{row.original_filename}] ({match}, similarity: {similarity:.3f}, "
+            f"rrf: {rrf_score:.4f})\n{row.content}"
         )
 
     return results
@@ -192,8 +370,13 @@ def format_knowledge_base_results(results: list[dict]) -> str:
             )
 
         # Format chunk content
+        # A keyword-only hit has a low cosine score by construction; say why it
+        # is here so the model doesn't read the number as weak evidence.
+        label = f"relevance: {similarity:.2f}"
+        if result.get("match") == "keyword":
+            label += ", keyword match"
         snippet_lines = [
-            f"=== Source {i} (relevance: {similarity:.2f}) ===",
+            f"=== Source {i} ({label}) ===",
             f"📄 Document: {source}",
             "",
         ]

@@ -51,7 +51,7 @@ Baileys `messages.upsert` (`whatsapp.ts`) → a handler in `handlers/` → `hand
 | `docs/access-control.md` | Rate limits, group admins, whitelist matching, group gating |
 | `docs/docker.md` | Non-root images, ignore files, volume chown on upgrade, TS logging/shutdown |
 | `packages/ai-api/docs/admin-api.md` | `/admin` routes, runtime settings `REGISTRY` |
-| `packages/ai-api/docs/media-and-kb.md` | KB upload dedup, PDF parser and STT provider selection |
+| `packages/ai-api/docs/media-and-kb.md` | KB dedup, hybrid/vector search, PDF parser, STT |
 | `packages/ai-api/docs/markdown-formatting.md` | Model-output Markdown → WhatsApp/Telegram conversion |
 | `packages/ai-api/docs/logfire.md` | Logfire instrumentation details |
 | `docs/architecture.md`, `docs/commands.md`, `docs/testing.md`, `docs/workflows.md` | Full message flow, command list, test patterns, workflow steps |
@@ -178,7 +178,7 @@ Step lists: `docs/workflows.md`. Baileys handler, Cloud handler and Baileys mult
 - **Runtime settings overlay (`runtime_config.py`)**: some settings can be overridden at runtime via the `runtime_settings` table, read through `runtime_config.get("key")` (cached ~10s). In the `REGISTRY`, **only mark a setting `hot` if its consumption site actually reads via `runtime_config.get()`**, otherwise the override silently never applies. Details: `packages/ai-api/docs/admin-api.md`
 - **Model output is Markdown-sanitised** by `formatting.markdown_to_whatsapp` before delivery, embedding and save, because WhatsApp renders Markdown literally. The rule for the model lives in the `formatting_guidance` instructions hook (`agent/core.py`), because a `bot_prompt` override replaces `DEFAULT_SYSTEM_PROMPT` wholesale. Keep `**` out of the default prompt (pinned by `tests/mocked/test_formatting_guidance.py`). Details: `packages/ai-api/docs/markdown-formatting.md`
 - CORS middleware must be added AFTER `APIKeyMiddleware` in `main.py`: Starlette processes middleware LIFO, and reversing this breaks CORS preflight
-- The pgvector IVFFlat index must be created manually for `knowledge_base_chunks`; without it, similarity search does a full table scan
+- Vector indexes: HNSW on `embedding::halfvec(3072)` (`vector` caps at 2000 dims); order by that cast (`rag/vector.py`) or it scans all
 - Embedding task types matter: `RETRIEVAL_DOCUMENT` for storage, `RETRIEVAL_QUERY` for search. Mixing them degrades retrieval quality
 - **Redis Streams (`streams/`) is the only job pipeline**; `arq` is gone (history in `docs/architecture.md`). `get_arq_redis` / `close_arq_redis` / `create_arq_pool` and `ARQ_KEEP_RESULT` (the job-metadata TTL) keep their legacy names on purpose, because renaming them would break callers, test patches and existing overrides
 

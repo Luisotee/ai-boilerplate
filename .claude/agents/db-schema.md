@@ -42,7 +42,7 @@ Before making any changes, **always read the model files** to get the current sc
 
 Key facts that won't change:
 - Embeddings use `Vector(3072)` from pgvector (gemini-embedding-001)
-- IVFFlat index on `knowledge_base_chunks.embedding` must be created manually
+- Vector columns are indexed with HNSW on `embedding::halfvec(3072)` (`vector` indexes cap at 2,000 dims), declared in `__table_args__`
 - `knowledge_base_documents` has CASCADE delete to chunks
 
 ## Workflow for Schema Changes
@@ -81,12 +81,12 @@ Key facts that won't change:
 
 Standard indexes are defined in `__table_args__` tuple.
 
-**pgvector IVFFlat index** (CRITICAL for similarity search performance):
-```sql
-CREATE INDEX idx_kb_chunks_embedding ON knowledge_base_chunks
-USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+**pgvector index**: pgvector can't index a `vector(3072)` column (IVFFlat and HNSW stop at 2,000 dims), so both embedding columns carry an HNSW expression index on the halfvec cast, declared in the model so `create_all()` emits it:
+```python
+Index("idx_kb_chunks_embedding_hnsw", func.cast(embedding, HALFVEC(3072)).label("embedding"),
+      postgresql_using="hnsw", postgresql_ops={"embedding": "halfvec_cosine_ops"})
 ```
-This MUST be created manually AFTER data is loaded (IVFFlat needs data to build lists).
+Queries must order by the same cast (`rag/vector.py`). Existing DBs get it from `docs/migrations/2026-11-09-vector-hnsw-indexes.sql` (`CREATE INDEX CONCURRENTLY`).
 
 ### Enabling pgvector
 

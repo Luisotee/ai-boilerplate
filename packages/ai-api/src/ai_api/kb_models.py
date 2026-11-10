@@ -8,12 +8,28 @@ with vector embeddings for semantic search.
 import uuid
 from datetime import datetime
 
-from pgvector.sqlalchemy import Vector
-from sqlalchemy import JSON, Boolean, Column, DateTime, ForeignKey, Index, Integer, String, Text
-from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import relationship
+from pgvector.sqlalchemy import HALFVEC, Vector
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    Column,
+    Computed,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    SmallInteger,
+    String,
+    Text,
+)
+from sqlalchemy.dialects.postgresql import TSVECTOR, UUID
+from sqlalchemy.orm import deferred, relationship
+from sqlalchemy.sql import func
 
 from .database import Base
+
+# See KnowledgeBaseChunk.embedding_format.
+KB_EMBEDDING_FORMAT = 1
 
 
 class KnowledgeBaseDocument(Base):
@@ -102,6 +118,25 @@ class KnowledgeBaseChunk(Base):
     heading = Column(String, nullable=True)  # Section heading if available
     embedding = Column(Vector(3072), nullable=True)  # Google gemini-embedding-001 (3072 dimensions)
     embedding_generated_at = Column(DateTime, nullable=True)
+    # What the embedding was computed from. NULL: the chunk text alone (rows from
+    # before hybrid search). 1 (KB_EMBEDDING_FORMAT): document title (Gemini's
+    # `title`) + heading path + chunk text. scripts/reembed_kb.py upgrades NULL rows.
+    embedding_format = Column(SmallInteger, nullable=True)
+    # Keyword-search vector, computed by Postgres from heading + content through
+    # two text-search configs created by init_db / the migration before this
+    # table: `kb_stem` (the language's full stemming) and `kb_fold` (accents
+    # folded, so a query typed without them still matches). Deferred so ordinary
+    # chunk loads never select it.
+    content_tsv = deferred(
+        Column(
+            TSVECTOR,
+            Computed(
+                "to_tsvector('kb_stem'::regconfig, coalesce(heading, '') || ' ' || content)"
+                " || to_tsvector('kb_fold'::regconfig, coalesce(heading, '') || ' ' || content)",
+                persisted=True,
+            ),
+        )
+    )
     token_count = Column(Integer, nullable=True)  # Approximate token count
     chunk_metadata = Column(JSON, nullable=True)  # Chunk-level metadata
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -113,8 +148,19 @@ class KnowledgeBaseChunk(Base):
     __table_args__ = (
         Index("idx_kb_chunks_document", "document_id"),
         Index("idx_kb_chunks_page", "page_number"),
-        # IVFFlat index for vector similarity search - created manually after table creation
-        # CREATE INDEX idx_kb_chunks_embedding ON knowledge_base_chunks USING ivfflat (embedding vector_cosine_ops);
+        # HNSW index for vector search. pgvector can't index vector(3072) (its
+        # limit is 2,000 dims), so the index is on the halfvec cast (limit 4,000)
+        # and queries must order by the same expression (rag/vector.py).
+        # Existing DBs: docs/migrations/2026-11-09-vector-hnsw-indexes.sql.
+        Index(
+            "idx_kb_chunks_embedding_hnsw",
+            func.cast(embedding, HALFVEC(3072)).label("embedding"),
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "halfvec_cosine_ops"},
+        ),
+        # GIN index for the keyword half of the hybrid search.
+        # Existing DBs: docs/migrations/2026-11-09-kb-hybrid-search.sql.
+        Index("idx_kb_chunks_content_tsv", "content_tsv", postgresql_using="gin"),
     )
 
     def __repr__(self):

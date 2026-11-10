@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from ..database import ConversationMessage
 from ..logger import logger
 from ..runtime_config import runtime_config
+from .vector import halfvec_distance, prepare_hnsw_search
 
 
 def get_context_messages(
@@ -217,31 +218,38 @@ async def search_conversation_history(
         exclude_clause = "AND id NOT IN :exclude_ids"
         params["exclude_ids"] = tuple(str(id) for id in exclude_message_ids)
 
-    # Vector similarity query using cosine distance
-    # pgvector uses <=> for cosine distance (lower = more similar)
-    # We convert to similarity score: 1 - distance
-    # NOTE: Cast :embedding to vector type for pgvector compatibility
+    # Nearest neighbours by cosine distance (pgvector ``<=>``, lower = more
+    # similar), reported as similarity = 1 - distance. The inner query orders
+    # by the halfvec expression the HNSW index is built on, so the planner can
+    # use that index for a chat holding much of the table, and the user_id
+    # btree plus an exact sort for a small one. The outer query applies the
+    # threshold and re-sorts (needed under hnsw.iterative_scan=relaxed_order).
+    distance = halfvec_distance("embedding")
     query_sql = text(f"""
-        SELECT
-            id,
-            user_id,
-            role,
-            content,
-            sender_jid,
-            sender_name,
-            timestamp,
-            embedding,
-            embedding_generated_at,
-            (1 - (embedding <=> CAST(:embedding AS vector))) AS similarity
-        FROM conversation_messages
-        WHERE user_id = :user_id
-          AND embedding IS NOT NULL
-          {exclude_clause}
-          AND (1 - (embedding <=> CAST(:embedding AS vector))) >= :threshold
+        SELECT * FROM (
+            SELECT
+                id,
+                user_id,
+                role,
+                content,
+                sender_jid,
+                sender_name,
+                timestamp,
+                embedding,
+                embedding_generated_at,
+                (1 - {distance}) AS similarity
+            FROM conversation_messages
+            WHERE user_id = :user_id
+              AND embedding IS NOT NULL
+              {exclude_clause}
+            ORDER BY {distance}
+            LIMIT :limit
+        ) nearest
+        WHERE similarity >= :threshold
         ORDER BY similarity DESC
-        LIMIT :limit
     """)
 
+    prepare_hnsw_search(db, ef_search=limit)
     result = db.execute(query_sql, params)
     rows = result.fetchall()
 
