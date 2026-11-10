@@ -1,7 +1,8 @@
 import base64
 
-from pydantic_ai import AgentRunResultEvent, BinaryContent, RunUsage
+from pydantic_ai import AgentRunResultEvent, BinaryContent, RunUsage, UsageLimits
 
+from ..config import settings
 from ..logger import logger
 from .core import AgentDeps, agent, build_runtime_model
 
@@ -12,6 +13,7 @@ async def get_ai_response(
     agent_deps: AgentDeps = None,
     image_data: str | None = None,
     image_mimetype: str | None = None,
+    images: list[tuple[str, str]] | None = None,
 ):
     """
     Run the agent for a user message (with optional history) and yield its reply
@@ -22,31 +24,35 @@ async def get_ai_response(
         agent_deps: Optional dependencies for agent tools (enables semantic search)
         image_data: Optional base64-encoded image data for vision
         image_mimetype: Optional image MIME type (e.g., 'image/jpeg')
+        images: Optional (base64, mimetype) pairs, after image_data (an album or
+            a merged burst sends several)
 
     Yields:
         str: The final reply text, once the run (including every tool call) finishes
     """
-    has_image = image_data is not None and image_mimetype is not None
+    all_images = []
+    if image_data is not None and image_mimetype is not None:
+        all_images.append((image_data, image_mimetype))
+    all_images.extend(images or [])
+    has_image = bool(all_images)
 
     logger.info("=" * 80)
     logger.info("🤖 AGENT STARTING")
     logger.info(f"   User message: {user_message}")
     logger.info(f"   History messages: {len(message_history) if message_history else 0}")
-    logger.info(f"   Has image: {has_image}")
+    logger.info(f"   Images: {len(all_images)}")
     logger.info(f"   Has dependencies: {agent_deps is not None}")
     if agent_deps:
         logger.info(f"   - Embedding service: {agent_deps.embedding_service is not None}")
     logger.info("=" * 80)
 
-    # Construct the prompt - either text only or text + image
+    # Construct the prompt - either text only or text + image(s)
     if has_image:
-        # Decode base64 image and create BinaryContent
-        image_bytes = base64.b64decode(image_data)
-        prompt = [
-            user_message,
-            BinaryContent(data=image_bytes, media_type=image_mimetype),
-        ]
-        logger.info(f"   Image size: {len(image_bytes)} bytes, type: {image_mimetype}")
+        prompt = [user_message]
+        for data, mimetype in all_images:
+            image_bytes = base64.b64decode(data)
+            prompt.append(BinaryContent(data=image_bytes, media_type=mimetype))
+            logger.info(f"   Image size: {len(image_bytes)} bytes, type: {mimetype}")
     else:
         prompt = user_message
 
@@ -64,6 +70,9 @@ async def get_ai_response(
         message_history=message_history,
         deps=agent_deps,
         model=build_runtime_model(),  # honor /admin model overrides per-run
+        # A model stuck calling tools stops here (UsageLimitExceeded) instead of
+        # at Pydantic AI's default of 50 requests.
+        usage_limits=UsageLimits(request_limit=settings.agent_request_limit),
     ):
         if isinstance(event, AgentRunResultEvent):
             full_response = event.result.output

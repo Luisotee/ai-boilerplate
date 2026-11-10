@@ -27,7 +27,7 @@ from ai_api.whatsapp import (
     WhatsAppNotConnectedError,
     WhatsAppNotFoundError,
 )
-from ai_api.whatsapp.client import SendMessageResponse
+from ai_api.whatsapp.client import ReachoutTimelock, SendMessageResponse
 
 BID = uuid.uuid4()
 TEXT = "New: voice replies!\n\n_opt out_"
@@ -65,6 +65,7 @@ class Harness:
         self.client = MagicMock()
         self.client.send_text = AsyncMock(return_value=OK)
         self.client.send_typing = AsyncMock()
+        self.client.get_reachout_timelock = AsyncMock(return_value=ReachoutTimelock(active=False))
         self.record = MagicMock(return_value=1)
         self.release = MagicMock()
         self.claimed_ids: list = []
@@ -98,6 +99,7 @@ class Harness:
             enter(patch.object(bc, "create_whatsapp_client", return_value=self.client))
             enter(patch.object(bc, "_broadcast_status", side_effect=self._status))
             enter(patch.object(bc, "_next_recipient", side_effect=self._next))
+            enter(patch.object(bc, "_has_pending", side_effect=lambda *_: bool(self.queue)))
             enter(patch.object(bc, "_record", self.record))
             enter(patch.object(bc, "_claim", side_effect=self._claim))
             enter(patch.object(bc, "_release", self.release))
@@ -154,6 +156,73 @@ async def test_restarted_lane_after_a_full_batch_takes_the_batch_pause():
     h = Harness([claimed(1)], recent_sends=[now - timedelta(seconds=5), now])
     await h.run()
     assert 410 <= h.sleeps[0] <= 780
+
+
+async def test_baileys_lane_waits_out_an_active_reachout_timelock_then_sends():
+    h = Harness([claimed(1)])
+    ends = bc._utcnow() + timedelta(hours=2)
+    h.client.get_reachout_timelock.side_effect = [
+        ReachoutTimelock(active=True, ends_at=ends),
+        ReachoutTimelock(active=False),
+    ]
+    await h.run()
+    # Waited ~2h before the first send, then sent.
+    assert 7100 <= h.sleeps[0] <= 7200
+    h.client.send_text.assert_awaited_once()
+
+
+async def test_finished_baileys_lane_exits_without_waiting_on_a_timelock_or_gap():
+    """agy review: after the last send the lane slept out the gap and a timelock
+    (up to 6 h) before noticing it was done, holding the sender lock."""
+    h = Harness([claimed(1)], cap_waits=[0.0, 3600.0])
+    h.client.get_reachout_timelock.side_effect = [
+        ReachoutTimelock(active=False),
+        ReachoutTimelock(active=True, ends_at=bc._utcnow() + timedelta(hours=6)),
+    ]
+    await h.run()
+    h.client.send_text.assert_awaited_once()
+    # Only the post-send pacing gap; no timelock check or wait after the last send.
+    assert len(h.sleeps) == 1 and 20 <= h.sleeps[0] <= 60
+    h.client.get_reachout_timelock.assert_awaited_once()
+
+
+async def test_baileys_lane_with_nothing_pending_returns_at_once():
+    h = Harness([], recent_sends=[bc._utcnow() - timedelta(seconds=5)])
+    await h.run()
+    assert h.sleeps == []
+    h.client.get_reachout_timelock.assert_not_awaited()
+
+
+async def test_timelock_wait_is_clamped_and_unknown_end_waits_an_hour():
+    client = MagicMock()
+    client.get_reachout_timelock = AsyncMock(
+        return_value=ReachoutTimelock(active=True, ends_at=bc._utcnow() + timedelta(days=3))
+    )
+    assert await bc._timelock_wait_seconds(client) == bc.TIMELOCK_MAX_WAIT_SECONDS
+    client.get_reachout_timelock.return_value = ReachoutTimelock(
+        active=True, ends_at=bc._utcnow() + timedelta(seconds=5)
+    )
+    assert await bc._timelock_wait_seconds(client) == bc.TIMELOCK_MIN_WAIT_SECONDS
+    # A cached "active" whose end already passed counts as over.
+    client.get_reachout_timelock.return_value = ReachoutTimelock(
+        active=True, ends_at=bc._utcnow() - timedelta(minutes=1)
+    )
+    assert await bc._timelock_wait_seconds(client) == 0.0
+    client.get_reachout_timelock.return_value = ReachoutTimelock(active=True)
+    assert await bc._timelock_wait_seconds(client) == bc.TIMELOCK_UNKNOWN_END_WAIT_SECONDS
+
+
+async def test_timelock_check_failure_fails_open():
+    h = Harness([claimed(1)])
+    h.client.get_reachout_timelock.side_effect = WhatsAppClientError("Not Found", status_code=404)
+    await h.run()
+    h.client.send_text.assert_awaited_once()
+
+
+async def test_fast_lanes_never_check_the_timelock():
+    h = Harness([claimed(1)])
+    await h.run("telegram")
+    h.client.get_reachout_timelock.assert_not_awaited()
 
 
 async def test_telegram_lane_is_fast_and_skips_typing_and_pacing_restore():

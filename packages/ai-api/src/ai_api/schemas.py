@@ -4,6 +4,11 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
+class ImageInput(BaseModel):
+    data: str = Field(..., description="Base64-encoded image data")
+    mimetype: str = Field(..., description="Image MIME type (e.g., image/jpeg)")
+
+
 class ChatRequest(BaseModel):
     whatsapp_jid: str = Field(..., description="User's WhatsApp JID")
     message: str = Field(..., description="User's message text")
@@ -19,6 +24,12 @@ class ChatRequest(BaseModel):
     whatsapp_message_id: str | None = Field(None, description="WhatsApp message ID for reactions")
     image_data: str | None = Field(None, description="Base64-encoded image data for vision")
     image_mimetype: str | None = Field(None, description="Image MIME type (e.g., image/jpeg)")
+    images: list[ImageInput] | None = Field(
+        None,
+        max_length=10,
+        description="Several images sent together (an album), answered in one run; "
+        "added after image_data when both are set",
+    )
     document_data: str | None = Field(None, description="Base64-encoded PDF document data")
     document_mimetype: str | None = Field(
         None, description="Document MIME type (e.g., application/pdf)"

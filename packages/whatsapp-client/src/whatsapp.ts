@@ -2,13 +2,13 @@ import makeWASocket, {
   type WAMessage,
   type WASocket,
   DisconnectReason,
-  useMultiFileAuthState,
   normalizeMessageContent,
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import qrcode from 'qrcode-terminal';
 import { readdir, rm } from 'node:fs/promises';
 import { logger } from './logger.js';
+import { Sentry } from './instrument.js';
 import { config } from './config.js';
 import {
   setBaileysSocket,
@@ -19,8 +19,15 @@ import {
   setSocketOpen,
   isBaileysReady,
   clearBaileysSocket,
+  sendSerialized,
+  noteInbound,
+  stopSends,
+  setLastDisconnect,
+  setReconnectAttempts,
+  clearTimelockCache,
 } from './services/baileys.js';
 import { getWaVersionConfig } from './services/wa-version.js';
+import { flushPendingCredsSave, useAtomicMultiFileAuthState } from './services/auth-state.js';
 import {
   clearGroupCache,
   invalidateGroup,
@@ -132,6 +139,8 @@ async function resolveGate(
  *  Clears the directory contents — not the dir itself, which is the session volume mountpoint. */
 async function clearAuthState(): Promise<void> {
   setPairedPhoneNumber(null);
+  // A creds write still in flight would land after the wipe and resurrect them.
+  await flushPendingCredsSave(3000);
   try {
     const entries = await readdir(AUTH_DIR);
     await Promise.all(entries.map((e) => rm(`${AUTH_DIR}/${e}`, { recursive: true, force: true })));
@@ -204,40 +213,111 @@ export async function logoutWhatsApp(): Promise<void> {
   await initializeWhatsApp(); // awaited: single re-init owner, errors surface
 }
 
+/**
+ * Stop the WhatsApp side for a process shutdown: no more reconnects, end the
+ * socket, and wait (bounded) for an in-flight creds write so SIGTERM can't
+ * leave a half-written creds.json. Not epoch-bumped on purpose: the current
+ * socket's last `creds.update` must still persist.
+ */
+export async function shutdownWhatsApp(): Promise<void> {
+  shuttingDown = true;
+  stopSends(); // queued sends fail now instead of waiting 15s for a reopen
+  resetReconnectionState();
+  const sock = getLiveSocket();
+  if (sock) {
+    // rc13's end() is async and awaits ws.close(), which can hang: don't await it.
+    void Promise.resolve()
+      .then(() => sock.end(undefined))
+      .catch((err: unknown) => logger.debug({ err }, 'socket.end() failed during shutdown'));
+  }
+  if (!(await flushPendingCredsSave(3000))) {
+    logger.warn('A WhatsApp creds write was still running at shutdown');
+  }
+}
+
 // Monotonic socket generation. Bumped on every init and on logout; the connection
 // and creds handlers capture their generation and go inert once it's superseded, so a
 // stale socket can't clobber a newer one or re-persist auth state we've since wiped.
 let socketEpoch = 0;
 
+// Set by shutdownWhatsApp(): the socket's close must not schedule a reconnect.
+let shuttingDown = false;
+
 // Reconnection state
 let reconnectionAttempts = 0;
 let reconnectionTimer: NodeJS.Timeout | null = null;
 let isReconnecting = false;
+// Armed on 'open'; resets the attempt counter only once the link has stayed up
+// for `config.reconnection.stableMs`, so an open→close flap keeps backing off.
+let stableTimer: NodeJS.Timeout | null = null;
 
 /**
- * Calculate exponential backoff delay with jitter
+ * Calculate exponential backoff delay with jitter. Once `maxAttempts` failures
+ * in a row are reached, retry at the long interval instead of `maxDelayMs`:
+ * ~120 connects/hour on a persistent failure is how accounts get restricted.
  */
 function calculateBackoffDelay(attempt: number): number {
-  const { initialDelayMs, maxDelayMs, jitterMs } = config.reconnection;
+  const { initialDelayMs, maxDelayMs, jitterMs, maxAttempts, longDelayMs } = config.reconnection;
 
-  // Exponential backoff: initial * 2^attempt
-  const exponentialDelay = initialDelayMs * Math.pow(2, attempt);
-
-  // Cap at maximum delay
-  const cappedDelay = Math.min(exponentialDelay, maxDelayMs);
+  // Exponential backoff: initial * 2^attempt, capped; long interval past maxAttempts
+  const baseDelay =
+    attempt >= maxAttempts
+      ? longDelayMs
+      : Math.min(initialDelayMs * Math.pow(2, attempt), maxDelayMs);
 
   // Add random jitter to prevent thundering herd
   const jitter = Math.random() * jitterMs;
 
-  return cappedDelay + jitter;
+  return baseDelay + jitter;
+}
+
+// Transport watchdog. rc13 already ends a socket after ~35s without a frame
+// (keepalive), but its end() awaits ws.close() before emitting 'close'; if that
+// hangs we never reconnect. This backstop tears the socket down itself after
+// 5 min with no WebSocket frame. Deliberately NOT an app-level "no messages"
+// watchdog: quiet accounts would flap.
+const TRANSPORT_WATCHDOG_MS = 5 * 60_000;
+const WATCHDOG_CHECK_MS = 60_000;
+let watchdogTimer: NodeJS.Timeout | null = null;
+
+function stopWatchdog(): void {
+  if (watchdogTimer) {
+    clearInterval(watchdogTimer);
+    watchdogTimer = null;
+  }
+}
+
+/** Drop a socket that stopped talking and reconnect, without waiting for its 'close'. */
+function forceReconnect(sock: WASocket, reason: string): void {
+  socketEpoch++; // the old socket's late events go inert
+  sock.ev.removeAllListeners('connection.update');
+  sock.ev.removeAllListeners('creds.update');
+  void Promise.resolve()
+    .then(() => sock.end(undefined))
+    .catch((err: unknown) => logger.trace({ err }, 'socket.end() failed (already dead)'));
+  clearBaileysSocket();
+  clearStableTimer();
+  setConnectionStatus('disconnected');
+  setLastDisconnect(null, reason);
+  scheduleReconnect();
+}
+
+function clearStableTimer(): void {
+  if (stableTimer) {
+    clearTimeout(stableTimer);
+    stableTimer = null;
+  }
 }
 
 /**
- * Reset reconnection state after successful connection
+ * Reset reconnection state (logout / re-pair paths)
  */
 function resetReconnectionState(): void {
   reconnectionAttempts = 0;
+  setReconnectAttempts(0);
   isReconnecting = false;
+  clearStableTimer();
+  stopWatchdog();
   if (reconnectionTimer) {
     clearTimeout(reconnectionTimer);
     reconnectionTimer = null;
@@ -255,19 +335,22 @@ function resetReconnectionState(): void {
  * a socket exists (which would otherwise emit no 'close' to re-arm anything) still
  * self-heals instead of stalling at disconnected/qr=null.
  */
-function scheduleReconnect(): void {
+function scheduleReconnect(delayOverrideMs?: number): void {
+  if (shuttingDown) return;
+
   // Check if max attempts exceeded
   if (reconnectionAttempts >= config.reconnection.maxAttempts) {
-    // Don't give up — keep retrying at the capped backoff so a prolonged outage
-    // self-heals when connectivity returns. Clamp the counter so the delay stays
-    // pinned at maxDelayMs instead of overflowing or growing unbounded.
+    // Don't give up — keep retrying at the long interval so a prolonged outage
+    // self-heals when connectivity returns. Clamp the counter so it doesn't grow
+    // unbounded.
     reconnectionAttempts = config.reconnection.maxAttempts;
     logger.warn(
       {
         attempts: reconnectionAttempts,
         maxAttempts: config.reconnection.maxAttempts,
+        longDelayMs: config.reconnection.longDelayMs,
       },
-      'Max reconnection attempts reached — continuing to retry at the capped interval.'
+      'Max reconnection attempts reached — continuing to retry at the long interval.'
     );
   }
 
@@ -279,9 +362,10 @@ function scheduleReconnect(): void {
 
   isReconnecting = true;
   reconnectionAttempts++;
+  setReconnectAttempts(reconnectionAttempts);
 
-  // Calculate backoff delay
-  const delayMs = calculateBackoffDelay(reconnectionAttempts - 1);
+  // Calculate backoff delay (a 440 conflict passes its own, longer one)
+  const delayMs = delayOverrideMs ?? calculateBackoffDelay(reconnectionAttempts - 1);
 
   logger.info(
     {
@@ -305,7 +389,9 @@ function scheduleReconnect(): void {
 
 export async function initializeWhatsApp(): Promise<void> {
   const myEpoch = ++socketEpoch; // this socket's generation; guards below ignore stale ones
-  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+  // Atomic creds.json writes (temp + fsync + rename, with a .bak restored at
+  // startup): a truncated creds.json would otherwise force a re-pair.
+  const { state, saveCreds } = await useAtomicMultiFileAuthState(AUTH_DIR);
   // Populate paired phone number from existing saved creds so it is known even before
   // the socket opens or while reconnecting.
   const savedPhone = extractPairedNumberFromCreds(state.creds);
@@ -321,6 +407,9 @@ export async function initializeWhatsApp(): Promise<void> {
     ...versionConfig,
     logger: logger.child({ module: 'baileys' }),
     browser: ['AI Boilerplate', 'Chrome', '131.0.0'],
+    // rc13 defaults to true, which keeps the number "online" and mutes push
+    // notifications on the phone that owns it.
+    markOnlineOnConnect: false,
   });
   // Track at creation (not on 'open') so teardown can reach a not-yet-open socket.
   setBaileysSocket(sock);
@@ -329,6 +418,12 @@ export async function initializeWhatsApp(): Promise<void> {
   sock.ev.on('connection.update', async (update) => {
     if (myEpoch !== socketEpoch) return; // a newer socket has superseded this generation
     const { connection, lastDisconnect, qr } = update;
+
+    // WhatsApp pushed a reach-out timelock change (set, renewed or lifted), or
+    // fetchAccountReachoutTimelock() reported one (emitted synchronously, before
+    // the route caches its answer): drop the cached answer so the next lookup
+    // re-queries.
+    if (update.reachoutTimeLock) clearTimelockCache();
 
     if (qr) {
       // Retain the latest QR so it can be served over HTTP (the dashboard polls
@@ -343,8 +438,20 @@ export async function initializeWhatsApp(): Promise<void> {
       setConnectionStatus('disconnected');
       setLatestQr(null); // the socket that issued the QR is gone — don't serve a stale code
       clearBaileysSocket(); // the socket is dead — stop reporting "ready" until re-open
+      clearStableTimer(); // it didn't stay up long enough to count as healthy
+      stopWatchdog();
+      const disconnectError = lastDisconnect?.error as Boom | undefined;
+      setLastDisconnect(
+        disconnectError?.output?.statusCode ?? null,
+        disconnectError?.message ?? null
+      );
+      if (shuttingDown) {
+        logger.info('WhatsApp connection closed for shutdown');
+        return;
+      }
       const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+      const isConflict = statusCode === DisconnectReason.connectionReplaced;
 
       if (statusCode === 405) {
         logger.error(
@@ -356,7 +463,20 @@ export async function initializeWhatsApp(): Promise<void> {
 
       logger.info({ shouldReconnect, reconnectionAttempts, statusCode }, 'Connection closed');
 
-      if (shouldReconnect) {
+      if (isConflict) {
+        // 440: another client opened this session. Reconnecting at once just
+        // kicks it (or us) again, in a loop WhatsApp may punish; stopping for
+        // good needs a manual restart. Wait a long cooldown instead. The status
+        // stays 'disconnected' (a closed enum for the dashboard); /health shows
+        // the 440 in lastDisconnect.
+        logger.error(
+          { statusCode, delayMs: config.reconnection.conflictDelayMs },
+          'WhatsApp session conflict (440): another client took over this session — ' +
+            'waiting before reconnecting.'
+        );
+        Sentry.captureMessage('WhatsApp session conflict (440)', 'warning');
+        scheduleReconnect(config.reconnection.conflictDelayMs);
+      } else if (shouldReconnect) {
         scheduleReconnect();
       } else {
         // Logged out (e.g. the linked phone unlinked this device). The on-disk creds are
@@ -386,14 +506,52 @@ export async function initializeWhatsApp(): Promise<void> {
         setPairedPhoneNumber(phone);
       }
 
-      // Reset reconnection state on successful connection
-      resetReconnectionState();
+      // Don't reset the attempt counter yet: only once the link has stayed up
+      // for stableMs, so a socket that opens and drops again keeps backing off.
+      isReconnecting = false;
+      if (reconnectionTimer) {
+        clearTimeout(reconnectionTimer);
+        reconnectionTimer = null;
+      }
+      stopWatchdog();
+      let lastFrameAt = Date.now();
+      sock.ws?.on('frame', () => {
+        lastFrameAt = Date.now();
+      });
+      watchdogTimer = setInterval(() => {
+        if (myEpoch !== socketEpoch || shuttingDown) {
+          stopWatchdog();
+          return;
+        }
+        const silentMs = Date.now() - lastFrameAt;
+        if (silentMs < TRANSPORT_WATCHDOG_MS) return;
+        logger.error(
+          { silentMs },
+          'No WebSocket frame from WhatsApp for 5 min while connected — forcing a reconnect'
+        );
+        stopWatchdog();
+        forceReconnect(sock, 'transport_watchdog');
+      }, WATCHDOG_CHECK_MS);
+
+      clearStableTimer();
+      stableTimer = setTimeout(() => {
+        stableTimer = null;
+        if (myEpoch !== socketEpoch) return;
+        reconnectionAttempts = 0;
+        setReconnectAttempts(0);
+        logger.debug('WhatsApp connection stable — reconnection backoff reset');
+      }, config.reconnection.stableMs);
     }
   });
 
   sock.ev.on('creds.update', async () => {
     if (myEpoch !== socketEpoch) return; // stale socket must not re-persist wiped creds
-    await saveCreds();
+    try {
+      await saveCreds();
+    } catch (err) {
+      // An async listener's rejection would be an unhandledRejection (exit 1).
+      logger.error({ err }, 'Failed to save WhatsApp creds');
+    }
     const phone = extractPairedNumberFromCreds(state.creds);
     if (phone) {
       setPairedPhoneNumber(phone);
@@ -452,6 +610,7 @@ export async function initializeWhatsApp(): Promise<void> {
         );
 
         if (msg.key.fromMe || msg.key.remoteJid === 'status@broadcast') continue;
+        noteInbound();
         if (!msg.key.remoteJid) continue;
 
         // Extract phone number and LID for user identity resolution.
@@ -522,10 +681,13 @@ export async function initializeWhatsApp(): Promise<void> {
         // Get text from normalized message or transcribe audio
         let text = normalizedMessage?.conversation || normalizedMessage?.extendedTextMessage?.text;
 
+        // Every group audio is transcribed, saved-only ones too, on purpose: the
+        // text keeps the voice note readable to get_chat_history and history
+        // search. The STT cost on unaddressed group chatter is accepted.
         if (!text && normalizedMessage?.audioMessage) {
           text = await transcribeAudioMessage(sock, msg);
           if (!text) {
-            if (!saveOnly) await sendFailureReaction(sock, msg);
+            if (!saveOnly) await sendFailureReaction(msg);
             continue;
           }
         }
@@ -544,7 +706,7 @@ export async function initializeWhatsApp(): Promise<void> {
           } else {
             const imageData = await extractImageData(sock, msg);
             if (!imageData) {
-              await sendFailureReaction(sock, msg);
+              await sendFailureReaction(msg);
               continue;
             }
 
@@ -583,7 +745,7 @@ export async function initializeWhatsApp(): Promise<void> {
           } else {
             const documentData = await extractDocumentData(sock, msg);
             if (!documentData) {
-              await sendFailureReaction(sock, msg);
+              await sendFailureReaction(msg);
               continue;
             }
 
@@ -593,7 +755,7 @@ export async function initializeWhatsApp(): Promise<void> {
                 { mimetype: documentData.mimetype },
                 'Unsupported document type, only PDFs are supported'
               );
-              await sock.sendMessage(msg.key.remoteJid!, {
+              await sendSerialized(msg.key.remoteJid!, {
                 text: 'Sorry, I can only process PDF documents at the moment.',
               });
               continue;
@@ -649,7 +811,7 @@ export async function initializeWhatsApp(): Promise<void> {
 
         // Attempt to send failure reaction
         try {
-          await sendFailureReaction(sock, msg);
+          await sendFailureReaction(msg);
         } catch (reactionError) {
           logger.debug({ reactionError }, 'Failed to send error reaction');
         }

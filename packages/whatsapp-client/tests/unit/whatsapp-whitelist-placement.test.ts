@@ -34,6 +34,10 @@ vi.mock('../../src/services/baileys.js', () => ({
   setConnectionStatus: vi.fn(),
   setLatestQr: vi.fn(),
   getConnectionInfo: vi.fn(),
+  noteInbound: vi.fn(),
+  setLastDisconnect: vi.fn(),
+  setReconnectAttempts: vi.fn(),
+  sendSerialized: vi.fn(),
 }));
 
 vi.mock('node:fs/promises', async (importOriginal) => ({

@@ -5,6 +5,7 @@ Core chat processing logic, called by the Redis Streams consumer.
 import asyncio
 
 import httpx
+from pydantic_ai import UsageLimitExceeded
 
 from ..agent import AgentDeps, format_message_history, get_ai_response
 from ..agent.model_chain import MODEL_ERRORS
@@ -14,9 +15,11 @@ from ..embeddings import create_embedding_service
 from ..formatting import markdown_to_whatsapp
 from ..logger import logger
 from ..queue.connection import get_redis_client
-from ..queue.utils import delete_job_image, get_job_image, save_job_chunk, set_job_metadata
+from ..queue.utils import delete_job_image, get_job_images, save_job_chunk, set_job_metadata
+from ..reply_media import ReplyMedia, collect_reply_media
 from ..services.bug_reports import record_auto_report
 from ..whatsapp import WhatsAppClient, create_whatsapp_client
+from .delivery import deliver_if_late
 from .manager import enqueue_pdf_processing
 
 #: Reply delivered when the model chain fails. English, like every user-facing
@@ -43,6 +46,11 @@ async def process_chat_job_direct(
     sender_name: str | None = None,
     client_id: str | None = None,
     is_group_admin: bool | None = None,
+    run_user_message_ids: list[str] | None = None,
+    enqueued_at_ms: int | None = None,
+    image_count: int = 1,
+    image_sources: list[tuple[str, str | None, int]] | None = None,
+    absorbed_job_ids: list[str] | None = None,
 ) -> dict:
     """
     Process a chat message asynchronously (one Redis Streams job).
@@ -71,6 +79,15 @@ async def process_chat_job_direct(
         document_path: Path to the document file (optional)
         document_filename: Original filename of the document (optional)
         sender_name: Sender's display name for group messages (optional)
+        run_user_message_ids: Every saved user message this run answers, oldest
+            first (several for a merged burst); defaults to [user_message_id]
+        enqueued_at_ms: When the job entered the stream (unix ms). A reply ready
+            after the clients' polling window is pushed (streams/delivery.py)
+        image_count: Images stored for this job (more than 1 for an album)
+        image_sources: (job_id, mimetype, count) of every job whose images this
+            run sees (a merged burst); defaults to this job's own images
+        absorbed_job_ids: Earlier jobs of a burst merged into this run. They are
+            closed as merged (their clients send nothing) when the run starts
 
     Returns:
         Dict with processing result including success status, job_id, chunk count
@@ -85,6 +102,9 @@ async def process_chat_job_direct(
     logger.info(f"[Job {job_id}] Has image: {has_image}")
     logger.info(f"[Job {job_id}] Has document: {has_document}")
 
+    if image_sources is None:
+        image_sources = [(job_id, image_mimetype, image_count)] if has_image else []
+
     # Get Redis client with automatic cleanup
     async with get_redis_client() as redis:
         db = SessionLocal()
@@ -94,9 +114,25 @@ async def process_chat_job_direct(
         whatsapp_client: WhatsAppClient | None = None
 
         try:
+            # Close the burst's absorbed jobs at once, so their pollers stop
+            # (silently) instead of each sending a late notice. Recovery still
+            # re-runs the burst after a crash: consumer._already_finished
+            # counts a merged job as finished only once its carrier is.
+            await _close_absorbed_jobs(redis, absorbed_job_ids or [], job_id)
+
             # Step 1: Get conversation history from PostgreSQL
             logger.info(f"[Job {job_id}] Fetching conversation history...")
-            history = get_conversation_history(db, whatsapp_jid, conversation_type)
+            # The messages being answered were saved by /chat/enqueue before the
+            # job ran; they go to the model as the prompt, so keep them (and
+            # anything saved after them) out of the history.
+            answered_ids = run_user_message_ids or [user_message_id]
+            history = get_conversation_history(
+                db,
+                whatsapp_jid,
+                conversation_type,
+                before_message_id=answered_ids[0],
+                exclude_ids=answered_ids,
+            )
             message_history = format_message_history(history) if history else None
             logger.info(
                 f"[Job {job_id}] Retrieved {len(history) if history else 0} messages from history"
@@ -173,6 +209,9 @@ async def process_chat_job_direct(
                             "error": "document_enqueue_failed",
                         },
                     )
+                    await deliver_if_late(
+                        redis, whatsapp_client, job_id, whatsapp_jid, full_response, enqueued_at_ms
+                    )
 
                     return {
                         "success": False,
@@ -195,7 +234,8 @@ async def process_chat_job_direct(
                 db=db,
                 user_id=user_id,
                 whatsapp_jid=whatsapp_jid,
-                recent_message_ids=[str(msg.id) for msg in history] if history else [],
+                # Also the answered messages, so a search never returns them.
+                recent_message_ids=[str(msg.id) for msg in history or []] + list(answered_ids),
                 embedding_service=embedding_service,
                 http_client=http_client,
                 whatsapp_client=whatsapp_client,
@@ -211,27 +251,28 @@ async def process_chat_job_direct(
             # Step 5: Get AI response (with optional image for vision)
             logger.info(f"[Job {job_id}] Getting AI response...")
 
-            # Retrieve image data if present
-            image_data = None
-            if has_image:
-                image_data = await get_job_image(redis, job_id)
-                if image_data:
-                    logger.info(f"[Job {job_id}] Retrieved image data for vision processing")
-                else:
-                    logger.warning(
-                        f"[Job {job_id}] Image flag set but no image data found in Redis"
-                    )
+            # Retrieve image data if present (several for an album or a burst)
+            images: list[tuple[str, str]] = []
+            for source_job_id, source_mimetype, source_count in image_sources:
+                images.extend(
+                    await get_job_images(redis, source_job_id, source_mimetype, source_count)
+                )
+            if images:
+                logger.info(f"[Job {job_id}] Retrieved {len(images)} image(s) for vision")
+            elif image_sources:
+                logger.warning(f"[Job {job_id}] Image flag set but no image data found in Redis")
 
             try:
                 async for token in get_ai_response(
                     ai_message,
                     message_history,
                     agent_deps=agent_deps,
-                    image_data=image_data,
-                    image_mimetype=image_mimetype,
+                    images=images,
                 ):
                     full_response += token
-            except MODEL_ERRORS as model_error:
+            except (*MODEL_ERRORS, UsageLimitExceeded) as model_error:
+                # UsageLimitExceeded: the run hit AGENT_REQUEST_LIMIT (a model
+                # looping on tools). Same user-facing fallback as a model error.
                 logger.error(f"[Job {job_id}] AI model error: {model_error}", exc_info=True)
                 # Deliver the fallback text as a normal COMPLETED job (no "status":
                 # "failed"): the clients treat "failed" as an exception and answer
@@ -250,8 +291,7 @@ async def process_chat_job_direct(
                             exc_info=True,
                         )
 
-                if has_image:
-                    await delete_job_image(redis, job_id)
+                await _delete_images(redis, image_sources)
 
                 await save_job_chunk(redis, job_id, 0, MODEL_ERROR_FALLBACK_TEXT)
                 chunk_index = 1
@@ -269,12 +309,24 @@ async def process_chat_job_direct(
                         "model_error": True,
                     },
                 )
+                await deliver_if_late(
+                    redis,
+                    whatsapp_client,
+                    job_id,
+                    whatsapp_jid,
+                    MODEL_ERROR_FALLBACK_TEXT,
+                    enqueued_at_ms,
+                )
                 # After the user-facing steps, and off the event loop: it opens
                 # its own DB connection, which can stall while the DB is in trouble.
                 await asyncio.to_thread(
                     record_auto_report,
                     "model_error",
-                    title="AI model failed to answer",
+                    title=(
+                        "Agent hit the request limit"
+                        if isinstance(model_error, UsageLimitExceeded)
+                        else "AI model failed to answer"
+                    ),
                     exc=model_error,
                     user_id=user_id,
                     whatsapp_jid=whatsapp_jid,
@@ -293,8 +345,20 @@ async def process_chat_job_direct(
                 }
 
             # Clean up image data from Redis after processing
-            if has_image:
-                await delete_job_image(redis, job_id)
+            await _delete_images(redis, image_sources)
+
+            # Images first: `![caption](https://…)` directives (and any image a
+            # tool queued) are fetched through the SSRF-hardened helper and the
+            # delivered ones removed from the text, BEFORE markdown_to_whatsapp
+            # would flatten them into links. Never fails the reply.
+            reply_media = ReplyMedia(text=full_response, media=[], history_lines=[])
+            try:
+                reply_media = await collect_reply_media(
+                    redis, job_id, full_response, agent_deps.reply_media
+                )
+            except Exception:
+                logger.error(f"[Job {job_id}] Reply image handling failed", exc_info=True)
+            full_response = reply_media.text
 
             # Models answer in Markdown despite the prompt. Convert before the
             # reply is delivered, embedded or saved — saved Markdown would be
@@ -309,12 +373,17 @@ async def process_chat_job_direct(
             logger.info(f"[Job {job_id}] AI response completed.")
             logger.info(f"[Job {job_id}] Full response length: {len(full_response)} characters")
 
+            # History records which images went out, so the model knows later.
+            history_text = full_response
+            if reply_media.history_lines:
+                history_text = "\n".join([full_response, *reply_media.history_lines]).strip()
+
             # Step 5: Generate embedding for complete assistant response
             assistant_embedding = None
             if embedding_service:
                 try:
                     logger.info(f"[Job {job_id}] Generating embedding for assistant response...")
-                    assistant_embedding = await embedding_service.generate(full_response)
+                    assistant_embedding = await embedding_service.generate(history_text)
                     logger.info(f"[Job {job_id}] Embedding generated successfully")
                 except Exception as e:
                     logger.error(f"[Job {job_id}] Error generating assistant embedding: {e}")
@@ -326,7 +395,7 @@ async def process_chat_job_direct(
                 db,
                 whatsapp_jid,
                 "assistant",
-                full_response,
+                history_text,
                 conversation_type,
                 embedding=assistant_embedding,
             )
@@ -344,7 +413,11 @@ async def process_chat_job_direct(
                     "total_chunks": chunk_index,
                     "db_message_id": str(assistant_msg.id),
                     "user_message_id": user_message_id,
+                    "media": reply_media.media,
                 },
+            )
+            await deliver_if_late(
+                redis, whatsapp_client, job_id, whatsapp_jid, full_response, enqueued_at_ms
             )
 
             logger.info(f"[Job {job_id}] ✅ Completed successfully")
@@ -396,6 +469,15 @@ async def process_chat_job_direct(
                     },
                 )
                 logger.info(f"[Job {job_id}] Wrote failed-status metadata")
+                # Nobody polls a job this old any more: tell the user it failed.
+                await deliver_if_late(
+                    redis,
+                    whatsapp_client,
+                    job_id,
+                    whatsapp_jid,
+                    MODEL_ERROR_FALLBACK_TEXT,
+                    enqueued_at_ms,
+                )
             except Exception as meta_err:
                 logger.error(f"[Job {job_id}] Failed to write failure metadata: {meta_err}")
 
@@ -422,3 +504,24 @@ async def process_chat_job_direct(
                 logger.info(f"[Job {job_id}] HTTP client closed")
             db.close()
             logger.info(f"[Job {job_id}] Database session closed")
+
+
+async def _delete_images(redis, image_sources: list[tuple[str, str | None, int]]) -> None:
+    for source_job_id, _mimetype, _count in image_sources:
+        await delete_job_image(redis, source_job_id)
+
+
+async def _close_absorbed_jobs(redis, absorbed_job_ids: list[str], carrier_job_id: str) -> None:
+    """Mark the jobs merged into this run as finished with nothing to send:
+    GET /chat/job answers them `silent`, so their clients stay quiet."""
+    for absorbed in absorbed_job_ids:
+        try:
+            await set_job_metadata(
+                redis,
+                absorbed,
+                {"status": "complete", "merged_into": carrier_job_id, "total_chunks": 0},
+            )
+        except Exception:
+            logger.error(
+                f"[Job {carrier_job_id}] Failed to close merged job {absorbed}", exc_info=True
+            )

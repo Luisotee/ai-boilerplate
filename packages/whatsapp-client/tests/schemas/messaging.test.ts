@@ -409,14 +409,26 @@ describe('Response Schemas', () => {
 
   describe('HealthResponseSchema', () => {
     it('should accept valid health response', () => {
-      const input = { status: 'ok', whatsapp_connected: true };
+      const input = {
+        status: 'ok',
+        whatsapp_connected: true,
+        lastInboundAt: '2026-11-09T12:00:00.000Z',
+        lastDisconnect: null,
+        reconnectAttempts: 0,
+      };
       const result = HealthResponseSchema.safeParse(input);
 
       expect(result.success).toBe(true);
     });
 
     it('should accept disconnected health response', () => {
-      const input = { status: 'degraded', whatsapp_connected: false };
+      const input = {
+        status: 'degraded',
+        whatsapp_connected: false,
+        lastInboundAt: null,
+        lastDisconnect: { at: '2026-11-09T12:00:00.000Z', statusCode: 440, reason: 'conflict' },
+        reconnectAttempts: 3,
+      };
       const result = HealthResponseSchema.safeParse(input);
 
       expect(result.success).toBe(true);
