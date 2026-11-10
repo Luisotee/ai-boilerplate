@@ -85,7 +85,10 @@ describe('RequestTimeoutError', () => {
       const json = error.toJSON();
 
       expect(json).toHaveProperty('name', 'RequestTimeoutError');
-      expect(json).toHaveProperty('message', 'Request timeout after 5000ms: https://api.example.com/chat');
+      expect(json).toHaveProperty(
+        'message',
+        'Request timeout after 5000ms: https://api.example.com/chat'
+      );
       expect(json).toHaveProperty('url', 'https://api.example.com/chat');
       expect(json).toHaveProperty('timeoutMs', 5000);
       expect(json).toHaveProperty('timestamp');

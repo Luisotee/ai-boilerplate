@@ -128,9 +128,7 @@ describe('stripSplitDelimiters', () => {
 
   it('preserves `---` lines inside fenced code blocks', () => {
     const text = 'before\n---\n```\ninside\n---\nstill\n```\n---\nafter';
-    expect(stripSplitDelimiters(text)).toBe(
-      'before\n\n```\ninside\n---\nstill\n```\n\nafter'
-    );
+    expect(stripSplitDelimiters(text)).toBe('before\n\n```\ninside\n---\nstill\n```\n\nafter');
   });
 });
 

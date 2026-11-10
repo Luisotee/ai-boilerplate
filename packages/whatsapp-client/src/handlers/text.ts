@@ -6,6 +6,12 @@ import { stripDeviceSuffix, isGroupChat, resolveParticipantJid } from '../utils/
 import { getPushName, getSenderName } from '../utils/message.js';
 import { getGroupSubject } from '../services/group-cache.js';
 import { sendFailureReaction } from '../utils/reactions.js';
+import {
+  getLiveSocket,
+  sendSerialized,
+  SendTimeoutError,
+  WhatsAppNotReadyError,
+} from '../services/baileys.js';
 import { splitResponseIntoBursts, stripSplitDelimiters, sleep } from '../utils/message-split.js';
 
 interface ImageData {
@@ -85,8 +91,19 @@ export async function handleTextMessage(
     'Received message'
   );
 
+  // Presence updates go to the socket that is live now: this handler can run
+  // for minutes (AI polling), and a reconnect leaves `sock` dead.
+  const liveSocket = () => getLiveSocket() ?? sock;
+
+  // Presence is cosmetic: a failure (e.g. a socket not open yet mid-reconnect)
+  // must never abort the reply or trigger the error path.
+  const setPresence = (state: 'composing' | 'recording' | 'paused') =>
+    liveSocket()
+      .sendPresenceUpdate(state, whatsappJid)
+      .catch((err: unknown) => logger.debug({ err, whatsappJid, state }, 'Presence update failed'));
+
   // Send typing indicator
-  await sock.sendPresenceUpdate('composing', whatsappJid);
+  await setPresence('composing');
 
   try {
     const response = await sendMessageToAI(whatsappJid, text, {
@@ -125,7 +142,7 @@ export async function handleTextMessage(
       for (let i = 0; i < chunks.length; i++) {
         if (i > 0) {
           try {
-            await sock.sendPresenceUpdate('composing', whatsappJid);
+            await liveSocket().sendPresenceUpdate('composing', whatsappJid);
           } catch (presenceErr) {
             logger.warn(
               { error: presenceErr, whatsappJid },
@@ -138,7 +155,7 @@ export async function handleTextMessage(
           );
           await sleep(delay);
         }
-        await sock.sendMessage(whatsappJid, { text: chunks[i] });
+        await sendSerialized(whatsappJid, { text: chunks[i] });
         sentCount++;
       }
     } catch (burstErr) {
@@ -160,10 +177,10 @@ export async function handleTextMessage(
       const prefs = await getUserPreferences(whatsappJid);
       if (prefs?.tts_enabled) {
         logger.info({ whatsappJid }, 'TTS enabled, generating voice message');
-        await sock.sendPresenceUpdate('recording', whatsappJid);
+        await setPresence('recording');
         const audioBuffer = await textToSpeech(stripSplitDelimiters(response), whatsappJid);
         if (audioBuffer) {
-          await sock.sendMessage(whatsappJid, {
+          await sendSerialized(whatsappJid, {
             audio: audioBuffer,
             mimetype: 'audio/ogg; codecs=opus',
             ptt: true, // Voice note
@@ -176,11 +193,20 @@ export async function handleTextMessage(
     }
   } catch (error) {
     logger.error({ error, whatsappJid }, 'Error processing message');
-    await sendFailureReaction(sock, msg);
-    await sock.sendMessage(whatsappJid, {
-      text: 'Sorry, I encountered an error processing your message. Please try again.',
-    });
+    // Link down: a ❌ and an error reply would only wait out another ready
+    // window each and fail too.
+    if (error instanceof WhatsAppNotReadyError) return;
+    await sendFailureReaction(msg);
+    // A reply send hung past SEND_TIMEOUT_MS. The queue has moved on, so the ❌
+    // (one guarded send) tells the user something went wrong, but no error text:
+    // the timed-out send may still land late and the text would contradict it.
+    if (error instanceof SendTimeoutError) return;
+    try {
+      await sendSerialized(whatsappJid, { text: config.errorReplyText });
+    } catch (replyErr) {
+      logger.warn({ error: replyErr, whatsappJid }, 'Failed to send the error reply');
+    }
   } finally {
-    await sock.sendPresenceUpdate('paused', whatsappJid);
+    await setPresence('paused');
   }
 }

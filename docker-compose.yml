@@ -195,6 +195,9 @@ services:
       dockerfile: packages/whatsapp-client/Dockerfile
     container_name: ${SERVICE_NAME:-aiagent}-whatsapp
     restart: unless-stopped
+    # SIGTERM ends the socket, waits up to 3s for a creds.json write, then
+    # drains HTTP and flushes Sentry (2s): give it more than Docker's 10s default.
+    stop_grace_period: 20s
     env_file: .env
     logging:
       driver: json-file
