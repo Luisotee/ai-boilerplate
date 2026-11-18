@@ -67,7 +67,7 @@ Deep detail lives in `AGENTS.md` (symlinked to `CLAUDE.md`) next to the code. **
 ## Tooling & Commands
 
 - **Monorepo**: pnpm workspaces (`pnpm-workspace.yaml`) | **TS**: ES2022, NodeNext, strict | **Python**: >=3.11 (`uv`)
-- **Formatting & Linting**: Prettier + ESLint flat config (TS) and Ruff (Python). Husky pre-commit hook runs `pnpm format` automatically; `.agents/hooks.json` auto-formats after `edit_file`/`write_file`.
+- **Formatting & Linting**: Prettier + ESLint flat config (TS) and Ruff (Python). Husky pre-commit hook runs `pnpm format` automatically; `.agents/hooks.json` auto-formats after file edits and (via `scripts/agent-hooks/guard_files.py`) asks before editing `.env*` (not `.env.example`) and denies `pnpm-lock.yaml`/`uv.lock` edits. Porting a change to the forks: the `port-to-forks` skill.
 - **Testing**: Vitest 4 (TS) + pytest 9 / pytest-asyncio (Python) — `pnpm test` runs all.
 
 ```bash
@@ -161,7 +161,7 @@ Work is tracked in **Devflow**, project **`CHATBOTS`** (org Terra Krya), via the
     - **curupira-bot**: fire-alert fork (`fire_poller/`, municipality subscriptions).
     - **castanha-bot**: Brazil-nut supply-chain fork (`cadeia` tools, weekly recap, no Telegram client).
     - **fleetview**: Next.js 16 control-plane dashboard for the bot fleet. Calls `/admin/*`, `/health`, and `/knowledge-base/*` server-side. **Its Zod schemas in `lib/bot-api/schemas.ts` strictly mirror `routes/admin.py`, `schemas.py`, and `runtime_config.py` `REGISTRY`**. Renaming/removing fields or adding values to closed enums (`type`, `source`, `conversation_type`, `role`, QR `status`, KB `status`, broadcast enums) breaks the dashboard. A new field is safe.
-      - **Contract check**: the contract files are `packages/ai-api/src/ai_api/routes/{admin,broadcasts,bug_reports,health,knowledge_base}.py`, `schemas.py` and the `runtime_config.py` `REGISTRY`. After changing any of them, ask a fresh peer session in fleetview (no `-c`) for the verdict instead of reading its schemas from here: `cd /home/ubuntu/projects/fleetview && agy -p "Run git -C /home/ubuntu/projects/ai-boilerplate diff origin/main...HEAD -- <the changed contract files>. Does it break a Zod schema in lib/bot-api/schemas.ts or a Server Action in lib/actions/? Read-only check: do not modify fleetview files, run write commands, or read .env* files. Answer Safe, Breaking or Needs a FleetView update, with file:line in both repos." --dangerously-skip-permissions` (or the same prompt with `claude -p ... --dangerously-skip-permissions`).
+      - **Contract check**: the contract files are `packages/ai-api/src/ai_api/routes/{admin,broadcasts,bug_reports,health,knowledge_base}.py`, `schemas.py` and the `runtime_config.py` `REGISTRY`. After changing any of them, use the `fleetview-check` skill: it asks a fresh read-only fleetview session for the verdict (Safe, Breaking or Needs a FleetView update) instead of reading its schemas from here.
 
 ## Guidelines
 

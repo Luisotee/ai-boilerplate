@@ -48,12 +48,13 @@ gh pr view <NUMBER> --json comments
   - Model output passes through `formatting.markdown_to_whatsapp`; `DEFAULT_SYSTEM_PROMPT` contains no `**`.
   - `CORSMiddleware` remains added AFTER `APIKeyMiddleware` in `main.py`.
   - Schema changes to existing tables include idempotent SQL in `packages/ai-api/docs/migrations/<YYYY-MM-DD>-<name>.sql`.
-  - Changes to `/admin/*`, `schemas.py`, `/health*`, `/knowledge-base/*`, or `runtime_config.py` do not break FleetView's closed `z.enum`s or required fields (if touched, run the fleetview contract check from AGENTS.md "External Docs & Related Projects").
+  - Changes to `/admin/*`, `schemas.py`, `/health*`, `/knowledge-base/*`, or `runtime_config.py` do not break FleetView's closed `z.enum`s or required fields (if touched, say so and recommend the `fleetview-check` skill).
+  - Logfire: `setup_instrumentation()` passes `token=settings.logfire_token`, runs in both `main.py` and `scripts/run_stream_worker.py`, and nothing passes `instrument=` to `Agent(...)`.
 
 ### 2. Security
 - `X-API-Key` required on all routes except `/health*`, `/docs*`, and platform-verified `/webhook` routes.
 - Group admin commands and group-mutating agent tools fail closed (`is_group_admin is True` / `group_admin_refusal`).
-- Whitelist logic never consults `phone` for group JIDs and only consults normalized digits for `@s.whatsapp.net`.
+- Whitelist logic never consults `phone` for group JIDs and only consults normalized digits for `@s.whatsapp.net`; `ai_api/whitelist.py` is never more permissive than `utils/whitelist.ts`, and the clients' live-whitelist lookup fails closed.
 - No secrets, tokens, or raw message contents leaked in logs (`include_content=False` for Logfire).
 
 ### 3. Avoid Known False Positives

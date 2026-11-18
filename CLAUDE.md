@@ -62,6 +62,7 @@ Baileys `messages.upsert` (`whatsapp.ts`) → a handler in `handlers/` → `hand
 - **Monorepo**: pnpm workspaces (`pnpm-workspace.yaml`). **TypeScript**: ES2022, NodeNext modules, strict mode. **Python**: >=3.11, managed with `uv`
 - **Formatting**: Prettier (TS) + Ruff (Python), enforced by the Husky pre-commit hook, which runs `pnpm format` itself, so do NOT run format manually before committing. New TS files may fail `pnpm format:check` even when lint passes: run `pnpm exec prettier --write <path>` on freshly created files
 - **Linting**: ESLint flat config (TS) + Ruff (Python)
+- **Agent hooks** (`scripts/agent-hooks/`, wired in `.claude/settings.json` and `.agents/hooks.json`): edits to `.env*` (not `.env.example`) ask first, `pnpm-lock.yaml`/`uv.lock` edits are denied; Claude is also told when a rules file passes 24,000 bytes or the `whitelist.ts` copies drift. Porting a change to the forks: `/port-to-forks`
 - **Testing**: Vitest (TS) + pytest/pytest-asyncio (Python); `pnpm test` runs all
 
 ## Commands
@@ -144,7 +145,7 @@ Sibling repos under `/home/ubuntu/projects/` have their own authoritative `CLAUD
 - **curupira-bot**: fire-alert fork (municipality subscriptions, `fire_poller/`, persona "Curupira"). Features often start here and get ported back (the shared-group tools, `get_chat_history`)
 - **castanha-bot**: Brazil-nut price fork (external *cadeia-produtiva* platform via `cadeia` tools, weekly recap, Portuguese commands like `/regiao`, no Telegram client)
 - **fleetview**: Next.js 16 control plane for the fleet, not a fork. It keeps an encrypted registry of bots (base URL + `X-API-Key`) and calls each bot's `/admin/*`, `/health` and `/knowledge-base/*` server-side. **Its Zod schemas mirror `routes/admin.py`, `schemas.py` and the `runtime_config.py` REGISTRY strictly** (only health is lenient). Renaming or removing a field, route or setting attribute (`hot`/`secret`/`choices`) breaks the dashboard for every bot, and so does a new value in a closed enum (setting `type`, KB status, QR `status`, `conversation_type`, broadcast enums). A new field is safe (unknown keys are stripped)
-  - **Contract check**: the contract files are `packages/ai-api/src/ai_api/routes/{admin,broadcasts,bug_reports,health,knowledge_base}.py`, `schemas.py` and the `runtime_config.py` REGISTRY. After changing any of them, ask a fresh peer session in fleetview (no `-c`) for the verdict, since only fleetview knows its current schemas: `cd /home/ubuntu/projects/fleetview && claude -p "Run git -C /home/ubuntu/projects/ai-boilerplate diff origin/main...HEAD -- <the changed contract files>. Does it break a Zod schema in lib/bot-api/schemas.ts or a Server Action in lib/actions/? Read-only check: do not modify fleetview files, run write commands, or read .env* files. Answer Safe, Breaking or Needs a FleetView update, with file:line in both repos." --dangerously-skip-permissions` (or the same with `agy -p`)
+  - **Contract check**: the contract files are `packages/ai-api/src/ai_api/routes/{admin,broadcasts,bug_reports,health,knowledge_base}.py`, `schemas.py` and the `runtime_config.py` REGISTRY. After changing any of them, run `/fleetview-check`: it asks a fresh read-only fleetview session for the verdict (Safe, Breaking or Needs a FleetView update), since only fleetview knows its current schemas
 
 ## Guidelines
 

@@ -101,7 +101,7 @@ Apply every applicable section below. Skip sections irrelevant to the changed fi
 
 ### 3C. Security (OWASP-Informed)
 
-- **API keys:** From env vars, never hardcoded. `X-API-Key` required on all routes except `/health` and `/docs*`
+- **API keys:** From env vars, never hardcoded. `X-API-Key` required on all routes except `/health*`, `/contact` (AI API), `/docs*`, the AI API's `/v1/*` (per-user `Bearer` keys) and platform-verified `/webhook` routes
 - **HMAC:** Webhook routes verify `x-hub-signature-256` using `META_APP_SECRET`
 - **Input validation:** All user inputs validated via Zod (TS) or Pydantic (Python)
 - **SQL injection:** Parameterized queries via SQLAlchemy — no raw string concatenation
@@ -147,6 +147,19 @@ Check against known pitfalls from CLAUDE.md:
 - Tool registration via `__init__.py` imports
 - Husky pre-commit hook runs `pnpm format` automatically
 
+### 3G. Repo Invariants (a break is a Critical Issue)
+
+Each of these has broken silently before or has no test that catches every form of it. For every one the diff touches, trace the code; don't trust the PR description.
+
+- **Group admin commands fail closed:** `commands.py` gates `/clean`, `/tts`, `/stt`, `/settings`, `/memories`, `/broadcast on|off` in groups on `is_group_admin is not True` (an omitted field must mean not-admin). Group-changing agent tools call `group_admin_refusal` (`agent/tools/_group.py`). A client whose admin lookup fails must send `false`, not omit it
+- **Whitelist is never more permissive in Python:** `ai_api/whitelist.py` must reject everything `utils/whitelist.ts` rejects; the three TS copies stay byte-identical (`whitelist-copies.test.ts`); clients gate on `GET /chat/whitelist` and fail closed when it is unavailable. Read `docs/access-control.md` for any change here
+- **Tool error hygiene:** agent tools return generic English on failure (never `str(e)` or an f-string of the exception), log with `exc_info=True`, and call `safe_rollback(ctx.deps.db)` in handlers that touched the DB session (`tests/mocked/test_tool_error_hygiene.py`)
+- **`hot` settings:** a `REGISTRY` entry in `runtime_config.py` marked `hot` must be read via `runtime_config.get()` at its consumption site, or the override never applies
+- **Streaming:** the chat agent runs with `run_stream_events`, never `agent.run_stream` (drops tool calls after a text preamble); no `extra_body` / `timeout` in agent- or run-level `model_settings`
+- **Logfire:** `setup_instrumentation()` passes `token=settings.logfire_token`, runs in both `main.py` and `scripts/run_stream_worker.py`, keeps `include_content=False`, and nothing passes `instrument=` to `Agent(...)`
+- **Schema changes** to an existing table ship an idempotent `packages/ai-api/docs/migrations/<YYYY-MM-DD>-<name>.sql` (`create_all()` never adds columns)
+- **FleetView contract:** if the diff touches `routes/{admin,broadcasts,bug_reports,health,knowledge_base}.py`, `schemas.py` or the `runtime_config.py` REGISTRY, say so in the report and recommend `/fleetview-check`; a renamed/removed field or a new value in a closed enum breaks the dashboard
+
 ## Step 4: Produce the Review Report
 
 Structure your output exactly as follows:
@@ -191,6 +204,7 @@ If none: "No suggestions."
 | Architecture | PASS/FAIL/N/A | Brief note |
 | Error handling | PASS/FAIL/N/A | Brief note |
 | Gotchas | PASS/FAIL/N/A | Brief note |
+| Repo invariants | PASS/FAIL/N/A | Which ones the diff touches |
 
 ### Verdict
 
