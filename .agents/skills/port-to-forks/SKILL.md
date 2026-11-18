@@ -47,9 +47,9 @@ How to run it depends on where you are:
 - **Inside herdr (`HERDR_ENV=1`):** use `/delegate-agy` with one worker per fork, sized by the diff (`small` for a contained change, `large` when it spans several subsystems or needs adapting to diverged code). Its PRs then get reviewed like any other mesh work.
 - **Otherwise:** run both headless, in parallel and in the background (each can take 10–30 minutes), always with `--dangerously-skip-permissions`:
   ```bash
-  cd /home/ubuntu/projects/<fork> && claude -p "<task>" --dangerously-skip-permissions > "<OUT>/<fork>.log" 2>&1
+  cd /home/ubuntu/projects/<fork> && agy -p "<task>" --dangerously-skip-permissions > "<OUT>/<fork>.log" 2>&1
   ```
-  (`agy -p` instead of `claude -p` if you are Antigravity, or if the user asks for it.)
+  (`claude -p` instead of `agy -p` if the user asks for Claude.)
 
 ## 4. Report
 

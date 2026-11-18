@@ -5,10 +5,11 @@
   truncates it, so the edit is reported back to Claude as a problem to fix now.
 - A `packages/*/src/utils/whitelist.ts` copy that no longer matches the reference
   (`whatsapp-client`): the same check as `tests/unit/whitelist-copies.test.ts`, without
-  starting vitest. Reported as context only, since it is expected mid-sync.
+  starting vitest, in the checkout that holds the edited file (a mesh worktree, say).
+  Reported as context only, since it is expected mid-sync.
 
 Claude-only: agy's PostToolUse output is `{}` and can't feed anything back to the model.
-Stdlib only, and silent on its own errors.
+Stdlib only, and silent on its own errors (any exception exits 0 with no output).
 """
 
 from __future__ import annotations
@@ -36,12 +37,23 @@ def rule_size_problem(path: Path) -> str | None:
     return (
         f"{path.name} is now {size:,} bytes, over the {MAX_RULE_SIZE_BYTES:,}-byte limit: "
         "agy truncates it. Move subsystem detail to a folder CLAUDE.md or a linked doc, "
-        "then run `pnpm check:rules`."
+        f"then check it with `wc -c {path}` (`pnpm check:rules` scans AGENTS.md files only)."
     )
 
 
-def whitelist_drift(path: Path, root: Path) -> str | None:
-    if path.name != "whitelist.ts" or path.parent.name != "utils":
+def checkout_root(path: Path) -> Path | None:
+    """The checkout holding `packages/<pkg>/src/utils/whitelist.ts`, from the path itself."""
+    parts = path.parts
+    if len(parts) < 6 or parts[-5] != "packages" or parts[-3:-1] != ("src", "utils"):
+        return None
+    return path.parents[4]
+
+
+def whitelist_drift(path: Path) -> str | None:
+    if path.name != "whitelist.ts":
+        return None
+    root = checkout_root(path)
+    if root is None:
         return None
     try:
         reference = (root / WHITELIST_REFERENCE).read_bytes()
@@ -59,23 +71,21 @@ def whitelist_drift(path: Path, root: Path) -> str | None:
     )
 
 
-def main() -> None:
-    try:
-        payload = json.load(sys.stdin)
-        file_path = (payload.get("tool_input") or {}).get("file_path") or ""
-    except (json.JSONDecodeError, ValueError, AttributeError):
+def run() -> None:
+    payload = json.load(sys.stdin)
+    file_path = (payload.get("tool_input") or {}).get("file_path") or ""
+    if not isinstance(file_path, str) or not file_path:
         return
-    if not file_path:
-        return
-    root = Path(os.environ.get("CLAUDE_PROJECT_DIR") or payload.get("cwd") or ".")
     path = Path(file_path)
+    if not path.is_absolute():
+        path = Path(payload.get("cwd") or os.getcwd()) / path
 
     problem = rule_size_problem(path)
     if problem:
         print(json.dumps({"decision": "block", "reason": problem}))
         return
 
-    drift = whitelist_drift(path, root)
+    drift = whitelist_drift(path)
     if drift:
         print(
             json.dumps(
@@ -87,6 +97,13 @@ def main() -> None:
                 }
             )
         )
+
+
+def main() -> None:
+    try:
+        run()
+    except Exception:  # noqa: BLE001 - a hook must never fail the tool call
+        return
 
 
 if __name__ == "__main__":
