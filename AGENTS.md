@@ -67,7 +67,7 @@ Deep detail lives in `AGENTS.md` (symlinked to `CLAUDE.md`) next to the code. **
 ## Tooling & Commands
 
 - **Monorepo**: pnpm workspaces (`pnpm-workspace.yaml`) | **TS**: ES2022, NodeNext, strict | **Python**: >=3.11 (`uv`)
-- **Formatting & Linting**: Prettier + ESLint flat config (TS) and Ruff (Python). Husky pre-commit hook runs `pnpm format` automatically; `.agents/hooks.json` auto-formats after file edits and (via `scripts/agent-hooks/guard_files.py`) asks before editing `.env*` (not `.env.example`) and denies `pnpm-lock.yaml`/`uv.lock` edits. Porting a change to the forks: the `port-to-forks` skill.
+- **Formatting & Linting**: Prettier + ESLint flat config (TS) and Ruff (Python). Husky pre-commit hook runs `pnpm format` automatically; `.agents/hooks.json` auto-formats after file edits. Porting a change to the forks: the `port-to-forks` skill.
 - **Testing**: Vitest 4 (TS) + pytest 9 / pytest-asyncio (Python) — `pnpm test` runs all.
 
 ```bash

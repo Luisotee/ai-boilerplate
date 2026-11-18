@@ -62,7 +62,7 @@ Baileys `messages.upsert` (`whatsapp.ts`) → a handler in `handlers/` → `hand
 - **Monorepo**: pnpm workspaces (`pnpm-workspace.yaml`). **TypeScript**: ES2022, NodeNext modules, strict mode. **Python**: >=3.11, managed with `uv`
 - **Formatting**: Prettier (TS) + Ruff (Python), enforced by the Husky pre-commit hook, which runs `pnpm format` itself, so do NOT run format manually before committing. New TS files may fail `pnpm format:check` even when lint passes: run `pnpm exec prettier --write <path>` on freshly created files
 - **Linting**: ESLint flat config (TS) + Ruff (Python)
-- **Agent hooks** (`scripts/agent-hooks/`, wired in `.claude/settings.json` and `.agents/hooks.json`): edits to `.env*` (not `.env.example`) ask first, `pnpm-lock.yaml`/`uv.lock` edits are denied; Claude is also told when a rules file passes 24,000 bytes or the `whitelist.ts` copies drift. Porting a change to the forks: `/port-to-forks`
+- **Agent hooks** (`.claude/settings.json`, `scripts/agent-hooks/post_edit_checks.py`): Claude is told when a rules file passes 24,000 bytes or the `whitelist.ts` copies drift. Porting a change to the forks: `/port-to-forks`
 - **Testing**: Vitest (TS) + pytest/pytest-asyncio (Python); `pnpm test` runs all
 
 ## Commands
