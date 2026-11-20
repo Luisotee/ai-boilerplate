@@ -99,7 +99,9 @@ class Harness:
             enter(patch.object(bc, "create_whatsapp_client", return_value=self.client))
             enter(patch.object(bc, "_broadcast_status", side_effect=self._status))
             enter(patch.object(bc, "_next_recipient", side_effect=self._next))
-            enter(patch.object(bc, "_has_pending", side_effect=lambda *_: bool(self.queue)))
+            enter(
+                patch.object(bc, "_lane_has_pending", side_effect=lambda _b, _p: bool(self.queue))
+            )
             enter(patch.object(bc, "_record", self.record))
             enter(patch.object(bc, "_claim", side_effect=self._claim))
             enter(patch.object(bc, "_release", self.release))
@@ -477,7 +479,9 @@ class Fleet:
             patch.object(bc, "_start_broadcast", return_value=TEXT),
             patch.object(bc, "_broadcast_status", side_effect=lambda _b: self.status),
             patch.object(bc, "_pending_platforms", side_effect=lambda _b: set(self.pending)),
-            patch.object(bc, "_has_pending", side_effect=lambda _b: bool(self.pending)),
+            patch.object(
+                bc, "_has_pending", autospec=True, side_effect=lambda _b: bool(self.pending)
+            ),
             patch.object(bc, "_sweep_orphaned_claims", return_value=0),
             patch.object(bc, "_finish_if_done", self.finish),
             patch.object(bc, "run_lane", lane),

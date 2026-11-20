@@ -432,7 +432,7 @@ class _Claimed:
     attempts: int
 
 
-def _has_pending(broadcast_id: uuid.UUID, platform: str) -> bool:
+def _lane_has_pending(broadcast_id: uuid.UUID, platform: str) -> bool:
     """Whether this lane still has a recipient to send to (eligibility re-checked)."""
     return _next_recipient(broadcast_id, platform) is not None
 
@@ -733,7 +733,7 @@ async def run_lane(
         # Checked before any Baileys wait: a lane with no pending recipient must
         # finish now, not sleep out a gap or a timelock (up to 6 h) first while
         # the broadcast stays `running` and its heartbeat holds the sender lock.
-        if not await asyncio.to_thread(_has_pending, broadcast_id, platform):
+        if not await asyncio.to_thread(_lane_has_pending, broadcast_id, platform):
             logger.info("Broadcast %s: %s lane finished", broadcast_id, platform)
             return True
         return False
