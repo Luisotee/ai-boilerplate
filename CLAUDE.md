@@ -132,7 +132,7 @@ Work is tracked in **Devflow**, project **`CHATBOTS`** (org Terra Krya), through
 
 - **Before non-trivial work** (a feature, a bug fix, a migration): find the matching task and follow its description, often a markdown checklist. If none exists, create one: short title, markdown description, assignee `me`
 - **Always set a priority** (`Prioridade`: `Baixa`, `Media`, `Alta`, `Urgente`) on every task you create, and before starting a task that has none. Pick it from the urgency the user expressed; ask when it is unclear
-- **Starting**: move the task to `Em desenvolvimento`. **Finishing** (code done, PR open or merged): move it to `Aguardando teste`, passing the required `test_instructions` (concrete steps to check the change). Do not move it to `Aguardando publicacao` or `Em producao`, or complete it, unless the user says so, because testing and deploy are theirs
+- **Starting**: move the task to `Em desenvolvimento`. **Finishing**: once you verified it works (tests, prod logs, data) and are sure, complete it: `Em producao` if deployed, else `Aguardando publicacao`. `Aguardando teste` (with `test_instructions`: concrete steps) is only for what a person must try, like a new feature or how the bot answers
 - Do not log time, change sprints or archive tasks unless asked
 
 ## Related Projects
