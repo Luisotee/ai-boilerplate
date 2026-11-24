@@ -7,12 +7,16 @@ admin of that group. ``streams/scheduled_runner.py`` (before the LLM) and
 before every run:
 
 - requester row gone → task disabled ``creator_unknown``
-- not a member → task disabled ``creator_not_in_group``. On Baileys only on the
-  second run in a row that misses the group: the first miss skips the run
-  ``creator_not_seen`` (transient, like ``creator_check_failed``), because the
-  client also leaves a group out when it can't resolve a LID-only participant
-  (``getPNForLID`` failing or not mapped yet). The task's ``last_error`` carries
-  the miss to the next run, so no column is needed. Telegram's ``getChatMember``
+- not a member → task disabled ``creator_not_in_group``. On Baileys a recurring
+  task is disabled only on the second run in a row that misses the group: the
+  first miss skips the run ``creator_not_seen`` (transient, like
+  ``creator_check_failed``), because the client also leaves a group out when it
+  can't resolve a LID-only participant (``getPNForLID`` failing or not mapped
+  yet). The task's ``last_error`` carries the miss to the next run (no column);
+  a passing check clears it, so a pass in the runner followed by a miss in the
+  sender of the same run is a first miss again. A one-shot never escalates:
+  every miss is ``creator_not_seen`` and uses its bounded retries, ending
+  disabled ``creator_not_seen`` when they run out. Telegram's ``getChatMember``
   answer (left / kicked) is authoritative and disables at once.
 - a member, not an admin → task disabled ``creator_not_admin``
 - the lookup failed, timed out, or the client didn't say (an older client
@@ -29,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from dataclasses import dataclass
 
 import httpx
 
@@ -51,22 +56,47 @@ DISABLING = frozenset({CREATOR_UNKNOWN, CREATOR_NOT_IN_GROUP, CREATOR_NOT_ADMIN}
 CHECK_TIMEOUT_SECONDS = 15.0
 
 
-def _load(task_id: uuid.UUID) -> tuple[bool, User | None, str, str, bool]:
-    """``(needs_check, requester, platform, group_jid, missed_before)``.
+@dataclass(frozen=True)
+class _Check:
+    needs_check: bool
+    #: Detached; None when the requester row is gone.
+    requester: User | None = None
+    platform: str = ""
+    group_jid: str = ""
+    #: The task's previous check missed the group (``last_error``).
+    missed_before: bool = False
+    one_shot: bool = False
 
-    The requester is detached; ``missed_before``: the task's previous run was
-    skipped ``creator_not_seen``.
-    """
+
+def _load(task_id: uuid.UUID) -> _Check:
     db = SessionLocal()
     try:
         task = db.get(ScheduledTask, task_id)
         if task is None or task.created_from_user_id is None:
-            return False, None, "", "", False
+            return _Check(False)
         user = db.get(User, task.created_from_user_id)
         if user is not None:
             db.expunge(user)
-        missed_before = task.last_error == CREATOR_NOT_SEEN
-        return True, user, task.client_id or "baileys", task.address, missed_before
+        return _Check(
+            True,
+            user,
+            task.client_id or "baileys",
+            task.address,
+            missed_before=task.last_error == CREATOR_NOT_SEEN,
+            one_shot=task.run_at is not None,
+        )
+    finally:
+        db.close()
+
+
+def _clear_miss(task_id: uuid.UUID) -> None:
+    """A passing check ends the run of misses (conditional: only the marker)."""
+    db = SessionLocal()
+    try:
+        db.query(ScheduledTask).filter(
+            ScheduledTask.id == task_id, ScheduledTask.last_error == CREATOR_NOT_SEEN
+        ).update({"last_error": None}, synchronize_session=False)
+        db.commit()
     finally:
         db.close()
 
@@ -74,24 +104,24 @@ def _load(task_id: uuid.UUID) -> tuple[bool, User | None, str, str, bool]:
 async def creator_verdict(task_id: uuid.UUID) -> str | None:
     """None = the run may go; else one of the ``CREATOR_*`` codes. Never raises."""
     try:
-        needs, user, platform, group_jid, missed_before = await asyncio.to_thread(_load, task_id)
+        check = await asyncio.to_thread(_load, task_id)
     except Exception:
         logger.error("Scheduled task %s: creator check could not read the DB", task_id)
         return CREATOR_CHECK_FAILED
-    if not needs:
+    if not check.needs_check:
         return None
-    if user is None:
+    if check.requester is None:
         return CREATOR_UNKNOWN
     try:
         async with httpx.AsyncClient(timeout=settings.whatsapp_client_timeout) as http:
             client = create_whatsapp_client(
                 http_client=http,
-                base_url=get_whatsapp_client_url(platform),
-                api_key=get_whatsapp_api_key(platform),
+                base_url=get_whatsapp_client_url(check.platform),
+                api_key=get_whatsapp_api_key(check.platform),
             )
             async with asyncio.timeout(CHECK_TIMEOUT_SECONDS):
                 is_member, is_admin = await requester_group_status(
-                    client, platform, user, group_jid
+                    client, check.platform, check.requester, check.group_jid
                 )
     except Exception:
         logger.warning(
@@ -101,11 +131,17 @@ async def creator_verdict(task_id: uuid.UUID) -> str | None:
         )
         return CREATOR_CHECK_FAILED
     if not is_member:
-        if platform == "baileys" and not missed_before:
+        if check.platform == "baileys" and (check.one_shot or not check.missed_before):
             return CREATOR_NOT_SEEN
         return CREATOR_NOT_IN_GROUP
     if is_admin is None:
         return CREATOR_CHECK_FAILED
     if is_admin is not True:
         return CREATOR_NOT_ADMIN
+    if check.missed_before:
+        try:
+            await asyncio.to_thread(_clear_miss, task_id)
+        except Exception:
+            # Safe either way: a kept marker only makes a later miss disable sooner.
+            logger.warning("Scheduled task %s: could not clear its miss", task_id, exc_info=True)
     return None

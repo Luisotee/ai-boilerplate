@@ -208,7 +208,45 @@ class TestGroupMissingFromSharedGroups:
         db.expire_all()
         assert db.get(ScheduledTask, task.id).status == "active"
 
-    async def test_one_shot_is_re_armed_then_disabled(self, factory, missing):
+    async def test_a_pass_clears_the_miss_so_a_later_miss_only_skips(self, factory, monkeypatch):
+        """Miss (run N), pass in the runner (run N+1), miss in the sender (run N+1): skip."""
+        db = factory()
+        _r, _g, task, run = _setup(db)
+        answers = iter([(False, False), (True, True), (False, False)])
+
+        async def status(_client, _platform, _user, _group_jid):
+            return next(answers)
+
+        monkeypatch.setattr(task_creator, "requester_group_status", status)
+        assert await self._check(factory, task.id, run.id) == task_creator.CREATOR_NOT_SEEN
+        second = _next_run(db, task.id)
+        assert await task_creator.creator_verdict(task.id) is None  # the runner's check
+        db.expire_all()
+        assert db.get(ScheduledTask, task.id).last_error is None
+        db.query(TaskRun).filter(TaskRun.id == second.id).update({"status": runner.SENDING})
+        db.commit()
+        verdict = await task_creator.creator_verdict(task.id)  # the sender's check
+        assert verdict == task_creator.CREATOR_NOT_SEEN
+        assert runner.record_creator_verdict(second.id, runner.SENDING, verdict)
+        db.expire_all()
+        assert db.get(ScheduledTask, task.id).status == "active"
+
+    async def test_a_pass_leaves_another_last_error_alone(self, factory, monkeypatch):
+        db = factory()
+        _r, _g, task, _run = _setup(db)
+        db.get(ScheduledTask, task.id).last_error = "blocked"
+        db.commit()
+
+        async def status(_client, _platform, _user, _group_jid):
+            return True, True
+
+        monkeypatch.setattr(task_creator, "requester_group_status", status)
+        assert await task_creator.creator_verdict(task.id) is None
+        db.expire_all()
+        assert db.get(ScheduledTask, task.id).last_error == "blocked"
+
+    async def test_one_shot_never_escalates_and_ends_after_its_retries(self, factory, missing):
+        """Each miss of a one-shot is creator_not_seen; its bounded retries then end it."""
         db = factory()
         _r, _g, task, run = _setup(db, one_shot=True)
         before = datetime.utcnow()
@@ -217,11 +255,12 @@ class TestGroupMissingFromSharedGroups:
         row = db.get(ScheduledTask, task.id)
         assert row.status == "active"
         assert row.next_run_at >= before + runner.ONE_SHOT_RETRY_DELAY - timedelta(seconds=5)
-        second = _next_run(db, task.id)
-        assert await self._check(factory, task.id, second.id) == task_creator.CREATOR_NOT_IN_GROUP
+        for _ in range(runner.ONE_SHOT_ATTEMPTS - 1):
+            nxt = _next_run(db, task.id)
+            assert await self._check(factory, task.id, nxt.id) == task_creator.CREATOR_NOT_SEEN
         db.expire_all()
         row = db.get(ScheduledTask, task.id)
-        assert (row.status, row.disabled_reason) == ("disabled", "creator_not_in_group")
+        assert (row.status, row.disabled_reason) == ("disabled", "creator_not_seen")
 
 
 class TestRowLifecycle:

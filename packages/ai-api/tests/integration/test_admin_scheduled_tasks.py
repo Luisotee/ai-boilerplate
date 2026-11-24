@@ -171,6 +171,7 @@ class TestUpdate:
         assert t.status == "active"
         assert t.consecutive_failures == 0
         assert t.disabled_reason is None
+        assert t.last_error is None  # also a creator_not_seen miss
         assert t.next_run_at > NOW
         db.commit.assert_called_once()
 

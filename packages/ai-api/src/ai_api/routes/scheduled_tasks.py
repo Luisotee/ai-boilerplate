@@ -173,6 +173,7 @@ async def update_scheduled_task(
                 )
             task.status = "active"
             task.disabled_reason = None
+            task.last_error = None  # also clears a creator_not_seen miss
             task.consecutive_failures = 0
             task.next_run_at = next_run
         else:
