@@ -14,6 +14,7 @@ from .knowledge_base import router as knowledge_base_router
 from .message_events import router as message_events_router
 from .openai_compat import router as openai_router
 from .preferences import router as preferences_router
+from .scheduled_sends import router as scheduled_sends_router
 from .scheduled_tasks import router as scheduled_tasks_router
 from .speech import router as speech_router
 
@@ -29,6 +30,7 @@ __all__ = [
     "message_events_router",
     "openai_router",
     "preferences_router",
+    "scheduled_sends_router",
     "scheduled_tasks_router",
     "speech_router",
 ]

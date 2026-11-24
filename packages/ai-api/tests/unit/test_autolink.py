@@ -48,6 +48,15 @@ def _wa_user(phone="+5511987654321", telegram_jid=None, uid="wa-uuid"):
     return u
 
 
+@pytest.fixture(autouse=True)
+def _no_opt_out_move():
+    """The per-send opt-out move queries the session; these tests use a mock one."""
+    from ai_api.services import autolink
+
+    with patch.object(autolink, "move_opt_outs") as move:
+        yield move
+
+
 def _db(candidates):
     db = MagicMock()
     db.query.return_value.filter.return_value.all.return_value = candidates
@@ -221,6 +230,13 @@ class TestAutolinkHappyPath:
         ):
             try_autolink(db, caller, "5511987654321", SENDER_ID, SENDER_ID)
         assert order == [(caller.id, wa.id), "delete"]
+
+    def test_moves_the_orphans_scheduled_send_opt_outs(self, _no_opt_out_move):
+        """A stop of one scheduled message on Telegram survives /linkphone."""
+        caller = _tg_user()
+        wa = _wa_user()
+        assert try_autolink(_db([wa]), caller, "5511987654321", SENDER_ID, SENDER_ID).success
+        assert _no_opt_out_move.call_args.args[1:] == (caller.id, wa.id)
 
     @pytest.mark.parametrize(
         "wa_out,tg_out,expected", [(False, True, True), (True, False, True), (False, False, False)]

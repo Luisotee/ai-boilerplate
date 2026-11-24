@@ -434,10 +434,11 @@ def _validate_broadcast_settings(coerced: dict[str, object], effective) -> None:
             parse_timezone(coerced["broadcast_timezone"])
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
-    if "broadcast_footer" in coerced and len(coerced["broadcast_footer"]) > 500:
-        raise HTTPException(
-            status_code=400, detail="broadcast_footer is too long (max 500 characters)"
-        )
+    for footer_key in ("broadcast_footer", "scheduled_send_footer"):
+        if footer_key in coerced and len(coerced[footer_key]) > 500:
+            raise HTTPException(
+                status_code=400, detail=f"{footer_key} is too long (max 500 characters)"
+            )
 
 
 #: Same bounds as config.py: an emptied number box must not mean "no limit".

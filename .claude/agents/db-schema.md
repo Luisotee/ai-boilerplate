@@ -31,13 +31,13 @@ Schema changes to existing tables require MANUAL SQL via ALTER TABLE.
 
 - **PostgreSQL 16** with **pgvector** extension (3072-dimensional vectors via gemini-embedding-001)
 - 11 tables across 2 model files:
-  - `packages/ai-api/src/ai_api/database.py`: users, conversation_messages, conversation_preferences, core_memories, bot_prompt (legacy, unread), bot_prompt_overrides, runtime_settings, broadcasts, broadcast_recipients, bug_reports
+  - `packages/ai-api/src/ai_api/database.py`: users, conversation_messages, conversation_preferences, core_memories, bot_prompt (legacy, unread), bot_prompt_overrides, runtime_settings, broadcasts, broadcast_recipients, broadcast_lane_states, broadcast_recipient_texts, scheduled_sends, scheduled_send_runs, scheduled_send_run_texts, scheduled_send_opt_outs, bug_reports
   - `packages/ai-api/src/ai_api/kb_models.py`: knowledge_base_documents, knowledge_base_chunks
 
 ### Current Schema
 
 Before making any changes, **always read the model files** to get the current schema:
-- `packages/ai-api/src/ai_api/database.py` — users, conversation_messages, conversation_preferences, core_memories, bot_prompt (legacy, unread), bot_prompt_overrides, runtime_settings, broadcasts, broadcast_recipients, bug_reports
+- `packages/ai-api/src/ai_api/database.py` — users, conversation_messages, conversation_preferences, core_memories, bot_prompt (legacy, unread), bot_prompt_overrides, runtime_settings, broadcasts, broadcast_recipients, broadcast_lane_states, broadcast_recipient_texts, scheduled_sends, scheduled_send_runs, scheduled_send_run_texts, scheduled_send_opt_outs, bug_reports
 - `packages/ai-api/src/ai_api/kb_models.py` — knowledge_base_documents, knowledge_base_chunks
 
 Key facts that won't change:

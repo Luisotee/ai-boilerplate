@@ -4,6 +4,7 @@ from enum import Enum
 
 from pgvector.sqlalchemy import HALFVEC, Vector
 from sqlalchemy import (
+    JSON,
     Boolean,
     Column,
     DateTime,
@@ -293,6 +294,165 @@ class BroadcastRecipient(Base):
     attempt_started_at = Column(DateTime, nullable=True)
 
     broadcast = relationship("Broadcast", back_populates="recipients")
+
+
+class BroadcastLaneState(Base):
+    """What one platform lane of a running broadcast is waiting for, and until when.
+
+    Written by ``streams/broadcast_consumer.py`` ``run_lane`` right before each
+    wait and deleted when it starts a send or exits, so FleetView can show
+    "next message ~09:00 · waiting for the send window" (``waiting_for`` is the
+    closed ``BroadcastWaitReason`` enum in ``schemas.py``). No row = sending,
+    finished, or not started. A new table, so ``create_all()`` creates it.
+    """
+
+    __tablename__ = "broadcast_lane_states"
+
+    broadcast_id = Column(
+        UUID(as_uuid=True), ForeignKey("broadcasts.id", ondelete="CASCADE"), primary_key=True
+    )
+    platform = Column(String(16), primary_key=True)
+    next_send_at = Column(DateTime, nullable=False)
+    waiting_for = Column(String(16), nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+#: JSONB on Postgres, plain JSON elsewhere (the SQLite-backed tests create these tables).
+_JSON = JSON().with_variant(JSONB(), "postgresql")
+
+
+class ScheduledSend(Base):
+    """An operator's scheduled send ("Envio programado"): a fixed text or an agent prompt.
+
+    Managed through ``/admin/scheduled-sends`` (``routes/scheduled_sends.py``),
+    fired by the stream worker (``streams/scheduled_send_scheduler.py``). Each
+    run becomes an ordinary ``broadcasts`` row, so delivery, pacing, the shared
+    daily cap and the never-send-twice rules are the broadcast pipeline's.
+    ``status``, ``content_type``, ``audience`` and the schedule ``kind`` are
+    closed enums in FleetView. ``number`` is the stable code people use in
+    ``/broadcast off <number>``; rows are cancelled, never deleted, so it is
+    never reused. Not the chat-created ``scheduled_tasks``.
+    """
+
+    __tablename__ = "scheduled_sends"
+    __table_args__ = (
+        Index(
+            "ix_scheduled_sends_due",
+            "next_run_at",
+            postgresql_where=text("status = 'active'"),
+        ),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    number = Column(Integer, unique=True, nullable=False)
+    name = Column(String(120), nullable=False)
+    content_type = Column(String(16), nullable=False)  # 'text' | 'prompt'
+    content = Column(Text, nullable=False)
+    audience = Column(String(16), nullable=False)  # 'private' | 'groups' | 'all' | 'chats'
+    chat_jids = Column(_JSON, nullable=True)  # audience 'chats' only
+    # Always NULL here: the template has no region concept (FleetView's field).
+    regions = Column(_JSON, nullable=True)
+    platforms = Column(_JSON, nullable=True)  # NULL = every client reachable at run time
+    schedule = Column(_JSON, nullable=False)  # as sent: {kind, run_at | time, weekdays, …}
+    run_at = Column(DateTime, nullable=True)  # compiled one-shot (naive UTC)
+    cron_expr = Column(String(100), nullable=True)  # compiled recurring, in ``timezone``
+    timezone = Column(String(64), nullable=False)
+    # 'active' | 'paused' | 'finished' | 'cancelled'
+    status = Column(String(16), nullable=False, index=True, default="active")
+    next_run_at = Column(DateTime, nullable=True)  # naive UTC; NULL = nothing armed
+    created_by = Column(String(120), nullable=True)
+    idempotency_key = Column(String(128), unique=True, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class ScheduledSendRun(Base):
+    """One firing of a scheduled send. Its delivery is the linked broadcast.
+
+    UNIQUE(scheduled_send_id, scheduled_for): one run per slot (a manual
+    "send now" uses the current minute), so two schedulers or a double click
+    can't fire it twice. ``broadcast_id`` is set in the same transaction that
+    creates the broadcast, by a conditional UPDATE on ``status = 'preparing'``
+    and this worker's ``claimed_at``: a run makes one broadcast at most.
+    """
+
+    __tablename__ = "scheduled_send_runs"
+    __table_args__ = (
+        UniqueConstraint("scheduled_send_id", "scheduled_for", name="uq_scheduled_send_runs_slot"),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    scheduled_send_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("scheduled_sends.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    scheduled_for = Column(DateTime, nullable=False)  # the slot (naive UTC)
+    trigger = Column(String(16), nullable=False, default="schedule")  # 'schedule' | 'manual'
+    # Stored: 'preparing' | 'delivering' | 'completed' | 'failed' | 'missed' | 'cancelled'.
+    # A 'delivering' run's reported status follows its broadcast (routes/scheduled_sends.py).
+    status = Column(String(16), nullable=False, index=True, default="preparing")
+    error = Column(String(64), nullable=True)
+    claimed_at = Column(DateTime, nullable=True)  # the preparing worker's claim
+    broadcast_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("broadcasts.id", ondelete="SET NULL"),
+        unique=True,
+        nullable=True,
+    )
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+
+
+class ScheduledSendRunText(Base):
+    """What one agent run of a prompt send produced (or why it failed), per chat type."""
+
+    __tablename__ = "scheduled_send_run_texts"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    run_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("scheduled_send_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    region = Column(String, nullable=True)  # always NULL here (no regions)
+    chat_type = Column(String(16), nullable=False)  # 'group' | 'private'
+    text = Column(Text, nullable=True)
+    error = Column(String(200), nullable=True)
+
+
+class BroadcastRecipientText(Base):
+    """A recipient's own text (a prompt send's version for its chat type), instead of the broadcast's."""
+
+    __tablename__ = "broadcast_recipient_texts"
+
+    recipient_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("broadcast_recipients.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    text = Column(Text, nullable=False)
+
+
+class ScheduledSendOptOut(Base):
+    """A chat that stopped one scheduled send (``/broadcast off <number>``).
+
+    Keyed on ``users.id``, which ``/clean`` keeps, so a clean never re-subscribes.
+    The global ``users.broadcast_opt_out`` still stops every send.
+    """
+
+    __tablename__ = "scheduled_send_opt_outs"
+
+    scheduled_send_id = Column(
+        UUID(as_uuid=True), ForeignKey("scheduled_sends.id", ondelete="CASCADE"), primary_key=True
+    )
+    user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 class BugReport(Base):

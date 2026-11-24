@@ -160,6 +160,8 @@ class Settings(BaseSettings):
     broadcast_footer: str = (
         "_Don't want these updates? Just ask me to stop them, or send /broadcast off._"
     )
+    # Extra footer line on scheduled sends (Envios programados); {number} = the send's number.
+    scheduled_send_footer: str = "_To stop only this message, send /broadcast off {number}._"
     broadcast_min_delay_seconds: int = Field(20, ge=0, le=MAX_DELAY_SECONDS)
     broadcast_max_delay_seconds: int = Field(60, ge=0, le=MAX_DELAY_SECONDS)
     broadcast_batch_size: int = Field(15, ge=1, le=MAX_BATCH_SIZE)
@@ -342,6 +344,8 @@ class Settings(BaseSettings):
             parse_timezone(self.bot_timezone)
         if len(self.broadcast_footer) > 500:
             raise ValueError("BROADCAST_FOOTER is too long (max 500 characters)")
+        if len(self.scheduled_send_footer) > 500:
+            raise ValueError("SCHEDULED_SEND_FOOTER is too long (max 500 characters)")
         if self.broadcast_min_delay_seconds > self.broadcast_max_delay_seconds:
             raise ValueError(
                 "BROADCAST_MIN_DELAY_SECONDS must not exceed BROADCAST_MAX_DELAY_SECONDS"

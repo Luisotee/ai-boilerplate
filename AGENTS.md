@@ -48,6 +48,7 @@ Deep detail lives in `AGENTS.md` (symlinked to `CLAUDE.md`) next to the code. **
 | File | Covers |
 |------|--------|
 | `packages/ai-api/src/ai_api/services/AGENTS.md` | Broadcasts (`/admin/broadcasts`: audience, routing, opt-out, claims, lease, Baileys pacing, FleetView enums), bug reports (`/admin/bug-reports`: dedup, privacy scrub), scheduled tasks and reminders (`/admin/scheduled-tasks`: at-most-once firing, group rules), cross-platform identity (`/link`, `/linkphone`, `web:` keys) |
+| `packages/ai-api/src/ai_api/scheduled_sends/AGENTS.md` | Envios programados (`/admin/scheduled-sends`), delivered as broadcasts |
 | `packages/ai-api/docs/openai-api.md` | OpenAI-compatible `/v1` API (keys, web Markdown), terminal chat |
 | `packages/ai-api/src/ai_api/agent/AGENTS.md` | DeepSeek → Gemini model chain, `GuardedModel`, fallback rules, model-error fallback reply, shared-group tools |
 | `packages/ai-api/src/ai_api/streams/AGENTS.md` | PDF processing queue (concurrency, retry, dead letter, crash recovery) |
@@ -127,13 +128,13 @@ cd packages/ai-api && uv run pytest tests/mocked/test_model_chain_fallback.py -k
 ## Database
 
 - **PostgreSQL + pgvector** (3072-dim vectors via `gemini-embedding-001`).
-- **17 tables**: `users`, `conversation_messages`, `conversation_preferences`, `core_memories`, `bot_prompt` (legacy, unread), `bot_prompt_overrides`, `runtime_settings`, `broadcasts`, `broadcast_recipients`, `bug_reports`, `api_keys`, `scheduled_tasks`, `task_runs`, `group_topics`, `group_topic_cursors` (`database.py`) + `knowledge_base_documents`, `knowledge_base_chunks` (`kb_models.py`).
+- **23 tables**, models in `database.py` and `kb_models.py` (list in `docs/architecture.md`).
 - **No Alembic migrations**: `create_all()` only creates missing tables, never new columns/indexes. Ship column/index changes as idempotent (`IF NOT EXISTS`) SQL in `packages/ai-api/docs/migrations/<YYYY-MM-DD>-<name>.sql` (use `/db-migration` skill) and apply before rollout:
   ```bash
   docker compose exec -T postgres psql -U aiagent -d aiagent < packages/ai-api/docs/migrations/<file>.sql
   ```
 - **Knowledge-base dedup**: `knowledge_base_documents.file_hash` (SHA-256 hex). `POST /knowledge-base/upload` returns **409** on duplicate active global doc; batch route rejects duplicates per file. Upload routes are `@limiter.exempt` (for `./upload-kb.sh <dir>`) and behind `X-API-Key`.
-- **Core memories & live prompt**: One markdown doc per user (`core_memories`), injected via the `inject_core_memory` instructions hook. The base prompt is the code sections in `agent/prompt.py` (`PROMPT_SECTIONS`); an operator override (`bot_prompt_overrides`, per section or whole) applies only while the code default it was written against is unchanged, so a code change always reaches the model. Register every instructions function with `@instruction_hook(title)`, never a bare `agent.instructions` (`GET /admin/prompt/effective` renders that list). The legacy `bot_prompt` table is no longer read. Details: `packages/ai-api/docs/admin-api.md`.
+- **Core memories & live prompt**: One markdown doc per user (`core_memories`), injected by the `inject_core_memory` hook. The base prompt is the code sections in `agent/prompt.py`; an operator override (`bot_prompt_overrides`) applies only while the code default it edited is unchanged (`bot_prompt` is unread). Register instructions functions only with `@instruction_hook(title)`. Details: `packages/ai-api/docs/admin-api.md`.
 - **PDFs & STT**: Conversation PDFs expire after 24h (`CONVERSATION_PDF_TTL_HOURS`). All PDFs go through Redis Stream `stream:pdf_processing` (`streams/pdf_consumer.py` in worker, never inline in API). `PDF_PARSER` (`auto` | `llamaparse` | `docling`). `STT_PROVIDER` (`auto` | `groq` | `whisper`).
 
 ## Environment Config

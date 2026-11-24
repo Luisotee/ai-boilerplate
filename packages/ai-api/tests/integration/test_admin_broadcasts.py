@@ -124,6 +124,10 @@ def client_for():
         patch("ai_api.main.get_arq_redis", new_callable=AsyncMock),
         patch("ai_api.main.cleanup_expired_documents"),
         patch("ai_api.routes.broadcasts.runtime_config.get", side_effect=RUNTIME.__getitem__),
+        # The mock session can't tell these queries apart; real-DB tests cover them
+        # (tests/integration/test_scheduled_sends_db.py).
+        patch("ai_api.routes.broadcasts.is_run_broadcast", return_value=False),
+        patch("ai_api.routes.broadcasts._run_links", return_value={}),
     ]
     for p in patches:
         p.start()
@@ -369,6 +373,28 @@ class TestReadAndTransitions:
         assert data["counts"] == {"total": 9, "pending": 5, "sent": 3, "failed": 1, "skipped": 0}
         per = {p["platform"]: p for p in data["per_platform"]}
         assert per["baileys"]["sent"] == 3 and per["telegram"]["failed"] == 1
+
+    @pytest.mark.parametrize("status", ["running", "paused"])
+    async def test_detail_shows_when_a_running_lane_sends_next(self, client_for, status):
+        b = broadcast(status)
+        due = NOW + timedelta(hours=1)
+        db = make_db(count_rows=[(b.id, "baileys", "pending", 5)])
+        db.query.return_value.filter.return_value.all.return_value = [
+            SimpleNamespace(
+                broadcast_id=b.id, platform="baileys", next_send_at=due, waiting_for="send_window"
+            )
+        ]
+        db.get.return_value = b
+        async with client_for(db) as c:
+            resp = await c.get(f"/admin/broadcasts/{b.id}", headers=AUTH)
+        per = {p["platform"]: p for p in resp.json()["per_platform"]}
+        if status == "running":
+            assert per["baileys"]["waiting_for"] == "send_window"
+            assert per["baileys"]["next_send_at"].startswith(due.isoformat()[:16])
+        else:  # a row a dead worker left behind never shows on a paused broadcast
+            assert per["baileys"]["waiting_for"] is None
+            assert per["baileys"]["next_send_at"] is None
+        assert resp.json()["scheduled_send_id"] is None
 
     async def test_list_counts_every_broadcast_in_one_query(self, client_for):
         first, second = broadcast("completed"), broadcast("running")

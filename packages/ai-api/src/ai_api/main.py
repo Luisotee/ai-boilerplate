@@ -36,6 +36,7 @@ from .routes import (
     message_events_router,
     openai_router,
     preferences_router,
+    scheduled_sends_router,
     scheduled_tasks_router,
     speech_router,
 )
@@ -273,5 +274,6 @@ app.include_router(preferences_router)
 app.include_router(admin_router)
 app.include_router(broadcasts_router)
 app.include_router(bug_reports_router)
+app.include_router(scheduled_sends_router)
 app.include_router(scheduled_tasks_router)
 app.include_router(openai_router)

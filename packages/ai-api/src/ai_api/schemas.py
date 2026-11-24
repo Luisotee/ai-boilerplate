@@ -438,6 +438,10 @@ BroadcastAudience = Literal["private", "groups", "all"]
 BroadcastPlatform = Literal["baileys", "cloud", "telegram"]
 BroadcastStatus = Literal["queued", "running", "paused", "completed", "cancelled"]
 BroadcastRecipientStatus = Literal["pending", "sent", "failed", "skipped"]
+#: Why a running lane is waiting (streams/broadcast_consumer.py ``WAIT_*``).
+BroadcastWaitReason = Literal[
+    "send_window", "daily_cap", "timelock", "batch_pause", "delay", "disconnected"
+]
 
 
 class BroadcastPreviewRequest(BaseModel):
@@ -527,10 +531,28 @@ class BroadcastCounts(BaseModel):
 
 class BroadcastPlatformCounts(BroadcastCounts):
     platform: BroadcastPlatform
+    next_send_at: datetime | None = Field(
+        None,
+        description=(
+            "UTC time the lane's next message is due while it waits; null while it sends, "
+            "once it finished, or when the broadcast isn't running"
+        ),
+    )
+    waiting_for: BroadcastWaitReason | None = Field(
+        None,
+        description=(
+            "Why the lane waits: 'send_window', 'daily_cap', 'timelock' (WhatsApp's limit on "
+            "new contacts), 'batch_pause', 'delay' (gap between messages), 'disconnected'"
+        ),
+    )
 
 
 class BroadcastResponse(BaseModel):
     id: str
+    scheduled_send_id: str | None = Field(
+        None, description="The scheduled send whose run this broadcast is; null = manual"
+    )
+    scheduled_send_run_id: str | None = None
     text: str
     footer: str
     audience: BroadcastAudience
@@ -577,6 +599,198 @@ class BroadcastRecipientsResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+# --- Scheduled sends (/admin/scheduled-sends, "Envios programados") ---
+# A FleetView contract like the broadcasts above: these Literals are closed
+# enums in its Zod schemas. New fields are safe; new enum values are not.
+
+ScheduledSendContentType = Literal["text", "prompt"]
+ScheduledSendAudience = Literal["private", "groups", "all", "chats"]
+ScheduledSendStatus = Literal["active", "paused", "finished", "cancelled"]
+ScheduledSendScheduleKind = Literal["once", "daily", "weekly", "monthly"]
+ScheduledSendRunStatus = Literal[
+    "preparing", "delivering", "completed", "failed", "missed", "cancelled"
+]
+ScheduledSendRunTrigger = Literal["schedule", "manual"]
+ScheduledSendChatType = Literal["group", "private"]
+
+
+class ScheduledSendSchedule(BaseModel):
+    """When it fires, in the send's time zone. Fields by kind:
+
+    ``once``: ``run_at`` (naive = the bot's time zone; future, ≤ 1 year) ·
+    ``daily``: ``time`` · ``weekly``: ``time`` + ``weekdays`` (0 = Sunday) ·
+    ``monthly``: ``time`` + ``day_of_month`` (1-28).
+    """
+
+    kind: ScheduledSendScheduleKind
+    run_at: datetime | None = None
+    time: str | None = Field(None, description="HH:MM, 24 h")
+    weekdays: list[int] | None = Field(None, description="0-6, cron numbering (0 = Sunday)")
+    day_of_month: int | None = Field(None, ge=1, le=28)
+
+
+class ScheduledSendFields(BaseModel):
+    """The editable fields (PATCH takes any subset)."""
+
+    name: str | None = Field(None, min_length=1, max_length=120)
+    content_type: ScheduledSendContentType | None = None
+    content: str | None = Field(
+        None, min_length=1, max_length=3500, description="Text (≤ 3500) or prompt (≤ 2000)"
+    )
+    audience: ScheduledSendAudience | None = None
+    chat_jids: list[str] | None = Field(
+        None, max_length=500, description="Audience 'chats' only: the chats to send to"
+    )
+    regions: list[str] | None = Field(
+        None,
+        max_length=50,
+        description="Not supported by this bot (no regions): null or [] only, else 422",
+    )
+    platforms: list[BroadcastPlatform] | None = Field(
+        None, min_length=1, description="null = every chat client reachable at run time"
+    )
+    schedule: ScheduledSendSchedule | None = None
+    status: Literal["active", "paused"] | None = None
+    created_by: str | None = Field(None, max_length=120)
+
+
+class ScheduledSendCreateRequest(ScheduledSendFields):
+    name: str = Field(..., min_length=1, max_length=120)
+    content_type: ScheduledSendContentType
+    content: str = Field(..., min_length=1, max_length=3500)
+    audience: ScheduledSendAudience = "private"
+    schedule: ScheduledSendSchedule
+    idempotency_key: str | None = Field(None, min_length=1, max_length=128)
+
+
+class ScheduledSendRunItem(BaseModel):
+    id: str
+    scheduled_send_id: str
+    scheduled_for: datetime
+    trigger: ScheduledSendRunTrigger
+    status: ScheduledSendRunStatus
+    error: str | None = Field(
+        None,
+        description=(
+            "Open string: generation_failed, no_recipients, expired, missed, "
+            "clients_unreachable, send_cancelled, prepare_error"
+        ),
+    )
+    broadcast_id: str | None = None
+    counts: BroadcastCounts
+    created_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+class ScheduledSendRunText(BaseModel):
+    region: str | None = Field(None, description="Always null: this bot has no regions")
+    chat_type: ScheduledSendChatType
+    text: str | None = None
+    error: str | None = None
+
+
+class ScheduledSendRunDetail(ScheduledSendRunItem):
+    texts: list[ScheduledSendRunText]
+
+
+class ScheduledSendResponse(BaseModel):
+    id: str
+    number: int = Field(..., description="Stable code people use in /broadcast off <number>")
+    name: str
+    content_type: ScheduledSendContentType
+    content: str
+    audience: ScheduledSendAudience
+    chat_jids: list[str] | None = None
+    regions: list[str] | None = Field(None, description="Always null: this bot has no regions")
+    platforms: list[BroadcastPlatform] | None = None
+    schedule: ScheduledSendSchedule
+    timezone: str
+    schedule_description: str = Field(..., description="e.g. 'every Monday at 08:00'")
+    status: ScheduledSendStatus
+    next_run_at: datetime | None = None
+    last_run: ScheduledSendRunItem | None = None
+    created_by: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class WeeklyRecapSummary(BaseModel):
+    """FleetView's recap card. This bot has no weekly recap: always a disabled summary."""
+
+    enabled: bool
+    weekday: int
+    hour: int
+    minute: int
+    timezone: str
+    default_prompt: str
+    groups: int
+    subscribers: int
+
+
+class ScheduledSendsResponse(BaseModel):
+    scheduled_sends: list[ScheduledSendResponse]
+    total: int
+    limit: int
+    offset: int
+    weekly_recap: WeeklyRecapSummary
+    regions: list[str] = Field(
+        default_factory=list, description="Region names a send accepts: none on this bot"
+    )
+    region_filter: bool = Field(
+        False, description="Whether sends can filter by region (false: this bot has no regions)"
+    )
+    timezone: str = Field(..., description="The zone a new send is created in (bot timezone)")
+
+
+class ScheduledSendRunsResponse(BaseModel):
+    runs: list[ScheduledSendRunItem]
+    total: int
+    limit: int
+    offset: int
+
+
+class ScheduledSendPreviewRequest(ScheduledSendFields):
+    """Either ``scheduled_send_id`` (a saved send, fields here override it) or a full draft."""
+
+    scheduled_send_id: str | None = None
+    generate: bool = Field(False, description="Run the agent once for a sample (prompt sends)")
+    sample_region: str | None = Field(None, description="Ignored: this bot has no regions")
+    sample_chat_type: ScheduledSendChatType | None = None
+
+
+class ScheduledSendSample(BaseModel):
+    region: str | None = None
+    chat_type: ScheduledSendChatType
+    text: str | None = None
+    error: str | None = None
+    prompt: str
+
+
+class ScheduledSendPreviewResponse(BaseModel):
+    audience: ScheduledSendAudience
+    platforms: list[BroadcastPlatform]
+    total_recipients: int
+    per_platform: list[BroadcastPlatformPreview]
+    opted_out: int
+    not_whitelisted: int
+    no_selected_platform: int
+    skipped_cloud_window: int
+    skipped_unknown_client: int = 0
+    skipped_duplicate: int = 0
+    estimated_baileys_seconds: int
+    unknown_chats: int = Field(0, description="chat_jids with no chat row")
+    opted_out_campaign: int = Field(0, description="Chats that stopped this send")
+    estimated_agent_runs: int = 0
+    agent_runs_upper_bound: bool = False
+    next_runs: list[datetime] = Field(default_factory=list)
+    warnings: list[str] = Field(
+        default_factory=list,
+        description="Open strings: cloud_recurring, exceeds_period, exceeds_daily_cap",
+    )
+    sample: ScheduledSendSample | None = None
 
 
 # --- Bug reports (/admin/bug-reports) ---

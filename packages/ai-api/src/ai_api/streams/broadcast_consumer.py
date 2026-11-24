@@ -75,8 +75,12 @@ from ..broadcast_pacing import (
 from ..config import get_whatsapp_api_key, get_whatsapp_client_url, settings
 from ..database import (
     Broadcast,
+    BroadcastLaneState,
     BroadcastRecipient,
+    BroadcastRecipientText,
     ConversationMessage,
+    ScheduledSendOptOut,
+    ScheduledSendRun,
     SessionLocal,
     User,
     is_group_jid,
@@ -149,6 +153,21 @@ TIMELOCK_UNKNOWN_END_WAIT_SECONDS = 3600.0
 
 PAUSE_CONSECUTIVE_FAILURES = "consecutive_failures"
 PAUSE_CLIENT_DISCONNECTED = "client_disconnected"
+
+#: Why a lane is waiting (``BroadcastWaitReason`` in schemas.py, closed on the
+#: bot): recorded in ``broadcast_lane_states`` before each wait.
+WAIT_SEND_WINDOW = "send_window"
+WAIT_DAILY_CAP = "daily_cap"
+WAIT_TIMELOCK = "timelock"
+WAIT_BATCH_PAUSE = "batch_pause"
+WAIT_DELAY = "delay"
+WAIT_DISCONNECTED = "disconnected"
+#: Fast lanes record only waits at least this long (backoff, a disconnect), not
+#: their sub-second gap between messages.
+LANE_STATE_MIN_SECONDS = 5.0
+
+#: error_code for a chat that stopped this one scheduled send (``/broadcast off <n>``).
+SKIP_OPTED_OUT_CAMPAIGN = "opted_out_campaign"
 
 UNKNOWN_OUTCOME = "unknown"
 
@@ -430,6 +449,9 @@ class _Claimed:
     user_id: uuid.UUID
     address: str
     attempts: int
+    #: This recipient's own rendered text (a prompt send's version for its chat
+    #: type), else None: the broadcast's text.
+    text: str | None = None
 
 
 def _lane_has_pending(broadcast_id: uuid.UUID, platform: str) -> bool:
@@ -440,8 +462,8 @@ def _lane_has_pending(broadcast_id: uuid.UUID, platform: str) -> bool:
 def _next_recipient(broadcast_id: uuid.UUID, platform: str) -> _Claimed | None:
     """Next pending recipient on this lane, re-checking eligibility right before sending.
 
-    Recipients that can no longer be sent to (opted out since the snapshot, user
-    row deleted, removed from the whitelist, Cloud window closed, or on Baileys
+    Recipients that can no longer be sent to (opted out since the snapshot, of
+    everything or of this scheduled send, user row deleted, removed from the whitelist, Cloud window closed, or on Baileys
     a private chat whose client is unknown/Cloud now that Cloud is in use) are
     marked skipped here and passed over. A broadcast runs for days on Baileys,
     so a whitelist removal must stop it, like it stops chat replies at once.
@@ -451,6 +473,12 @@ def _next_recipient(broadcast_id: uuid.UUID, platform: str) -> _Claimed | None:
     db = SessionLocal()
     try:
         cloud_in_use = platform == "baileys" and cloud_seen(db)
+        # A scheduled send's run: its own opt-outs are re-checked per send too.
+        scheduled_send_id = (
+            db.query(ScheduledSendRun.scheduled_send_id)
+            .filter(ScheduledSendRun.broadcast_id == broadcast_id)
+            .scalar()
+        )
         while True:
             rec = (
                 db.query(BroadcastRecipient)
@@ -471,6 +499,11 @@ def _next_recipient(broadcast_id: uuid.UUID, platform: str) -> _Claimed | None:
                 reason = SKIP_USER_DELETED
             elif user.broadcast_opt_out:
                 reason = SKIP_OPTED_OUT
+            elif (
+                scheduled_send_id is not None
+                and db.get(ScheduledSendOptOut, (scheduled_send_id, user.id)) is not None
+            ):
+                reason = SKIP_OPTED_OUT_CAMPAIGN
             elif not allowed(user, Route(platform, rec.address)):
                 reason = NOT_WHITELISTED
             elif platform == "cloud" and not in_cloud_window(user.cloud_last_inbound_at, _utcnow()):
@@ -481,7 +514,12 @@ def _next_recipient(broadcast_id: uuid.UUID, platform: str) -> _Claimed | None:
             ):
                 reason = SKIP_UNKNOWN_CLIENT
             if reason is None:
-                return _Claimed(rec.id, rec.user_id, rec.address, rec.attempts)
+                own = db.get(BroadcastRecipientText, rec.id)
+                text = None
+                if own is not None:
+                    broadcast = db.get(Broadcast, broadcast_id)
+                    text = render_message(own.text, broadcast.footer if broadcast else None)
+                return _Claimed(rec.id, rec.user_id, rec.address, rec.attempts, text)
             rec.status = "skipped"
             rec.error_code = reason
             db.commit()
@@ -569,6 +607,39 @@ def _baileys_cap_wait_seconds() -> float:
     return max(1.0, (oldest - since).total_seconds())
 
 
+def _set_lane_state(
+    broadcast_id: uuid.UUID, platform: str, next_send_at: datetime, reason: str
+) -> None:
+    """Record what this lane waits for, and until when (one row per lane)."""
+    db = SessionLocal()
+    try:
+        db.merge(
+            BroadcastLaneState(
+                broadcast_id=broadcast_id,
+                platform=platform,
+                next_send_at=next_send_at,
+                waiting_for=reason,
+                updated_at=_utcnow(),
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
+def _clear_lane_state(broadcast_id: uuid.UUID, platform: str) -> None:
+    """No row: the lane is sending, finished or gone."""
+    db = SessionLocal()
+    try:
+        db.query(BroadcastLaneState).filter(
+            BroadcastLaneState.broadcast_id == broadcast_id,
+            BroadcastLaneState.platform == platform,
+        ).delete(synchronize_session=False)
+        db.commit()
+    finally:
+        db.close()
+
+
 def _window_wait_seconds() -> float:
     # config.py and PATCH /admin/settings both reject bad values, so these
     # fallbacks only guard against a value corrupted in the DB by hand.
@@ -585,9 +656,13 @@ def _window_wait_seconds() -> float:
     return seconds_until_window(window, datetime.now(tz))
 
 
-def _baileys_wait_seconds() -> float:
-    """How long the Baileys lane must wait before it may send (window + daily cap)."""
-    return max(_window_wait_seconds(), _baileys_cap_wait_seconds())
+def _baileys_wait() -> tuple[float, str]:
+    """How long the Baileys lane must wait before it may send, and why (window or daily cap)."""
+    window = _window_wait_seconds()
+    cap = _baileys_cap_wait_seconds()
+    if cap > window:
+        return cap, WAIT_DAILY_CAP
+    return window, WAIT_SEND_WINDOW
 
 
 async def _timelock_wait_seconds(client: WhatsAppClient) -> float:
@@ -724,10 +799,51 @@ async def run_lane(
         base_url=get_whatsapp_client_url(platform),
         api_key=get_whatsapp_api_key(platform),
     )
-    sent_in_batch = 0
-    consecutive_failures = 0
     disconnect_key = (broadcast_id, platform)
     logger.info("Broadcast %s: %s lane started", broadcast_id, platform)
+    noted = False
+
+    async def note(seconds: float, reason: str) -> None:
+        # Best-effort: FleetView's "next message ~09:00" must never stop a send.
+        nonlocal noted
+        if platform != "baileys" and seconds < LANE_STATE_MIN_SECONDS:
+            return
+        try:
+            when = _utcnow() + timedelta(seconds=seconds)
+            await asyncio.to_thread(_set_lane_state, broadcast_id, platform, when, reason)
+            noted = True
+        except Exception:
+            logger.warning("Broadcast %s: could not record the lane state", broadcast_id)
+
+    async def clear() -> None:
+        nonlocal noted
+        if not noted:
+            return
+        try:
+            await asyncio.to_thread(_clear_lane_state, broadcast_id, platform)
+            noted = False
+        except Exception:
+            logger.warning("Broadcast %s: could not clear the lane state", broadcast_id)
+
+    async def wait(seconds: float, reason: str) -> bool:
+        await note(seconds, reason)
+        return await _sleep_while_running(broadcast_id, seconds, stop)
+
+    try:
+        await _run_lane_loop(
+            broadcast_id, platform, text, client, rng, stop, lease, disconnect_key, wait, clear
+        )
+    finally:
+        noted = True  # a row a failed write may have left behind
+        await clear()
+
+
+async def _run_lane_loop(
+    broadcast_id, platform, text, client, rng, stop, lease, disconnect_key, wait, clear
+) -> None:
+    """``run_lane``'s body; ``wait`` records the lane state before sleeping."""
+    sent_in_batch = 0
+    consecutive_failures = 0
 
     async def nothing_left() -> bool:
         # Checked before any Baileys wait: a lane with no pending recipient must
@@ -744,10 +860,12 @@ async def run_lane(
         # Pick up the schedule where the last Baileys lane left it.
         pacing = await asyncio.to_thread(_pacing_settings)
         recent = await asyncio.to_thread(_recent_baileys_sends, pacing.batch_size)
-        sent_in_batch, wait = resume_pacing(recent, _utcnow(), rng, pacing)
-        if wait > 0:
-            logger.info("Broadcast %s: baileys lane resuming in %.0fs", broadcast_id, wait)
-            if not await _sleep_while_running(broadcast_id, wait, stop):
+        sent_in_batch, first_wait = resume_pacing(recent, _utcnow(), rng, pacing)
+        if first_wait > 0:
+            logger.info("Broadcast %s: baileys lane resuming in %.0fs", broadcast_id, first_wait)
+            # resume_pacing restarts the count after a full batch (0 = batch pause).
+            reason = WAIT_BATCH_PAUSE if sent_in_batch == 0 else WAIT_DELAY
+            if not await wait(first_wait, reason):
                 return
 
     while True:
@@ -759,10 +877,12 @@ async def run_lane(
         if platform == "baileys":
             if await nothing_left():
                 return
-            wait = await asyncio.to_thread(_baileys_wait_seconds)
-            if wait > 0:
-                logger.info("Broadcast %s: baileys lane waiting %.0fs", broadcast_id, wait)
-                if not await _sleep_while_running(broadcast_id, wait, stop):
+            gate_wait, reason = await asyncio.to_thread(_baileys_wait)
+            if gate_wait > 0:
+                logger.info(
+                    "Broadcast %s: baileys lane waiting %.0fs (%s)", broadcast_id, gate_wait, reason
+                )
+                if not await wait(gate_wait, reason):
                     return
                 continue
             lock_wait = await _timelock_wait_seconds(client)
@@ -772,7 +892,7 @@ async def run_lane(
                     broadcast_id,
                     lock_wait,
                 )
-                if not await _sleep_while_running(broadcast_id, lock_wait, stop):
+                if not await wait(lock_wait, WAIT_TIMELOCK):
                     return
                 continue
 
@@ -791,9 +911,11 @@ async def run_lane(
             return
         if not await asyncio.to_thread(_claim, rec.id):
             continue  # taken since we read it
+        await clear()  # sending now: no "next message at" to show
 
+        message = rec.text or text
         try:
-            await _deliver(client, platform, rec.address, text)
+            await _deliver(client, platform, rec.address, message)
         except Exception as e:  # not BaseException: a cancel leaves the claim to the sweep
             kind, error_code = classify_outcome(e)
             if kind == RELEASE:
@@ -807,7 +929,7 @@ async def run_lane(
                     )
                     return
                 logger.warning("Broadcast %s: %s client not connected", broadcast_id, platform)
-                if not await _sleep_while_running(broadcast_id, DISCONNECT_RETRY_SECONDS, stop):
+                if not await wait(DISCONNECT_RETRY_SECONDS, WAIT_DISCONNECTED):
                     return
                 continue
             _disconnected_since.pop(disconnect_key, None)
@@ -837,7 +959,7 @@ async def run_lane(
         else:
             _disconnected_since.pop(disconnect_key, None)
             consecutive_failures = 0
-            await _record_sent(rec, text)
+            await _record_sent(rec, message)
             sent_in_batch += 1
 
         # Every lane has the breaker: on the fast lanes a wrong API key (401)
@@ -846,11 +968,13 @@ async def run_lane(
             await asyncio.to_thread(_pause_broadcast, broadcast_id, PAUSE_CONSECUTIVE_FAILURES)
             return
 
+        reason = WAIT_DELAY
         if platform == "baileys":
             pacing = await asyncio.to_thread(_pacing_settings)
             if sent_in_batch >= max(1, pacing.batch_size):
                 sent_in_batch = 0
                 pause = batch_pause(rng, pacing.batch_pause_seconds)
+                reason = WAIT_BATCH_PAUSE
             else:
                 pause = jittered_delay(rng, pacing.min_delay_seconds, pacing.max_delay_seconds)
             if consecutive_failures:
@@ -859,7 +983,7 @@ async def run_lane(
             pause = LANE_DELAY_SECONDS.get(platform, 0.2)
             if consecutive_failures:
                 pause += min(60.0, 5.0 * 2 ** (consecutive_failures - 1))
-        if not await _sleep_while_running(broadcast_id, pause, stop):
+        if not await wait(pause, reason):
             return
 
 

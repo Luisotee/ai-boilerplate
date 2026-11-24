@@ -34,6 +34,7 @@ async def settings(
     action: SettingsAction,
     enabled: bool | None = None,
     language: str | None = None,
+    scheduled_send_number: int | None = None,
 ) -> str:
     """
     Show or change this chat's settings.
@@ -44,7 +45,9 @@ async def settings(
     - "stt": the language voice messages are transcribed in; language="auto" auto-detects.
       Transcription itself can't be turned off.
     - "announcements": the operators' update messages; enabled=false stops them
-      ("stop sending me news"), enabled=true resumes them.
+      ("stop sending me news"), enabled=true resumes them; that stops every scheduled
+      message too. With scheduled_send_number, only that scheduled message (the
+      number in its footer, "/broadcast off 3").
 
     Languages: en, es, pt, fr, de. In a group these are the group's settings and
     only a group admin may change them.
@@ -53,6 +56,7 @@ async def settings(
         action: Which setting to show or change
         enabled: For "tts" and "announcements": on (true) or off (false)
         language: For "tts" and "stt": a language code, or "auto" for "stt"
+        scheduled_send_number: For "announcements": one scheduled message's number
     """
     logger.info(
         f"⚙️ TOOL CALLED: settings action={action} enabled={enabled} language={language} "
@@ -65,6 +69,13 @@ async def settings(
     if action == "stt":
         return await _update_stt(ctx.deps, language)
     if action == "announcements":
+        if scheduled_send_number is not None:
+            if enabled is None:
+                return (
+                    f"Pass enabled=false to stop scheduled message {scheduled_send_number} "
+                    "or enabled=true to restart it."
+                )
+            return await _set_send_announcements(ctx.deps, scheduled_send_number, enabled)
         if enabled is None:
             return "Pass enabled=true to receive announcements or enabled=false to stop them."
         return await _set_announcements(ctx.deps, enabled)
@@ -188,6 +199,42 @@ async def _set_announcements(deps: AgentDeps, subscribed: bool) -> str:
         safe_rollback(deps.db)
         logger.error(f"Error updating broadcast subscription: {e}", exc_info=True)
         return "Failed to update the announcement setting. Please try again."
+
+
+async def _set_send_announcements(deps: AgentDeps, number: int, subscribed: bool) -> str:
+    """Stop or restart one scheduled send for this chat (``/broadcast off <number>``)."""
+    from ...database import User
+    from ...scheduled_sends.opt_out import find_send, set_send_opt_out
+
+    if is_app_jid(deps.whatsapp_jid):
+        return "Announcements are only sent on WhatsApp and Telegram, never to this app."
+    try:
+        refusal = group_admin_refusal(
+            deps, "turn scheduled messages on or off for this group", f"/broadcast off {number}"
+        )
+        if refusal:
+            return refusal
+        # Identity comes from the run's own user row, never from arguments.
+        user = deps.db.get(User, deps.user_id)
+        if user is None:
+            return "Failed to update the announcement setting. Please try again."
+        send = find_send(deps.db, number)
+        if send is None:
+            return f"There is no scheduled message {number}. /broadcast shows the list."
+        if send.status == "finished":
+            return f"Scheduled message {number} ({send.name}) has ended; nothing more will come."
+        set_send_opt_out(deps.db, send, user, opt_out=not subscribed)
+    except Exception as e:
+        safe_rollback(deps.db)
+        logger.error(f"Error updating a scheduled-send opt-out: {e}", exc_info=True)
+        return "Failed to update the announcement setting. Please try again."
+    target = "this group" if is_group_jid(deps.whatsapp_jid) else "you"
+    if subscribed:
+        return f"Scheduled message {number} ({send.name}) is on again for {target}."
+    return (
+        f"Scheduled message {number} ({send.name}) is now off for {target}. "
+        f"(/broadcast on {number} turns it back on.)"
+    )
 
 
 @agent.tool

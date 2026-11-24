@@ -71,6 +71,8 @@ class Harness:
         self.claimed_ids: list = []
         self.pause = MagicMock()
         self.sleeps: list[float] = []
+        #: ("set", reason, seconds-from-now) / ("clear",) in call order.
+        self.states: list[tuple] = []
 
     def _status(self, _bid):
         return self.statuses.pop(0) if self.statuses else "running"
@@ -78,7 +80,17 @@ class Harness:
     def _wait(self):
         # Never let a side effect raise StopIteration: inside asyncio.to_thread
         # it can't be set on the future and the test hangs.
-        return self.cap_waits.pop(0) if self.cap_waits else 0.0
+        wait = self.cap_waits.pop(0) if self.cap_waits else 0.0
+        return wait if isinstance(wait, tuple) else (wait, bc.WAIT_SEND_WINDOW)
+
+    def _set_state(self, _bid, _platform, when, reason):
+        self.states.append(("set", reason, (when - bc._utcnow()).total_seconds()))
+
+    def _clear_state(self, _bid, _platform):
+        self.states.append(("clear",))
+
+    def reasons(self):
+        return [s[1] for s in self.states if s[0] == "set"]
 
     def _next(self, _bid, _platform):
         return self.queue.pop(0) if self.queue else None
@@ -106,7 +118,9 @@ class Harness:
             enter(patch.object(bc, "_claim", side_effect=self._claim))
             enter(patch.object(bc, "_release", self.release))
             enter(patch.object(bc, "_pause_broadcast", self.pause))
-            enter(patch.object(bc, "_baileys_wait_seconds", side_effect=self._wait))
+            enter(patch.object(bc, "_baileys_wait", side_effect=self._wait))
+            enter(patch.object(bc, "_set_lane_state", side_effect=lambda *a: self._set_state(*a)))
+            enter(patch.object(bc, "_clear_lane_state", side_effect=self._clear_state))
             enter(patch.object(bc, "_pacing_settings", return_value=PACING))
             enter(patch.object(bc, "_recent_baileys_sends", return_value=self.recent_sends))
             enter(patch.object(bc, "_sleep_while_running", self._sleep))
@@ -373,7 +387,11 @@ async def test_long_disconnect_pauses_the_broadcast():
     start = bc._utcnow()
     # resume_pacing's "now", then one clock read per 503.
     times = [start, start, start + bc.DISCONNECT_PAUSE_AFTER]
-    with patch.object(bc, "_utcnow", side_effect=times):
+
+    def now():  # the lane-state writes read the clock too: repeat the last value
+        return times.pop(0) if len(times) > 1 else times[0]
+
+    with patch.object(bc, "_utcnow", side_effect=now):
         await h.run()
     h.pause.assert_called_once_with(BID, bc.PAUSE_CLIENT_DISCONNECTED)
 
@@ -457,6 +475,78 @@ async def test_waits_for_window_or_daily_cap_before_sending():
     await h.run()
     assert h.sleeps[0] == 3600.0
     h.client.send_text.assert_awaited_once()
+
+
+# --- Lane state: when the next message goes out, and why (FleetView ETA) ---
+
+
+async def test_lane_records_each_wait_reason_and_clears_when_sending():
+    h = Harness([claimed(1), claimed(2), claimed(3)], cap_waits=[(3600.0, bc.WAIT_DAILY_CAP)])
+    await h.run()
+    # cap wait → send #1 → delay → send #2 → batch pause → send #3 → delay; exit clears.
+    assert h.reasons() == [bc.WAIT_DAILY_CAP, bc.WAIT_DELAY, bc.WAIT_BATCH_PAUSE, bc.WAIT_DELAY]
+    assert 3590 <= h.states[0][2] <= 3600
+    assert h.states[1] == ("clear",)  # claimed → sending now
+    assert h.states[-1] == ("clear",)
+
+
+async def test_lane_records_the_send_window_timelock_and_disconnect():
+    h = Harness([claimed(1)], cap_waits=[60.0])
+    h.client.get_reachout_timelock.side_effect = [
+        ReachoutTimelock(active=True, ends_at=bc._utcnow() + timedelta(hours=1)),
+        ReachoutTimelock(active=False),
+        ReachoutTimelock(active=False),
+    ]
+    h.client.send_text.side_effect = [WhatsAppNotConnectedError("down"), OK]
+    h.queue.append(h.queue[0])  # released, picked again
+    await h.run()
+    assert h.reasons()[:3] == [bc.WAIT_SEND_WINDOW, bc.WAIT_TIMELOCK, bc.WAIT_DISCONNECTED]
+
+
+async def test_restarted_lane_records_a_batch_pause_or_a_delay():
+    now = bc._utcnow()
+    h = Harness([claimed(1)], recent_sends=[now - timedelta(seconds=5), now])
+    await h.run()
+    assert h.reasons()[0] == bc.WAIT_BATCH_PAUSE
+    h = Harness([claimed(1)], recent_sends=[now - timedelta(seconds=5)])
+    await h.run()
+    assert h.reasons()[0] == bc.WAIT_DELAY
+
+
+@pytest.mark.parametrize("platform", ["cloud", "telegram"])
+async def test_fast_lanes_do_not_record_their_short_gaps(platform):
+    h = Harness([claimed(1), claimed(2)])
+    await h.run(platform=platform)
+    assert h.reasons() == []
+
+
+async def test_a_failing_lane_state_write_never_stops_the_send():
+    h = Harness([claimed(1)], cap_waits=[60.0])
+    h._set_state = MagicMock(side_effect=RuntimeError("db down"))
+    await h.run()
+    h.client.send_text.assert_awaited_once()
+
+
+async def test_a_recipients_own_text_is_sent_and_saved():
+    own = claimed(1)
+    own = bc._Claimed(own.id, own.user_id, own.address, own.attempts, "Own text\n\nfooter")
+    h = Harness([own])
+    await h.run(platform="telegram")
+    assert h.client.send_text.await_args.args[1] == "Own text\n\nfooter"
+    assert h.outcomes()[0][1]["history_text"] == "Own text\n\nfooter"
+
+
+def test_baileys_wait_names_the_longer_gate():
+    with (
+        patch.object(bc, "_window_wait_seconds", return_value=100.0),
+        patch.object(bc, "_baileys_cap_wait_seconds", return_value=50.0),
+    ):
+        assert bc._baileys_wait() == (100.0, bc.WAIT_SEND_WINDOW)
+    with (
+        patch.object(bc, "_window_wait_seconds", return_value=0.0),
+        patch.object(bc, "_baileys_cap_wait_seconds", return_value=50.0),
+    ):
+        assert bc._baileys_wait() == (50.0, bc.WAIT_DAILY_CAP)
 
 
 # --- run_broadcast (supervisor) -------------------------------------------

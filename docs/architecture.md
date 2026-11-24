@@ -28,7 +28,7 @@ Every saved user message keeps the platform's own id in `conversation_messages.w
 
 ## Database tables
 
-17 tables: models in `database.py` (users, conversation_messages, conversation_preferences, core_memories, bot_prompt (legacy, unread), bot_prompt_overrides, runtime_settings, broadcasts, broadcast_recipients, bug_reports, api_keys, scheduled_tasks, task_runs, group_topics, group_topic_cursors) and `kb_models.py` (knowledge_base_documents, knowledge_base_chunks).
+23 tables: models in `database.py` (users, conversation_messages, conversation_preferences, core_memories, bot_prompt (legacy, unread), bot_prompt_overrides, runtime_settings, broadcasts, broadcast_recipients, broadcast_lane_states, broadcast_recipient_texts, scheduled_sends, scheduled_send_runs, scheduled_send_run_texts, scheduled_send_opt_outs, bug_reports, api_keys, scheduled_tasks, task_runs, group_topics, group_topic_cursors) and `kb_models.py` (knowledge_base_documents, knowledge_base_chunks).
 
 ## Job pipeline history
 

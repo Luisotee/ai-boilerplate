@@ -41,6 +41,7 @@ Baileys `messages.upsert` (`whatsapp.ts`) → a handler in `handlers/` → `hand
 | File | Covers |
 |------|--------|
 | `packages/ai-api/src/ai_api/services/CLAUDE.md` | Broadcasts (`/admin/broadcasts`), bug reports (`/admin/bug-reports`), scheduled tasks, cross-platform identity (`/link`, `/linkphone`, `web:` keys) |
+| `packages/ai-api/src/ai_api/scheduled_sends/CLAUDE.md` | Envios programados (`/admin/scheduled-sends`), delivered as broadcasts |
 | `packages/ai-api/docs/openai-api.md` | OpenAI-compatible `/v1` API, per-user keys, terminal chat |
 | `packages/ai-api/src/ai_api/agent/CLAUDE.md` | DeepSeek → Gemini model chain, `GuardedModel`, fallback reply, chat-history and shared-group tools |
 | `packages/ai-api/src/ai_api/streams/CLAUDE.md` | PDF queue; chat streams: dedup, crash recovery, late-reply push, burst merging |
@@ -102,7 +103,7 @@ cd packages/ai-api && uv run pytest tests/mocked/test_model_chain_fallback.py -k
 ## Database
 
 - **PostgreSQL + pgvector** (3072-dim vectors via `gemini-embedding-001`)
-- **17 tables**, models in `database.py` and `kb_models.py` (list in `docs/architecture.md`)
+- **23 tables**, models in `database.py` and `kb_models.py` (list in `docs/architecture.md`)
 - **No Alembic migrations.** SQLAlchemy `create_all()` only creates missing *tables*, never new columns. Column/index changes ship as hand-written, idempotent (`IF NOT EXISTS`) SQL in `packages/ai-api/docs/migrations/<YYYY-MM-DD>-<name>.sql`, named so they match what `create_all()` emits on a fresh DB. Apply them to an existing Docker deployment BEFORE rolling out the code that needs them (safe to re-run):
   ```bash
   docker compose exec -T postgres psql -U aiagent -d aiagent \
@@ -111,7 +112,7 @@ cd packages/ai-api && uv run pytest tests/mocked/test_model_chain_fallback.py -k
   Run it in the checkout, so it can't hit another bot's database on a shared host. Notes and the list of current migrations: `packages/ai-api/docs/migrations/README.md`
 - **Knowledge-base dedup**: `knowledge_base_documents.file_hash`; an upload of content already in the KB gets **409**. The upload routes are `@limiter.exempt` (for `./upload-kb.sh <dir>`) but stay behind `X-API-Key`. Details: `packages/ai-api/docs/media-and-kb.md`
 - **Core memories**: one markdown document per user (`core_memories`), injected by the `inject_core_memory` instructions hook in `agent/core.py`. The AI edits it with the `memory` tool's atomic add/patch/remove ops; its header shows `N/M chars`. No show/clear tool: the document is in every run and `/memories [clear]` covers users
-- **Live prompt, code wins**: the base prompt is the code sections in `agent/prompt.py`. An operator override (`bot_prompt_overrides`, per section or whole) applies only while the code default it edited is unchanged, else it is kept `stale` and the code applies; the legacy `bot_prompt` table is unread. Register instructions functions only with `@instruction_hook(title)` (`GET /admin/prompt/effective` renders that list), never `system_prompt`. Details: `packages/ai-api/docs/admin-api.md`
+- **Live prompt, code wins**: the base prompt is the code sections in `agent/prompt.py`; an operator override (`bot_prompt_overrides`) applies only while the code default it edited is unchanged (`bot_prompt` is unread). Register instructions functions only with `@instruction_hook(title)`. Details: `packages/ai-api/docs/admin-api.md`
 - **PDFs**: conversation-scoped PDFs expire after 24h (`CONVERSATION_PDF_TTL_HOURS`; cleanup runs in the `main.py` lifespan). Every PDF goes through the Redis Stream `stream:pdf_processing`, parsed by `streams/pdf_consumer.py` in the stream worker, never in the API process or inline in a chat job. Queue details: `packages/ai-api/src/ai_api/streams/CLAUDE.md`
 - **PDF parsing and STT**: `PDF_PARSER` (`auto` | `llamaparse` | `docling`; Docling is an optional extra) and `STT_PROVIDER` (`auto` | `groq` | `whisper`; self-hosted via `docker compose --profile whisper up -d`). Fallbacks: `packages/ai-api/docs/media-and-kb.md`
 

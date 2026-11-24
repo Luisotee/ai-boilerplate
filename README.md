@@ -78,6 +78,7 @@ A production-ready AI agent system that brings conversational AI to WhatsApp wit
 | `/linkphone` | Telegram only: link by sharing your phone number (must match your WhatsApp number) |
 | `/broadcast` | Show whether operator announcements are on |
 | `/broadcast off\|on` | Stop / resume operator announcements (in groups: admins only) |
+| `/broadcast off\|on <number>` | Stop / resume only one scheduled message (its number is in its footer) |
 | `/unlink` | Unlink your accounts |
 | `/help` | Show available commands |
 

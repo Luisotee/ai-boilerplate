@@ -141,6 +141,7 @@ def _get_help_text() -> str:
 /broadcast - Show whether update announcements are on
 /broadcast off - Stop receiving update announcements (groups: admins only)
 /broadcast on - Receive update announcements again (groups: admins only)
+/broadcast off [number] - Stop only one scheduled message (its number is in its footer)
 /link - Get a code to link this account to your other platform (WhatsApp ↔ Telegram)
 /link [code] - Enter a code from the other platform to complete linking
 /linkphone - (Telegram) Link by sharing your phone number instead of a code
@@ -392,17 +393,27 @@ def _handle_broadcast_command(
     is_group: bool = False,
     is_group_admin: bool | None = None,
 ) -> str:
-    """Handle /broadcast [on|off].
+    """Handle /broadcast [on|off] [number].
 
     Not in ADMIN_ONLY_COMMANDS: anyone may read the state. In a group only an
     admin may change it (fail closed: anything but an explicit True is refused),
-    since the flag is the whole group's.
+    since the flag is the whole group's. With a number it stops or restarts only
+    that scheduled send (``scheduled_sends/opt_out.py``); without one it is the
+    global switch, which also stops every scheduled send.
     """
+    from .scheduled_sends.opt_out import describe_subscriptions
+
     action = parts[1].lower() if len(parts) >= 2 else ""
+    # A third token is a send number only when it is ASCII digits; anything else
+    # (a trailing @mention, "please", "²") is ignored and the global switch runs.
+    third = parts[2] if len(parts) > 2 else ""
+    number_arg = int(third) if third.isascii() and third.isdigit() else None
     subject = "This group" if is_group else "You"
     if action in ("on", "off"):
         if is_group and is_group_admin is not True:
             return "Only group admins can use this command."
+        if number_arg is not None:
+            return _set_one_send(db, user_id, number_arg, action == "on", subject)
         previous = set_broadcast_opt_out(db, user_id, opt_out=action == "off")
         if previous is None:
             return "Sorry, I couldn't update that setting. Please try again."
@@ -419,10 +430,36 @@ def _handle_broadcast_command(
     user = db.get(User, user_id)
     status = "off" if user is not None and user.broadcast_opt_out else "on"
     whose = " for this group" if is_group else ""
-    return (
+    text = (
         f"Update announcements are currently {status}{whose}. "
         "Use '/broadcast on' or '/broadcast off'."
     )
+    listing = describe_subscriptions(db, user) if user is not None else ""
+    return f"{text}\n\n{listing}" if listing else text
+
+
+def _set_one_send(db: Session, user_id: str, number: int, subscribed: bool, subject: str) -> str:
+    """``/broadcast off|on <number>``: one scheduled send for this chat."""
+    from .scheduled_sends.opt_out import find_send, set_send_opt_out
+
+    user = db.get(User, user_id)
+    if user is None:
+        return "Sorry, I couldn't update that setting. Please try again."
+    send = find_send(db, number)
+    if send is None:
+        return f"There is no scheduled message {number}. Send /broadcast to see the list."
+    if send.status == "finished":
+        return f"Scheduled message {send.number} ({send.name}) has ended; nothing more will come."
+    set_send_opt_out(db, send, user, opt_out=not subscribed)
+    if not subscribed:
+        return (
+            f"Done. {subject} won't receive scheduled message {send.number} ({send.name}) "
+            f"anymore. Send /broadcast on {send.number} to get it again."
+        )
+    reply = f"Done. {subject} will receive scheduled message {send.number} ({send.name}) again."
+    if user.broadcast_opt_out:
+        reply += " Announcements are off overall: send /broadcast on to receive them."
+    return reply
 
 
 def _handle_memories_command(db: Session, user_id: str, parts: list[str]) -> str:

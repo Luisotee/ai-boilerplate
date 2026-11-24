@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from ..database import User, is_telegram_jid
 from ..logger import logger
+from ..scheduled_sends.opt_out import move_opt_outs
 from ..surfaces import WEB_JID_PREFIX, is_cli_jid
 from .api_keys import move_api_keys
 from .bug_reports import scrub_user_reports
@@ -213,6 +214,8 @@ async def consume_link_code(
         # A web key linked to the Telegram row follows it (else the FK cascade
         # would delete the key with the orphan).
         move_api_keys(db, telegram_user.id, whatsapp_user.id)
+        # Per-send opt-outs follow too (the cascade would drop them: a re-subscribe).
+        move_opt_outs(db, telegram_user.id, whatsapp_user.id)
         db.delete(telegram_user)  # cascade clears messages/prefs/core_memory
         db.commit()
     except Exception as exc:
@@ -261,6 +264,7 @@ def _merge_web_user(db: Session, web_user: User, kept: User) -> LinkResult:
         kept.broadcast_opt_out = bool(kept.broadcast_opt_out or web_user.broadcast_opt_out)
         scrub_user_reports(db, web_user.id)
         move_api_keys(db, web_user.id, kept.id)
+        move_opt_outs(db, web_user.id, kept.id)
         db.delete(web_user)  # cascade clears messages/prefs/core_memory
         db.commit()
     except Exception as exc:
