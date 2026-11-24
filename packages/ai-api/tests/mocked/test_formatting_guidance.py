@@ -43,9 +43,12 @@ class TestFormattingGuidance:
             recent_message_ids=[],
         )
         with (
-            patch("ai_api.agent.core.get_active_prompt", return_value="CUSTOM ADMIN PROMPT"),
             patch(
-                "ai_api.agent.core.get_or_create_core_memory",
+                "ai_api.agent.core.load_resolved_prompt",
+                return_value=MagicMock(text="CUSTOM ADMIN PROMPT"),
+            ),
+            patch(
+                "ai_api.agent.core.get_core_memory",
                 return_value=MagicMock(content=""),
             ),
             agent.override(model=TestModel(call_tools=[])),

@@ -197,8 +197,8 @@ def stubbed_environment(inputs: EvalInput) -> Iterator[SimpleNamespace]:
     memory = SimpleNamespace(content=inputs.memory, previous_content=None, content_trusted=True)
     prefs = SimpleNamespace(tts_enabled=False, tts_language="pt", stt_language=None)
     targets = {
-        "ai_api.agent.core.get_active_prompt": MagicMock(return_value=None),
-        "ai_api.agent.core.get_or_create_core_memory": MagicMock(return_value=memory),
+        "ai_api.agent.prompt.get_prompt_overrides": MagicMock(return_value={}),
+        "ai_api.agent.core.get_core_memory": MagicMock(return_value=memory),
         "ai_api.agent.tools.memory.get_or_create_core_memory": MagicMock(return_value=memory),
         "ai_api.agent.tools.settings.get_or_create_preferences": MagicMock(return_value=prefs),
         "ai_api.agent.tools.settings.handle_clean_command": MagicMock(

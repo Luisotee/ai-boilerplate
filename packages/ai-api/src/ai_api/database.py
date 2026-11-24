@@ -4,6 +4,7 @@ from enum import Enum
 
 from pgvector.sqlalchemy import HALFVEC, Vector
 from sqlalchemy import (
+    JSON,
     Boolean,
     Column,
     DateTime,
@@ -19,6 +20,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, sessionmaker
 
@@ -180,16 +182,37 @@ class CoreMemory(Base):
 
 
 class BotPrompt(Base):
-    """Single active system-prompt override for this bot.
+    """Legacy whole-prompt override, no longer read by anything.
 
-    At most one row exists. When absent (or empty), the agent falls back to the
-    hardcoded ``DEFAULT_SYSTEM_PROMPT`` in ``agent/core.py``.
+    It replaced the code default wholesale, so a saved copy of the default hid
+    every later change to it. Kept as an archive (the API warns at startup when
+    it holds text); overrides now live in ``bot_prompt_overrides``
+    (``agent/prompt.py``).
     """
 
     __tablename__ = "bot_prompt"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     content = Column(Text, nullable=False, default="")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class BotPromptOverride(Base):
+    """An operator's override of one base-prompt section (``agent/prompt.py``).
+
+    ``key`` is a section key, or ``"all"`` for a whole-prompt override (the legacy
+    ``PUT /admin/prompt``). ``base_hash`` is the sha256 of the code default the
+    operator edited; once the code default changes the override is stale and the
+    code text applies again, so a code change can never be hidden by a DB copy.
+    A new table, so ``create_all()`` creates it.
+    """
+
+    __tablename__ = "bot_prompt_overrides"
+
+    key = Column(String, primary_key=True)
+    content = Column(Text, nullable=False, default="")
+    base_hash = Column(String(64), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -271,6 +294,165 @@ class BroadcastRecipient(Base):
     attempt_started_at = Column(DateTime, nullable=True)
 
     broadcast = relationship("Broadcast", back_populates="recipients")
+
+
+class BroadcastLaneState(Base):
+    """What one platform lane of a running broadcast is waiting for, and until when.
+
+    Written by ``streams/broadcast_consumer.py`` ``run_lane`` right before each
+    wait and deleted when it starts a send or exits, so FleetView can show
+    "next message ~09:00 · waiting for the send window" (``waiting_for`` is the
+    closed ``BroadcastWaitReason`` enum in ``schemas.py``). No row = sending,
+    finished, or not started. A new table, so ``create_all()`` creates it.
+    """
+
+    __tablename__ = "broadcast_lane_states"
+
+    broadcast_id = Column(
+        UUID(as_uuid=True), ForeignKey("broadcasts.id", ondelete="CASCADE"), primary_key=True
+    )
+    platform = Column(String(16), primary_key=True)
+    next_send_at = Column(DateTime, nullable=False)
+    waiting_for = Column(String(16), nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+#: JSONB on Postgres, plain JSON elsewhere (the SQLite-backed tests create these tables).
+_JSON = JSON().with_variant(JSONB(), "postgresql")
+
+
+class ScheduledSend(Base):
+    """An operator's scheduled send ("Envio programado"): a fixed text or an agent prompt.
+
+    Managed through ``/admin/scheduled-sends`` (``routes/scheduled_sends.py``),
+    fired by the stream worker (``streams/scheduled_send_scheduler.py``). Each
+    run becomes an ordinary ``broadcasts`` row, so delivery, pacing, the shared
+    daily cap and the never-send-twice rules are the broadcast pipeline's.
+    ``status``, ``content_type``, ``audience`` and the schedule ``kind`` are
+    closed enums in FleetView. ``number`` is the stable code people use in
+    ``/broadcast off <number>``; rows are cancelled, never deleted, so it is
+    never reused. Not the chat-created ``scheduled_tasks``.
+    """
+
+    __tablename__ = "scheduled_sends"
+    __table_args__ = (
+        Index(
+            "ix_scheduled_sends_due",
+            "next_run_at",
+            postgresql_where=text("status = 'active'"),
+        ),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    number = Column(Integer, unique=True, nullable=False)
+    name = Column(String(120), nullable=False)
+    content_type = Column(String(16), nullable=False)  # 'text' | 'prompt'
+    content = Column(Text, nullable=False)
+    audience = Column(String(16), nullable=False)  # 'private' | 'groups' | 'all' | 'chats'
+    chat_jids = Column(_JSON, nullable=True)  # audience 'chats' only
+    # Always NULL here: the template has no region concept (FleetView's field).
+    regions = Column(_JSON, nullable=True)
+    platforms = Column(_JSON, nullable=True)  # NULL = every client reachable at run time
+    schedule = Column(_JSON, nullable=False)  # as sent: {kind, run_at | time, weekdays, …}
+    run_at = Column(DateTime, nullable=True)  # compiled one-shot (naive UTC)
+    cron_expr = Column(String(100), nullable=True)  # compiled recurring, in ``timezone``
+    timezone = Column(String(64), nullable=False)
+    # 'active' | 'paused' | 'finished' | 'cancelled'
+    status = Column(String(16), nullable=False, index=True, default="active")
+    next_run_at = Column(DateTime, nullable=True)  # naive UTC; NULL = nothing armed
+    created_by = Column(String(120), nullable=True)
+    idempotency_key = Column(String(128), unique=True, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class ScheduledSendRun(Base):
+    """One firing of a scheduled send. Its delivery is the linked broadcast.
+
+    UNIQUE(scheduled_send_id, scheduled_for): one run per slot (a manual
+    "send now" uses the current minute), so two schedulers or a double click
+    can't fire it twice. ``broadcast_id`` is set in the same transaction that
+    creates the broadcast, by a conditional UPDATE on ``status = 'preparing'``
+    and this worker's ``claimed_at``: a run makes one broadcast at most.
+    """
+
+    __tablename__ = "scheduled_send_runs"
+    __table_args__ = (
+        UniqueConstraint("scheduled_send_id", "scheduled_for", name="uq_scheduled_send_runs_slot"),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    scheduled_send_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("scheduled_sends.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    scheduled_for = Column(DateTime, nullable=False)  # the slot (naive UTC)
+    trigger = Column(String(16), nullable=False, default="schedule")  # 'schedule' | 'manual'
+    # Stored: 'preparing' | 'delivering' | 'completed' | 'failed' | 'missed' | 'cancelled'.
+    # A 'delivering' run's reported status follows its broadcast (routes/scheduled_sends.py).
+    status = Column(String(16), nullable=False, index=True, default="preparing")
+    error = Column(String(64), nullable=True)
+    claimed_at = Column(DateTime, nullable=True)  # the preparing worker's claim
+    broadcast_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("broadcasts.id", ondelete="SET NULL"),
+        unique=True,
+        nullable=True,
+    )
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+
+
+class ScheduledSendRunText(Base):
+    """What one agent run of a prompt send produced (or why it failed), per chat type."""
+
+    __tablename__ = "scheduled_send_run_texts"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    run_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("scheduled_send_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    region = Column(String, nullable=True)  # always NULL here (no regions)
+    chat_type = Column(String(16), nullable=False)  # 'group' | 'private'
+    text = Column(Text, nullable=True)
+    error = Column(String(200), nullable=True)
+
+
+class BroadcastRecipientText(Base):
+    """A recipient's own text (a prompt send's version for its chat type), instead of the broadcast's."""
+
+    __tablename__ = "broadcast_recipient_texts"
+
+    recipient_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("broadcast_recipients.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    text = Column(Text, nullable=False)
+
+
+class ScheduledSendOptOut(Base):
+    """A chat that stopped one scheduled send (``/broadcast off <number>``).
+
+    Keyed on ``users.id``, which ``/clean`` keeps, so a clean never re-subscribes.
+    The global ``users.broadcast_opt_out`` still stops every send.
+    """
+
+    __tablename__ = "scheduled_send_opt_outs"
+
+    scheduled_send_id = Column(
+        UUID(as_uuid=True), ForeignKey("scheduled_sends.id", ondelete="CASCADE"), primary_key=True
+    )
+    user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 class BugReport(Base):
@@ -437,6 +619,15 @@ class ScheduledTask(Base):
     # on Telegram). Under GROUP_GATING=membership a group task sends only while
     # this sender is still whitelisted.
     created_by_jid = Column(String, nullable=True)
+    # Set only for a task scheduled into a GROUP from a private chat: the private
+    # requester's row. Before every run the scheduler re-checks live that this
+    # person is still a member and an admin of the group (else the task is
+    # disabled). SET NULL keeps the task when a row is deleted, so every path
+    # that deletes a users row must first re-point (merges) or disable these
+    # tasks; a NULL here on a group-from-private task is never "unrestricted".
+    created_from_user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     kind = Column(String(16), nullable=False)  # 'reminder' | 'agent'
     text = Column(Text, nullable=False)  # reminder text, or the agent run's prompt
     schedule = Column(String(200), nullable=False)  # normalised human description
@@ -1024,37 +1215,48 @@ def get_or_create_core_memory(db, user_id: str) -> CoreMemory:
     return mem
 
 
-# --- Bot prompt (single active row) ---
+# --- Legacy bot_prompt (unread; see BotPrompt) ---
 
 
-def get_bot_prompt_row(db) -> BotPrompt | None:
-    """Return the single bot-prompt row, or None if no override is set."""
-    return db.query(BotPrompt).first()
+def custom_legacy_prompt_rows(db) -> list[BotPrompt]:
+    """``bot_prompt`` rows holding text: text nothing applies any more."""
+    return [row for row in db.query(BotPrompt).all() if (row.content or "").strip()]
 
 
-def get_active_prompt(db) -> str | None:
-    """Return the active prompt override content, or None to use the default."""
-    row = db.query(BotPrompt).first()
-    return row.content if row and row.content else None
+# --- Prompt section overrides (agent/prompt.py) ---
 
 
-def set_active_prompt(db, content: str) -> BotPrompt:
-    """Upsert the single bot-prompt row."""
-    row = db.query(BotPrompt).first()
-    if row is None:
-        row = BotPrompt(content=content)
-        db.add(row)
-    else:
-        row.content = content
+def get_prompt_overrides(db) -> dict[str, BotPromptOverride]:
+    """Every stored prompt override, by key."""
+    return {row.key: row for row in db.query(BotPromptOverride).all()}
+
+
+def set_prompt_override(db, key: str, content: str, base_hash: str) -> BotPromptOverride:
+    """Upsert the override of ``key``, based on the code default hashed as ``base_hash``."""
+    now = datetime.utcnow()
+    stmt = pg_insert(BotPromptOverride).values(
+        key=key, content=content, base_hash=base_hash, created_at=now, updated_at=now
+    )
+    # One statement, so two first saves of the same key can't race into an IntegrityError.
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[BotPromptOverride.key],
+        set_={"content": content, "base_hash": base_hash, "updated_at": now},
+    )
+    db.execute(stmt)
     db.commit()
-    db.refresh(row)
-    return row
+    return db.get(BotPromptOverride, key, populate_existing=True)
 
 
-def clear_active_prompt(db) -> None:
-    """Delete the prompt override, reverting the agent to its default."""
-    db.query(BotPrompt).delete()
+def delete_prompt_override(db, key: str) -> bool:
+    """Delete the override of ``key``; True when one existed."""
+    deleted = db.query(BotPromptOverride).filter(BotPromptOverride.key == key).delete()
     db.commit()
+    return bool(deleted)
+
+
+def get_core_memory(db, user_id: str) -> CoreMemory | None:
+    """The chat's core memory, without creating one (instructions and previews read only)."""
+    return db.query(CoreMemory).filter(CoreMemory.user_id == user_id).first()
 
 
 # --- Runtime settings overlay ---

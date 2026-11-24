@@ -16,6 +16,7 @@ export const SharedGroupsRequestSchema = z
 export const SharedGroupSchema = z.object({
   groupJid: z.string().describe('Group JID (…@g.us)'),
   subject: z.string().describe('Group name/subject'),
+  isAdmin: z.boolean().describe('The requester is an admin of this group (additive)'),
 });
 
 export const SharedGroupsResponseSchema = z.object({

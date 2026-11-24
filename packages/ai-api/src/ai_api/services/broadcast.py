@@ -101,6 +101,8 @@ class BroadcastPlan:
     no_selected_platform: int = 0
     #: Extra rows of a person who already has a recipient (never sent).
     duplicates: int = 0
+    #: People who stopped this one scheduled send (``/broadcast off <number>``).
+    opted_out_campaign: int = 0
 
     def pending(self) -> list[RecipientPlan]:
         return [r for r in self.recipients if r.skip_reason is None]
@@ -273,14 +275,22 @@ def plan_broadcast(
     now: datetime,
     *,
     cloud_deployed: bool = False,
+    campaign_opt_outs: frozenset | set = frozenset(),
 ) -> BroadcastPlan:
-    """Turn audience rows into the recipient snapshot (pure)."""
+    """Turn audience rows into the recipient snapshot (pure).
+
+    ``campaign_opt_outs``: ``users.id`` values that stopped this scheduled send;
+    like the global flag, one opted-out row opts the whole person out.
+    """
     selected = tuple(selected)
     plan = BroadcastPlan()
     for person in _people(users):
         plan.duplicates += len(person) - 1
         if any(row.broadcast_opt_out for row in person):
             plan.opted_out += 1
+            continue
+        if campaign_opt_outs and any(row.id in campaign_opt_outs for row in person):
+            plan.opted_out_campaign += 1
             continue
         user = person[0]
         route, reason = choose_route(user, selected, allowed, now, cloud_deployed=cloud_deployed)

@@ -1,4 +1,5 @@
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 import httpx
@@ -7,7 +8,7 @@ from pydantic_ai.models import Model
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..database import get_active_prompt, get_or_create_core_memory
+from ..database import get_core_memory
 from ..embeddings import EmbeddingService
 from ..logger import logger
 from ..reply_media import ReplyImage
@@ -16,6 +17,7 @@ from ..services.shared_groups import shared_group_tools_available
 from ..surfaces import renders_markdown, surface_of
 from ..whatsapp import WhatsAppClient
 from .model_chain import build_model
+from .prompt import DEFAULT_SYSTEM_PROMPT, load_resolved_prompt  # noqa: F401 (re-export)
 
 
 @dataclass
@@ -107,6 +109,32 @@ agent = Agent(
 )
 
 
+@dataclass(frozen=True)
+class InstructionHook:
+    """One registered instructions function and its label for FleetView."""
+
+    func: Callable[[RunContext[AgentDeps]], Awaitable[str]]
+    title: str
+
+
+#: Every instructions function, in the order the model gets them. GET
+#: /admin/prompt/effective renders exactly this list, so register a hook ONLY
+#: through ``instruction_hook``; test_effective_prompt.py fails on a bare
+#: ``agent.instructions`` decorator.
+INSTRUCTION_HOOKS: list[InstructionHook] = []
+
+
+def instruction_hook(title: str):
+    """``agent.instructions`` that also records the hook for the effective-prompt view."""
+
+    def register(func):
+        agent.instructions(func)
+        INSTRUCTION_HOOKS.append(InstructionHook(func, title))
+        return func
+
+    return register
+
+
 def build_runtime_model() -> Model:
     """Build a Model for this run from the current runtime_config values.
 
@@ -124,43 +152,14 @@ def build_runtime_model() -> Model:
     )
 
 
-# Default system prompt — used when no /admin override is stored in the DB.
-# The active prompt is loaded per-run via the `base_system_prompt` instructions
-# function below; editing it through the /admin API does not require a restart.
-DEFAULT_SYSTEM_PROMPT = """You are a helpful AI assistant chatting on WhatsApp and Telegram.
-Be concise, friendly and helpful; keep replies brief and to the point.
-If you don't know something, say so clearly.
-
-Your tools are described in their own definitions. Rules for choosing between them:
-- Asking to stop or start audio/voice replies, to change their language or the
-  transcription language, or to stop or resume update messages is a settings change:
-  call the settings tool. Deleting data: clean_user_data. You cannot do either by
-  promising it; never say it is done without calling the tool.
-- clean_user_data with level "data" or "all": ALWAYS say what will be deleted and wait
-  for the user's yes first, however explicit the request. "messages": confirm unless
-  the request is explicit.
-- Recall: use what is already in the conversation first. For "what did we talk about
-  yesterday" or "the last 50 messages", use get_chat_history (this chat, in order). For
-  a topic mentioned some time ago, use search_conversation_history. For questions about
-  uploaded documents, use search_knowledge_base and cite document name, page and section.
-- Current facts (news, prices, today's events): web_search. Stable facts and
-  definitions: your own knowledge or wikipedia_lookup. A link the user sent: fetch_website.
-- Arithmetic: calculate. Units: convert_units. Weather: get_weather.
-- No tools for greetings, chitchat, or questions the conversation already answers.
-- send_whatsapp_message is only for an out-of-band note before a slow tool finishes
-  ("one moment, checking..."); split a normal reply with --- instead. The send tools
-  only ever reach the current chat.
-
-Natural message bursts:
-Multi-part replies (intro + answer, answer + follow-up question, distinct thoughts)
-feel more human when split. Put --- on its own line between parts and each part is
-sent as a separate message. Aim for 2-3 bursts. Keep lists, code blocks and
-single-thought answers as one message; never put --- inside a list or code block."""
+# The base system prompt is built from named sections in agent/prompt.py, with
+# the operator's fresh overrides applied (re-exported here for older imports).
 
 
-# Tools this codebase renamed or merged. A stored /admin prompt (bot_prompt)
-# written for them still names them, and the model then calls tools that don't
-# exist; warn_on_removed_tools logs it so the operator can edit the prompt.
+# Tools this codebase renamed or merged. A prompt override saved via /admin
+# (bot_prompt_overrides) written for them still names them, and the model then
+# calls tools that don't exist; warn_on_removed_tools logs it so the operator
+# can edit the override.
 REMOVED_TOOLS = {
     "update_core_memory": "memory",
     "get_user_settings": "settings",
@@ -183,20 +182,22 @@ def warn_on_removed_tools(prompt: str | None) -> None:
     if named:
         renames = ", ".join(f"{old} -> {REMOVED_TOOLS[old]}" for old in named)
         logger.warning(
-            f"⚠️ The stored system prompt (bot_prompt) names removed tools: {renames}. "
-            "Edit it via PUT /admin/prompt, or the model will call tools that don't exist."
+            f"⚠️ A stored prompt override names removed tools: {renames}. Edit it in "
+            "FleetView (/admin/prompt or /admin/prompt/sections), or the model will call "
+            "tools that don't exist."
         )
 
 
-@agent.instructions
+@instruction_hook("Base prompt")
 async def base_system_prompt(ctx: RunContext[AgentDeps]) -> str:
-    """Load the active system prompt from the DB, falling back to the default.
+    """The base prompt: the code sections with the operator's fresh overrides.
 
-    Read uncached on every run, so an /admin prompt edit takes effect on the
-    next message without a restart. Uses `instructions` (not `system_prompt`)
-    so a changed prompt is never shadowed by one retained in message history.
+    Read uncached on every run, so an /admin edit takes effect on the next
+    message without a restart; a stale override is ignored (agent/prompt.py).
+    Uses `instructions` (not `system_prompt`) so a changed prompt is never
+    shadowed by one retained in message history.
     """
-    return get_active_prompt(ctx.deps.db) or DEFAULT_SYSTEM_PROMPT
+    return load_resolved_prompt(ctx.deps.db).text
 
 
 _FORMATTING_GUIDANCE = (
@@ -223,13 +224,13 @@ _MARKDOWN_FORMATTING_GUIDANCE = (
 )
 
 
-@agent.instructions
+@instruction_hook("Formatting")
 async def formatting_guidance(ctx: RunContext[AgentDeps]) -> str:
     """Chat-markup rule appended to the system prompt on every run.
 
-    Lives here rather than in ``DEFAULT_SYSTEM_PROMPT`` because an ``/admin``
-    prompt override (``bot_prompt`` row) replaces the default prompt wholesale,
-    and this rule must survive that. It is the same for every client: WhatsApp
+    Lives here rather than in the base prompt because an operator can override
+    any section of it, or all of it (``PUT /admin/prompt``), and this rule must
+    survive that. It is the same for every client: WhatsApp
     renders this markup natively and the Telegram client converts it to
     Telegram HTML on the way out. ``formatting.markdown_to_whatsapp`` is the
     deterministic backstop for when the model ignores it anyway. The web
@@ -252,12 +253,12 @@ _LANGUAGE_GUIDANCE = (
 )
 
 
-@agent.instructions
+@instruction_hook("Language")
 async def language_guidance(ctx: RunContext[AgentDeps]) -> str:
     """Reply-language rule appended to the system prompt on every run.
 
     An instructions hook, like ``formatting_guidance``, so an ``/admin`` prompt
-    override (which replaces ``DEFAULT_SYSTEM_PROMPT`` wholesale) can't drop it.
+    override (of a section, or of the whole base prompt) can't drop it.
     The default prompt and every tool reply are in English while most users
     write Portuguese, so without it the model may drift to English.
     """
@@ -280,11 +281,11 @@ _SHARED_GROUP_GUIDANCE = (
 )
 
 
-@agent.instructions
+@instruction_hook("Shared groups")
 async def shared_group_guidance(ctx: RunContext[AgentDeps]) -> str:
     """Describe the shared-group tools — only where the model has them.
 
-    An instructions hook (not part of ``DEFAULT_SYSTEM_PROMPT``) so it follows
+    An instructions hook (not part of the base prompt) so it follows
     the same predicate as the tools' ``prepare`` hook (the flag, private chat,
     not Cloud API) and survives an ``/admin`` prompt override.
     """
@@ -309,7 +310,7 @@ _BUG_REPORT_GUIDANCE = (
 )
 
 
-@agent.instructions
+@instruction_hook("Bug reports")
 async def bug_report_guidance(ctx: RunContext[AgentDeps]) -> str:
     """Describe ``report_bug`` — only when bug reports are enabled.
 
@@ -319,15 +320,17 @@ async def bug_report_guidance(ctx: RunContext[AgentDeps]) -> str:
     return _BUG_REPORT_GUIDANCE if runtime_config.get("bug_reports_enabled") else ""
 
 
-@agent.instructions
+@instruction_hook("Core memory")
 async def inject_core_memory(ctx: RunContext[AgentDeps]) -> str:
     """Inject the chat's core memory document, with its size, into the instructions.
 
     Keep it the LAST instructions hook: everything above it is the same for
     every chat, so it stays a cacheable prefix (test_language_guidance.py).
     """
-    mem = get_or_create_core_memory(ctx.deps.db, ctx.deps.user_id)
-    if not mem.content:
+    # Read only: the memory tool creates the row when it first writes, and the
+    # effective-prompt preview must not write anything.
+    mem = get_core_memory(ctx.deps.db, ctx.deps.user_id)
+    if mem is None or not mem.content:
         return ""
     # The size lets the model consolidate before it hits the limit.
     max_length = runtime_config.get("core_memory_max_length")

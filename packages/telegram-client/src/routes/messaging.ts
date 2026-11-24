@@ -175,7 +175,7 @@ export async function registerMessagingRoutes(app: FastifyInstance) {
     {
       schema: {
         tags: ['Messaging'],
-        description: 'Check whether a user is currently a member of a group chat',
+        description: 'Check whether a user is currently a member (and an admin) of a group chat',
         body: GroupMemberSchema,
         response: {
           200: GroupMemberResponseSchema,
@@ -204,7 +204,8 @@ export async function registerMessagingRoutes(app: FastifyInstance) {
       }
 
       try {
-        return { is_member: await telegramApi.isChatMember(chatId, userId) };
+        const { isMember, isAdmin } = await telegramApi.chatMembership(chatId, userId);
+        return { is_member: isMember, is_admin: isAdmin };
       } catch (err) {
         // Never translate a lookup failure into "not a member" here: surfacing
         // the error keeps the decision (and its fail-closed default) in one

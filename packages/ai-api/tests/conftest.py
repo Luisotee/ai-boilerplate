@@ -6,7 +6,7 @@ any production code imports.
 """
 
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -47,3 +47,11 @@ def patch_google_provider():
     with patch("pydantic_ai.providers.google.GoogleProvider") as mock:
         mock.return_value = MagicMock()
         yield mock
+
+
+@pytest.fixture(autouse=True)
+def no_process_heartbeats():
+    """No Redis in tests: /admin/settings and /admin/processes see no live
+    heartbeats unless a test patches ``ai_api.routes.admin.read_processes``."""
+    with patch("ai_api.routes.admin.read_processes", AsyncMock(return_value=[])):
+        yield

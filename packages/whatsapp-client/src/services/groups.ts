@@ -66,16 +66,24 @@ async function anyParticipantMatches(
   meta: GroupMetadata,
   wl: Whitelist
 ): Promise<boolean> {
+  return (await matchingParticipant(sock, meta, wl)) !== null;
+}
+
+/** The first participant matching `wl` (same two passes), or null. */
+async function matchingParticipant(
+  sock: WASocket,
+  meta: GroupMetadata,
+  wl: Whitelist
+): Promise<GroupParticipant | null> {
   const participants = meta.participants ?? [];
-  if (participants.some((p) => participantIds(p).some((id) => isWhitelisted(wl, id)))) {
-    return true;
-  }
+  const direct = participants.find((p) => participantIds(p).some((id) => isWhitelisted(wl, id)));
+  if (direct) return direct;
   for (const p of participants) {
     if (p.phoneNumber || !p.id || !isLid(p.id)) continue;
     const pn = await lidToPhoneJid(sock, stripDeviceSuffix(p.id));
-    if (pn && isWhitelisted(wl, pn)) return true;
+    if (pn && isWhitelisted(wl, pn)) return p;
   }
-  return false;
+  return null;
 }
 
 /**
@@ -106,6 +114,8 @@ export interface RequesterIdentity {
 export interface SharedGroupInfo {
   groupJid: string;
   subject: string;
+  /** The requester is an admin of the group (admin or superadmin). */
+  isAdmin: boolean;
 }
 
 /**
@@ -136,8 +146,10 @@ export async function findSharedGroups(
   const groups = await getParticipatingGroups(sock);
   const shared: SharedGroupInfo[] = [];
   for (const [groupJid, meta] of Object.entries(groups)) {
-    if (await anyParticipantMatches(sock, meta, matcher)) {
-      shared.push({ groupJid, subject: meta.subject || groupJid });
+    const participant = await matchingParticipant(sock, meta, matcher);
+    if (participant) {
+      const isAdmin = participant.admin === 'admin' || participant.admin === 'superadmin';
+      shared.push({ groupJid, subject: meta.subject || groupJid, isAdmin });
     }
   }
   return shared;

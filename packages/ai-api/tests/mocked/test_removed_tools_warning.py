@@ -49,7 +49,11 @@ def test_startup_check_reads_the_stored_prompt(caplog):
 
     with (
         patch.object(main, "SessionLocal", MagicMock()),
-        patch.object(main, "get_active_prompt", return_value="use update_stt_settings"),
+        patch.object(
+            main,
+            "load_resolved_prompt",
+            return_value=MagicMock(text="use update_stt_settings"),
+        ),
         caplog.at_level(logging.WARNING, logger="ai-api"),
     ):
         main._warn_on_stale_prompt()

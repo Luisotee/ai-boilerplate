@@ -45,7 +45,7 @@ gh pr view <NUMBER> --json comments
   - Agent tools use `@agent.tool`, are imported in `agent/tools/__init__.py`, call `safe_rollback(ctx.deps.db)` in DB exception handlers, and return generic English error strings (never raw `str(e)`).
   - Chat streaming uses `run_stream_events` (never `agent.run_stream`).
   - Runtime settings only set `hot=True` in `runtime_config.py` if consumption sites read via `runtime_config.get()`.
-  - Model output passes through `formatting.markdown_to_whatsapp`; `DEFAULT_SYSTEM_PROMPT` contains no `**`.
+  - Model output passes through `formatting.markdown_to_whatsapp`; the default prompt sections (`agent/prompt.py`) contain no `**`.
   - `CORSMiddleware` remains added AFTER `APIKeyMiddleware` in `main.py`.
   - Schema changes to existing tables include idempotent SQL in `packages/ai-api/docs/migrations/<YYYY-MM-DD>-<name>.sql`.
   - Changes to `/admin/*`, `schemas.py`, `/health*`, `/knowledge-base/*`, or `runtime_config.py` do not break FleetView's closed `z.enum`s or required fields (if touched, say so and recommend the `fleetview-check` skill).

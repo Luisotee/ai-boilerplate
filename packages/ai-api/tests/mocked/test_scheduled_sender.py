@@ -16,6 +16,15 @@ from ai_api.whatsapp import WhatsAppClientError, WhatsAppNotConnectedError
 NOW = datetime(2026, 11, 9, 15, 0)
 
 
+@pytest.fixture(autouse=True)
+def _creator_ok():
+    """Tasks here are ordinary ones: the group-from-private creator check passes."""
+    with patch(
+        "ai_api.streams.scheduled_sender.creator_verdict", AsyncMock(return_value=None)
+    ) as verdict:
+        yield verdict
+
+
 def _task(**kw) -> ScheduledTask:
     defaults = dict(
         id=uuid.uuid4(),
@@ -101,6 +110,7 @@ class TestPrepare:
 
 def _send():
     return sender._Send(
+        task_id=uuid.uuid4(),
         run_id=uuid.uuid4(),
         platform="baileys",
         client_id=None,

@@ -10,8 +10,10 @@ decides who and on which platform); the stream worker's broadcast consumer
 routes here change a broadcast's status; the worker notices before its next
 send.
 
-Only one broadcast may be queued or running at a time: they share the same
-WhatsApp account and the same daily cap. That rule is enforced under a
+Only one MANUAL broadcast may be queued or running at a time: they share the
+same WhatsApp account and the same daily cap. A scheduled send's run broadcasts
+(``scheduled_sends/``) don't count: the consumer sends one broadcast at a time,
+so they and manual ones queue FIFO behind whatever is sending. That rule is enforced under a
 transaction-scoped Postgres advisory lock (``_lock_active``), so two
 concurrent creates (a double-click, two operators) or a create racing a resume
 can never both commit an active broadcast. Every status change is a
@@ -30,7 +32,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..broadcast_pacing import estimate_baileys_seconds, parse_send_window
-from ..database import Broadcast, BroadcastRecipient, User, get_db
+from ..database import (
+    Broadcast,
+    BroadcastLaneState,
+    BroadcastRecipient,
+    ScheduledSendRun,
+    User,
+    get_db,
+)
 from ..deps import limiter
 from ..logger import logger
 from ..runtime_config import runtime_config
@@ -119,12 +128,19 @@ def _plan(db: Session, audience: str, platforms: list[str], cloud_deployed: bool
 
 
 def _estimate(plan: BroadcastPlan, text_length: int = 280) -> int:
+    return estimate_seconds(
+        len([r for r in plan.pending() if r.platform == "baileys"]), text_length
+    )
+
+
+def estimate_seconds(baileys_count: int, text_length: int = 280) -> int:
+    """Rough time for the Baileys lane to send ``baileys_count`` messages at the current pacing."""
     try:
         window = parse_send_window(runtime_config.get("broadcast_send_window"))
     except ValueError:
         window = None
     return estimate_baileys_seconds(
-        len([r for r in plan.pending() if r.platform == "baileys"]),
+        baileys_count,
         min_delay=runtime_config.get("broadcast_min_delay_seconds"),
         max_delay=runtime_config.get("broadcast_max_delay_seconds"),
         batch_size=runtime_config.get("broadcast_batch_size"),
@@ -160,7 +176,36 @@ def _count_rows(db: Session, broadcast_ids: list) -> dict:
     return grouped
 
 
-def _payload(broadcast: Broadcast, rows) -> BroadcastResponse:
+def _lane_states(db: Session, broadcasts: list[Broadcast]) -> dict:
+    """``(broadcast_id, platform) -> BroadcastLaneState`` for the RUNNING broadcasts only.
+
+    A row left behind by a worker that died mid-wait must not show an ETA on a
+    paused, completed or cancelled broadcast.
+    """
+    running = [b.id for b in broadcasts if b.status == "running"]
+    if not running:
+        return {}
+    rows = db.query(BroadcastLaneState).filter(BroadcastLaneState.broadcast_id.in_(running)).all()
+    return {(row.broadcast_id, row.platform): row for row in rows}
+
+
+def _run_links(db: Session, broadcast_ids: list) -> dict:
+    """``broadcast_id -> (scheduled_send_id, run_id)`` for the broadcasts a scheduled send made."""
+    if not broadcast_ids:
+        return {}
+    rows = (
+        db.query(
+            ScheduledSendRun.broadcast_id, ScheduledSendRun.scheduled_send_id, ScheduledSendRun.id
+        )
+        .filter(ScheduledSendRun.broadcast_id.in_(broadcast_ids))
+        .all()
+    )
+    return {bid: (send_id, run_id) for bid, send_id, run_id in rows}
+
+
+def _payload(
+    broadcast: Broadcast, rows, lane_states: dict | None = None, links: dict | None = None
+) -> BroadcastResponse:
     totals = BroadcastCounts()
     per_platform = {p: BroadcastPlatformCounts(platform=p) for p in broadcast.platforms}
     for platform, status, count in rows:
@@ -169,8 +214,16 @@ def _payload(broadcast: Broadcast, rows) -> BroadcastResponse:
             counts.total += count
             if status in _RECIPIENT_STATUSES:
                 setattr(counts, status, getattr(counts, status) + count)
+    for (broadcast_id, platform), state in (lane_states or {}).items():
+        bucket = per_platform.get(platform)
+        if broadcast_id == broadcast.id and bucket is not None:
+            bucket.next_send_at = state.next_send_at
+            bucket.waiting_for = state.waiting_for
+    send_id, run_id = (links or {}).get(broadcast.id, (None, None))
     return BroadcastResponse(
         id=str(broadcast.id),
+        scheduled_send_id=str(send_id) if send_id else None,
+        scheduled_send_run_id=str(run_id) if run_id else None,
         text=broadcast.text,
         footer=broadcast.footer,
         audience=broadcast.audience,
@@ -186,7 +239,12 @@ def _payload(broadcast: Broadcast, rows) -> BroadcastResponse:
 
 
 def _broadcast_payload(db: Session, broadcast: Broadcast) -> BroadcastResponse:
-    return _payload(broadcast, _count_rows(db, [broadcast.id]).get(broadcast.id, []))
+    return _payload(
+        broadcast,
+        _count_rows(db, [broadcast.id]).get(broadcast.id, []),
+        _lane_states(db, [broadcast]),
+        _run_links(db, [broadcast.id]),
+    )
 
 
 def _get_or_404(db: Session, broadcast_id: uuid.UUID) -> Broadcast:
@@ -202,9 +260,29 @@ def _find_by_key(db: Session, key: str | None) -> Broadcast | None:
     return db.query(Broadcast).filter(Broadcast.idempotency_key == key).first()
 
 
+def is_run_broadcast(db: Session, broadcast_id: uuid.UUID) -> bool:
+    """Whether this broadcast is a scheduled send's run (not a manual one)."""
+    return (
+        db.query(ScheduledSendRun.id).filter(ScheduledSendRun.broadcast_id == broadcast_id).first()
+        is not None
+    )
+
+
 def _ensure_none_active(db: Session, exclude: uuid.UUID | None = None) -> None:
-    """409 if another broadcast is active. Call after ``_lock_active``."""
-    query = db.query(Broadcast).filter(Broadcast.status.in_(_ACTIVE))
+    """409 if another MANUAL broadcast is active. Call after ``_lock_active``.
+
+    A scheduled send's broadcasts don't count: they queue FIFO behind whatever
+    is sending (the consumer sends one broadcast at a time), and an operator's
+    broadcast queues behind them the same way.
+    """
+    run_broadcasts = (
+        db.query(ScheduledSendRun.broadcast_id)
+        .filter(ScheduledSendRun.broadcast_id.isnot(None))
+        .scalar_subquery()
+    )
+    query = db.query(Broadcast).filter(
+        Broadcast.status.in_(_ACTIVE), Broadcast.id.notin_(run_broadcasts)
+    )
     if exclude is not None:
         query = query.filter(Broadcast.id != exclude)
     if query.first() is not None:
@@ -386,8 +464,10 @@ async def list_broadcasts(
         db.query(Broadcast).order_by(Broadcast.created_at.desc()).limit(limit).offset(offset).all()
     )
     counts = _count_rows(db, [b.id for b in page])
+    states = _lane_states(db, page)
+    links = _run_links(db, [b.id for b in page])
     return BroadcastsResponse(
-        broadcasts=[_payload(b, counts.get(b.id, [])) for b in page],
+        broadcasts=[_payload(b, counts.get(b.id, []), states, links) for b in page],
         total=total,
         limit=limit,
         offset=offset,
@@ -470,7 +550,7 @@ def _transition(
     if to == "cancelled":
         values["finished_at"] = _utcnow()
     try:
-        if to == "running":
+        if to == "running" and not is_run_broadcast(db, broadcast.id):
             _lock_active(db)
             _ensure_none_active(db, exclude=broadcast.id)
         updated = (

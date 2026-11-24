@@ -72,7 +72,7 @@ describe('Groups routes — POST /whatsapp/shared-groups', () => {
   it('returns 200 with the shared groups', async () => {
     mockIsBaileysReady.mockReturnValue(true);
     mockFindSharedGroups.mockResolvedValue([
-      { groupJid: '120363000000001@g.us', subject: 'Book Club' },
+      { groupJid: '120363000000001@g.us', subject: 'Book Club', isAdmin: true },
     ]);
 
     const res = await app.inject({
@@ -83,7 +83,7 @@ describe('Groups routes — POST /whatsapp/shared-groups', () => {
 
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({
-      groups: [{ groupJid: '120363000000001@g.us', subject: 'Book Club' }],
+      groups: [{ groupJid: '120363000000001@g.us', subject: 'Book Club', isAdmin: true }],
     });
     expect(mockFindSharedGroups).toHaveBeenCalledWith(FAKE_SOCK, {
       jid: '5511999999999@s.whatsapp.net',

@@ -2,7 +2,7 @@
 """
 Redis Streams worker entry point.
 
-Runs six tasks side by side in one process:
+Runs eight tasks side by side in one process:
 
 - the chat consumer (``streams/consumer.py``) — per-user sequential processing
   of chat messages, concurrent across users
@@ -16,8 +16,13 @@ Runs six tasks side by side in one process:
   agent tasks onto the chats' own streams
 - the scheduled sender (``streams/scheduled_sender.py``) — sends the ready
   scheduled messages: a paced Baileys lane and a Telegram/Cloud lane
+- the scheduled-send scheduler (``streams/scheduled_send_scheduler.py``) —
+  fires and prepares the operator's scheduled sends (``/admin/scheduled-sends``),
+  each run delivered as a queued broadcast
 - the group-topics loop (``streams/group_topics.py``) — summarises finished
   group conversations into searchable topics when ``group_topics_enabled``
+- the process heartbeat (``process_heartbeat.py``) — what this worker loaded,
+  for ``GET /admin/processes`` and the per-process values in ``/admin/settings``
 
 If any task stops, the worker exits non-zero so the process supervisor
 (Docker ``restart: unless-stopped``) restarts it with every task healthy.
@@ -35,10 +40,12 @@ from ..config import settings
 from ..database import init_db
 from ..instrument import setup_instrumentation
 from ..logger import logger
+from ..process_heartbeat import run_heartbeat
 from ..streams.broadcast_consumer import run_broadcast_consumer
 from ..streams.consumer import run_stream_consumer
 from ..streams.group_topics import run_group_topics_loop
 from ..streams.pdf_consumer import run_pdf_consumer
+from ..streams.scheduled_send_scheduler import run_scheduled_send_scheduler
 from ..streams.scheduled_sender import run_scheduled_sender
 from ..streams.scheduler import run_scheduler
 
@@ -88,7 +95,10 @@ async def main() -> int:
         asyncio.create_task(run_broadcast_consumer(redis), name="broadcast-consumer"),
         asyncio.create_task(run_scheduler(redis), name="scheduler"),
         asyncio.create_task(run_scheduled_sender(), name="scheduled-sender"),
+        asyncio.create_task(run_scheduled_send_scheduler(), name="scheduled-send-scheduler"),
         asyncio.create_task(run_group_topics_loop(redis), name="group-topics"),
+        # What this process loaded, for GET /admin/processes (never raises).
+        asyncio.create_task(run_heartbeat(redis, "worker"), name="heartbeat"),
     }
     try:
         done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)

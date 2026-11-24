@@ -306,6 +306,15 @@ REGISTRY: tuple[SettingSpec, ...] = (
         "Snapshotted when a broadcast is created. Empty = no footer.",
     ),
     SettingSpec(
+        "scheduled_send_footer",
+        "str",
+        True,
+        "broadcast",
+        "Line appended after broadcast_footer on every scheduled send (Envios programados), "
+        "telling people how to stop only that send. {number} becomes the send's number "
+        "(/broadcast off <number>). Snapshotted per run. Empty = no extra line.",
+    ),
+    SettingSpec(
         "broadcast_min_delay_seconds",
         "int",
         True,
@@ -541,3 +550,13 @@ class _RuntimeConfig:
 
 
 runtime_config = _RuntimeConfig()
+
+
+SECRET_MASK = "********"
+
+
+def display_value(spec: SettingSpec, value: Any) -> Any:
+    """``value`` as /admin shows it: a secret is masked (``None`` when unset)."""
+    if spec.secret:
+        return SECRET_MASK if value else None
+    return value

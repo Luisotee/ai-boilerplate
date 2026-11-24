@@ -1,6 +1,6 @@
 """Unit tests for _match_shared_group — lenient for reads, strict for sends."""
 
-from ai_api.agent.tools.group_context import _match_shared_group
+from ai_api.services.shared_groups import match_shared_group as _match_shared_group
 from ai_api.whatsapp.client import SharedGroup
 
 BOOK = SharedGroup(group_jid="1@g.us", subject="Book Club")

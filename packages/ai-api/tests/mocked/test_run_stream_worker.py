@@ -1,5 +1,5 @@
-"""The stream worker runs the chat, PDF, broadcast, scheduler and scheduled-sender tasks,
-and exits if any stops."""
+"""The stream worker runs the chat, PDF, broadcast, scheduler, scheduled-sender,
+scheduled-send and heartbeat tasks, and exits if any stops."""
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -9,7 +9,7 @@ import pytest
 from ai_api.scripts import run_stream_worker
 
 
-async def _idle_consumer(_redis=None):
+async def _idle_consumer(*_args):
     await asyncio.sleep(3600)
 
 
@@ -20,6 +20,8 @@ def idle_broadcast_consumer():
         patch.object(run_stream_worker, "run_broadcast_consumer", _idle_consumer),
         patch.object(run_stream_worker, "run_scheduler", _idle_consumer),
         patch.object(run_stream_worker, "run_scheduled_sender", _idle_consumer),
+        patch.object(run_stream_worker, "run_scheduled_send_scheduler", _idle_consumer),
+        patch.object(run_stream_worker, "run_heartbeat", _idle_consumer),
     ):
         yield
 
@@ -204,3 +206,20 @@ async def test_init_db_failing_every_time_stops_the_worker(no_init_db):
         await asyncio.wait_for(run_stream_worker.main(), timeout=5)
     assert no_init_db.call_count == run_stream_worker.INIT_DB_ATTEMPTS
     redis_cls.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_crashed_scheduled_send_scheduler_stops_the_worker():
+    async def crash():
+        raise RuntimeError("boom")
+
+    fake_redis = MagicMock()
+    fake_redis.aclose = AsyncMock()
+    with (
+        patch.object(run_stream_worker, "setup_instrumentation"),
+        patch.object(run_stream_worker, "Redis", return_value=fake_redis),
+        patch.object(run_stream_worker, "run_stream_consumer", _idle_consumer),
+        patch.object(run_stream_worker, "run_pdf_consumer", _idle_consumer),
+        patch.object(run_stream_worker, "run_scheduled_send_scheduler", crash),
+    ):
+        assert await asyncio.wait_for(run_stream_worker.main(), timeout=5) == 1

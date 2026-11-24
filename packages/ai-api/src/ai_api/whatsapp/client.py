@@ -51,6 +51,19 @@ class SharedGroup:
 
     group_jid: str
     subject: str
+    #: Whether the requester is an admin of the group: True/False from the
+    #: Baileys client, None when unknown (a Telegram list derived from stored
+    #: messages, or an older client without the field). Only ``is True`` grants.
+    is_admin: bool | None = None
+
+
+@dataclass
+class GroupMembership:
+    """A live Telegram ``getChatMember`` answer (``POST /whatsapp/group-member``)."""
+
+    is_member: bool
+    #: None when the client predates the field: callers treat it as not admin.
+    is_admin: bool | None = None
 
 
 class WhatsAppClient:
@@ -203,7 +216,11 @@ class WhatsAppClient:
         )
         data = await self._handle_response(response)
         return [
-            SharedGroup(group_jid=g["groupJid"], subject=g["subject"])
+            SharedGroup(
+                group_jid=g["groupJid"],
+                subject=g["subject"],
+                is_admin=g["isAdmin"] if isinstance(g.get("isAdmin"), bool) else None,
+            )
             for g in data.get("groups", [])
         ]
 
@@ -228,6 +245,25 @@ class WhatsAppClient:
         )
         data = await self._handle_response(response)
         return data.get("is_member") is True
+
+    async def group_membership(self, group_jid: str, user_jid: str) -> GroupMembership:
+        """Live membership AND admin status of ``user_jid`` in ``group_jid`` (Telegram only).
+
+        Raises:
+            WhatsAppClientError: If the check could not be performed. Callers
+                must treat that as "can't confirm" — never as permission.
+        """
+        response = await self._client.post(
+            f"{self._base_url}/whatsapp/group-member",
+            json={"phoneNumber": group_jid, "userJid": user_jid},
+            headers=self._get_headers(),
+        )
+        data = await self._handle_response(response)
+        is_admin = data.get("is_admin")
+        return GroupMembership(
+            is_member=data.get("is_member") is True,
+            is_admin=is_admin if isinstance(is_admin, bool) else None,
+        )
 
     async def get_whatsapp_status(self) -> dict:
         """Fetch the Baileys connection status and latest pairing QR.

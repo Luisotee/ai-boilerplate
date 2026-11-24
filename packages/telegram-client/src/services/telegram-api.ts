@@ -324,16 +324,29 @@ export async function sendContact(chatId: number, contact: ContactDetails): Prom
  * to fail (the AI API fails closed).
  */
 export async function isChatMember(chatId: number, userId: number): Promise<boolean> {
+  return (await chatMembership(chatId, userId)).isMember;
+}
+
+/**
+ * Membership and admin status from one `getChatMember` call. An admin is
+ * `creator` or `administrator` (scheduling into a group from a private chat
+ * needs it). Throws on a lookup error, like `isChatMember`.
+ */
+export async function chatMembership(
+  chatId: number,
+  userId: number
+): Promise<{ isMember: boolean; isAdmin: boolean }> {
   const member = await bot.api.getChatMember(chatId, userId);
   switch (member.status) {
     case 'creator':
     case 'administrator':
+      return { isMember: true, isAdmin: true };
     case 'member':
-      return true;
+      return { isMember: true, isAdmin: false };
     case 'restricted':
-      return member.is_member;
+      return { isMember: member.is_member, isAdmin: false };
     default:
-      return false;
+      return { isMember: false, isAdmin: false };
   }
 }
 
