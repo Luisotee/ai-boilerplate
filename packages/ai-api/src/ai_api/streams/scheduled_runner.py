@@ -49,6 +49,7 @@ from ..runtime_config import runtime_config
 from ..services.broadcast import in_cloud_window
 from ..services.schedule import format_local
 from ..services.scheduled_tasks import group_creator_allowed, utcnow, zone
+from ..services.task_creator import creator_verdict
 from ..whitelist import chat_in_scope, parse_whitelist
 
 #: Consecutive failed runs after which a task is disabled (shown in /admin).
@@ -82,6 +83,7 @@ RUN_ERROR = "run_error"
 @dataclass(frozen=True)
 class _Job:
     run_id: uuid.UUID
+    task_id: uuid.UUID
     user_id: uuid.UUID
     text: str
     schedule: str
@@ -281,6 +283,46 @@ def record(
         db.close()
 
 
+def record_creator_verdict(run_id: uuid.UUID, expected: str, verdict: str) -> bool:
+    """A group-from-private task whose creator check failed (``services/task_creator.py``).
+
+    The run is skipped with the verdict; a disabling verdict (creator gone, out
+    of the group, no longer admin) also disables the task. Conditional on the
+    run still being ``expected``, like ``record``.
+    """
+    from ..services.task_creator import DISABLING
+
+    now = utcnow()
+    db = SessionLocal()
+    try:
+        run = (
+            db.query(TaskRun)
+            .filter(TaskRun.id == run_id, TaskRun.status == expected)
+            .with_for_update()
+            .one_or_none()
+        )
+        if run is None:
+            return False
+        task = db.get(ScheduledTask, run.task_id)
+        # A transient lookup failure re-arms a one-shot (bounded attempts)
+        # instead of ending it: nothing was sent and the creator may be fine.
+        retry_at = (
+            _one_shot_retry_at(db, task, now)
+            if task is not None and verdict not in DISABLING
+            else None
+        )
+        settle(db, run, task, SKIPPED, verdict, now, retry_at=retry_at)
+        if task is not None and verdict in DISABLING and task.status == "active":
+            task.status = "disabled"
+            task.disabled_reason = verdict
+            task.next_run_at = None
+            logger.warning("Scheduled task %s disabled (%s)", task.id, verdict)
+        db.commit()
+        return True
+    finally:
+        db.close()
+
+
 # --- Agent phase (DB steps are sync; run through asyncio.to_thread) ----------
 
 
@@ -316,6 +358,7 @@ def _prepare(run_id: uuid.UUID, now: datetime) -> _Job | None:
             return None
         return _Job(
             run_id=run.id,
+            task_id=task.id,
             user_id=task.user_id,
             text=task.text,
             schedule=task.schedule,
@@ -424,6 +467,13 @@ async def _process(run_id: uuid.UUID) -> None:
         return
     job = await asyncio.to_thread(_prepare, run_id, now)
     if job is None:
+        return
+    # A task scheduled into a group from a private chat runs only while its
+    # creator is still a member and an admin there (checked live, fail closed).
+    verdict = await creator_verdict(job.task_id)
+    if verdict is not None:
+        logger.info("Scheduled run %s skipped before the agent (%s)", run_id, verdict)
+        await asyncio.to_thread(record_creator_verdict, run_id, RUNNING, verdict)
         return
     try:
         text = await _agent_reply(job, now)

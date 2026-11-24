@@ -38,6 +38,7 @@ from ..logger import logger
 from ..scheduled_sends.opt_out import move_opt_outs
 from .api_keys import move_api_keys
 from .bug_reports import scrub_user_reports
+from .scheduled_tasks import repoint_created_from
 
 # Error codes
 ERROR_GROUP_JID = "GROUP_JID"
@@ -236,6 +237,8 @@ def try_autolink(
         move_api_keys(db, telegram_user.id, whatsapp_user.id)
         # Per-send opt-outs follow too (the cascade would drop them: a re-subscribe).
         move_opt_outs(db, telegram_user.id, whatsapp_user.id)
+        # Group tasks it scheduled from private keep re-checking their creator.
+        repoint_created_from(db, telegram_user.id, whatsapp_user.id)
         db.delete(telegram_user)  # cascade clears messages/prefs/core_memory
         db.commit()
     except Exception:

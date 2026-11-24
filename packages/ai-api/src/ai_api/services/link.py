@@ -27,6 +27,7 @@ from ..scheduled_sends.opt_out import move_opt_outs
 from ..surfaces import WEB_JID_PREFIX, is_cli_jid
 from .api_keys import move_api_keys
 from .bug_reports import scrub_user_reports
+from .scheduled_tasks import repoint_created_from
 
 LINK_CODE_TTL_SECONDS = 600  # 10 minutes
 _CODE_KEY = "link:code:{code}"
@@ -216,6 +217,8 @@ async def consume_link_code(
         move_api_keys(db, telegram_user.id, whatsapp_user.id)
         # Per-send opt-outs follow too (the cascade would drop them: a re-subscribe).
         move_opt_outs(db, telegram_user.id, whatsapp_user.id)
+        # Group tasks it scheduled from private keep re-checking their creator.
+        repoint_created_from(db, telegram_user.id, whatsapp_user.id)
         db.delete(telegram_user)  # cascade clears messages/prefs/core_memory
         db.commit()
     except Exception as exc:
@@ -265,6 +268,7 @@ def _merge_web_user(db: Session, web_user: User, kept: User) -> LinkResult:
         scrub_user_reports(db, web_user.id)
         move_api_keys(db, web_user.id, kept.id)
         move_opt_outs(db, web_user.id, kept.id)
+        repoint_created_from(db, web_user.id, kept.id)
         db.delete(web_user)  # cascade clears messages/prefs/core_memory
         db.commit()
     except Exception as exc:

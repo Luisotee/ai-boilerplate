@@ -12,6 +12,15 @@ from ai_api.streams import scheduled_runner as runner
 NOW = datetime(2026, 11, 9, 15, 0)
 
 
+@pytest.fixture(autouse=True)
+def _creator_ok():
+    """Tasks here are ordinary ones: the group-from-private creator check passes."""
+    with patch(
+        "ai_api.streams.scheduled_runner.creator_verdict", AsyncMock(return_value=None)
+    ) as verdict:
+        yield verdict
+
+
 def _task(**kw) -> ScheduledTask:
     defaults = dict(
         id=uuid.uuid4(),
@@ -291,6 +300,7 @@ class TestText:
 
     def test_agent_prompt_puts_the_time_last_and_guards_recursion(self):
         job = runner._Job(
+            task_id=uuid.uuid4(),
             run_id=uuid.uuid4(),
             user_id=uuid.uuid4(),
             text="check the river level",
@@ -308,6 +318,7 @@ class TestText:
 
 def _job(text="check the river"):
     return runner._Job(
+        task_id=uuid.uuid4(),
         run_id=uuid.uuid4(),
         user_id=uuid.uuid4(),
         text=text,
@@ -403,6 +414,7 @@ class TestProcess:
 async def test_agent_reply_image_goes_out_as_a_link():
     # The sender sends text only: an image directive is flattened, never a photo.
     job = runner._Job(
+        task_id=uuid.uuid4(),
         run_id=uuid.uuid4(),
         user_id=uuid.uuid4(),
         text="send me a cat",

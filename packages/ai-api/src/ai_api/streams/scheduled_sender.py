@@ -41,6 +41,7 @@ from ..config import get_whatsapp_api_key, get_whatsapp_client_url, settings
 from ..database import ScheduledTask, SessionLocal, TaskRun, User
 from ..logger import logger
 from ..services.scheduled_tasks import utcnow
+from ..services.task_creator import creator_verdict
 from ..whatsapp import create_whatsapp_client
 from .broadcast_consumer import (
     FINAL,
@@ -58,6 +59,7 @@ from .scheduled_runner import (
     SKIPPED,
     UNKNOWN,
     record,
+    record_creator_verdict,
     settle,
     skip_reason,
 )
@@ -80,6 +82,7 @@ FAST = ("telegram", "cloud")
 @dataclass(frozen=True)
 class _Send:
     run_id: uuid.UUID
+    task_id: uuid.UUID
     platform: str
     client_id: str | None
     address: str
@@ -155,6 +158,7 @@ def _prepare(run_id: uuid.UUID) -> _Send | None:
             return None
         return _Send(
             run_id=run.id,
+            task_id=task.id,
             platform=task.client_id or "baileys",
             client_id=task.client_id,
             address=task.address,
@@ -204,6 +208,12 @@ async def send_run(run_id: uuid.UUID) -> bool:
     try:
         send = await asyncio.to_thread(_prepare, run_id)
         if send is None:
+            return False
+        # Group-from-private task: its creator must still be a group admin (live, fail closed).
+        verdict = await creator_verdict(send.task_id)
+        if verdict is not None:
+            logger.info("Scheduled run %s skipped before the send (%s)", run_id, verdict)
+            await asyncio.to_thread(record_creator_verdict, run_id, SENDING, verdict)
             return False
         try:
             await _deliver_to(send)

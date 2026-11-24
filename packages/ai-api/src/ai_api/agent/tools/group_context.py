@@ -19,7 +19,6 @@ LLM provider again, in a new context — which is the trade-off an operator opts
 into.
 """
 
-import difflib
 from datetime import UTC, datetime, timedelta
 
 from pydantic_ai import RunContext
@@ -32,13 +31,13 @@ from ...rag.conversation import format_conversation_results, format_transcript
 from ...rag.conversation import search_conversation_history as search_conversation_fn
 from ...runtime_config import runtime_config
 from ...services.shared_groups import (
+    match_shared_group,
     platform_of,
     resolve_shared_groups,
     shared_group_tools_available,
     telegram_identity,
 )
 from ...whatsapp import WhatsAppNotConnectedError
-from ...whatsapp.client import SharedGroup
 from ..core import AgentDeps, agent
 from ._db import safe_rollback
 
@@ -59,49 +58,6 @@ async def shared_group_tools_enabled(
     """`prepare` hook: show both tools only where they can work
     (`shared_group_tools_available`)."""
     return tool_def if shared_group_tools_available(ctx.deps) else None
-
-
-def _match_shared_group(
-    groups: list[SharedGroup], group_name: str, *, strict: bool = False
-) -> SharedGroup | None:
-    """Resolve a free-text group name to one of the user's shared groups.
-
-    Matches exact -> substring -> fuzzy (difflib, 0.6 cutoff) against the shared
-    groups' subjects. Only ever returns a group from the provided (already
-    authorized) list, so it can't surface or target a group the user doesn't
-    share with the bot. Returns None when nothing matches or the name is empty.
-
-    ``strict`` (for irreversible actions like sending): no fuzzy matching, and a
-    substring that matches more than one group counts as no match — so the
-    caller asks the user to disambiguate instead of guessing the wrong group.
-    """
-    # An empty target makes ``target in subject`` true for every group, which
-    # would otherwise silently pick the first one — never match on it.
-    target = group_name.strip().lower()
-    if not target:
-        return None
-
-    exact = [g for g in groups if g.subject.lower() == target]
-    if exact:
-        # Two groups with the very same name are ambiguous for a send, too.
-        if strict and len(exact) > 1:
-            return None
-        return exact[0]
-
-    subs = [g for g in groups if target in g.subject.lower()]
-    if subs:
-        if strict:
-            return subs[0] if len(subs) == 1 else None
-        return subs[0]
-
-    if not strict:
-        close = difflib.get_close_matches(
-            target, [g.subject.lower() for g in groups], n=1, cutoff=0.6
-        )
-        if close:
-            return next(g for g in groups if g.subject.lower() == close[0])
-
-    return None
 
 
 def _requester(deps: AgentDeps) -> User | None:
@@ -182,7 +138,7 @@ async def get_group_context(
             names = "\n".join(f"- {g.subject}" for g in groups)
             return f"Groups we share:\n{names}\n\nWhich one would you like to know about?"
 
-        match = _match_shared_group(groups, group_name)
+        match = match_shared_group(groups, group_name)
         if not match:
             available = ", ".join(g.subject for g in groups)
             return (
@@ -320,7 +276,7 @@ async def send_group_message(
 
         # Only ever a group from the verified list, matched strictly: a wrong
         # send can't be undone.
-        match = _match_shared_group(groups, group_name, strict=True)
+        match = match_shared_group(groups, group_name, strict=True)
         if not match:
             available = ", ".join(g.subject for g in groups)
             return (

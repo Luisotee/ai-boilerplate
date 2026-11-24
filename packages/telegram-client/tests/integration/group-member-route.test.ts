@@ -14,13 +14,14 @@ vi.mock('../../src/services/telegram-api.js', () => ({
   sendReaction: vi.fn(),
   sendChatAction: vi.fn(),
   isChatMember: vi.fn(),
+  chatMembership: vi.fn(),
 }));
 
 import { buildTestApp } from '../helpers/fastify.js';
 import * as telegramApi from '../../src/services/telegram-api.js';
 import { markBotReady, _resetBotReadyForTests } from '../../src/services/bot-state.js';
 
-const mockIsChatMember = telegramApi.isChatMember as ReturnType<typeof vi.fn>;
+const mockIsChatMember = telegramApi.chatMembership as ReturnType<typeof vi.fn>;
 
 describe('POST /whatsapp/group-member', () => {
   let app: FastifyInstance;
@@ -49,18 +50,25 @@ describe('POST /whatsapp/group-member', () => {
 
   it('resolves both tg: ids and answers is_member', async () => {
     markBotReady();
-    mockIsChatMember.mockResolvedValueOnce(true);
+    mockIsChatMember.mockResolvedValueOnce({ isMember: true, isAdmin: false });
     const res = await post({ phoneNumber: 'tg:-1001234567890', userJid: 'tg:555' });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ is_member: true });
+    expect(res.json()).toEqual({ is_member: true, is_admin: false });
     expect(mockIsChatMember).toHaveBeenCalledWith(-1001234567890, 555);
   });
 
   it('answers false for a non-member', async () => {
     markBotReady();
-    mockIsChatMember.mockResolvedValueOnce(false);
+    mockIsChatMember.mockResolvedValueOnce({ isMember: false, isAdmin: false });
     const res = await post({ phoneNumber: '-1001', userJid: '555' });
-    expect(res.json()).toEqual({ is_member: false });
+    expect(res.json()).toEqual({ is_member: false, is_admin: false });
+  });
+
+  it('answers is_admin for a group admin', async () => {
+    markBotReady();
+    mockIsChatMember.mockResolvedValueOnce({ isMember: true, isAdmin: true });
+    const res = await post({ phoneNumber: 'tg:-1001', userJid: 'tg:5' });
+    expect(res.json()).toEqual({ is_member: true, is_admin: true });
   });
 
   it('returns 400 for a malformed identifier', async () => {

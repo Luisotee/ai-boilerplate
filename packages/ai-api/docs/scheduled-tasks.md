@@ -143,7 +143,7 @@ Each lane works in this order:
 
 ## Rules
 
-- **Delivery target:** a task always delivers to the chat it was created in: `user_id` is that chat's row and `address` is its JID, both from `AgentDeps`. A group's task goes only to that group, and a private task never goes to a group.
+- **Delivery target:** a task delivers to the chat it belongs to: `user_id` is that chat's row and `address` is its JID. Normally that is the chat it was asked in (both from `AgentDeps`); the one exception is a group task scheduled from a private chat (below).
 - **Group permissions:** in a group, `create` and `cancel` need `is_group_admin is True` (`_group.group_admin_refusal`, which fails closed). Any member may `list`. `cancel` takes the 8-character id prefix and matches only this chat's active or disabled tasks, filtered in SQL.
 - **Whitelist at send time:** the run uses the chat's own rule, `whitelist.chat_in_scope`, which `routes/chat.py` `_is_whitelisted` also uses, on the address the chat route checked.
   - Under `GROUP_GATING=membership` that rule admits every group. So a group task also needs its creator, `created_by_jid`, to still be whitelisted.
@@ -154,7 +154,21 @@ Each lane works in this order:
   - `SCHEDULED_TASKS_MAX_PER_CHAT`: active tasks per chat (10). An admin re-enable is also refused at the limit.
   - `SCHEDULED_TASKS_MIN_INTERVAL_MINUTES`: the shortest time between two runs of a recurring task (60).
   - `SCHEDULED_TASKS_MAX_RUNS_PER_DAY`: scheduled messages per chat per 24 h (24).
-- **Cleanup:** `/clean all` cancels the chat's active and disabled tasks. Deleting a chat row (a `/link` orphan) deletes its tasks and runs (`ON DELETE CASCADE`).
+- **Cleanup:** `/clean all` cancels the chat's active and disabled tasks, and in a private chat also the group tasks it scheduled (`created_from_user_id`). Deleting a chat row (a `/link` orphan) deletes its tasks and runs (`ON DELETE CASCADE`).
+
+## Scheduling into a group from a private chat (Devflow 6b058203)
+
+Same design in curupira-bot, castanha-bot and here.
+
+- **Tool**: `manage_scheduled_tasks(..., group_name=None)`. In a private chat on WhatsApp (Baileys) or Telegram (not the Cloud API, not app surfaces; NOT gated on `SHARED_GROUP_TOOLS_ENABLED`, since nothing reads a group transcript), `group_name` schedules into, or cancels from, a group the user shares with the bot. In a group, a `group_name` naming that same group is ignored; naming another group is refused ("ask me in a private chat").
+- **Matching**: `services/shared_groups.resolve_shared_groups` + `match_shared_group(strict=True)` (exact or one unambiguous substring, never fuzzy); none or ambiguous lists the shared groups and saves nothing.
+- **Admin, fail closed** (`is True`): Baileys `POST /whatsapp/shared-groups` items carry `isAdmin` (the requester's matched participant is `admin`/`superadmin`); Telegram `POST /whatsapp/group-member` carries `is_admin` (`creator`/`administrator`), asked live because the Telegram list is derived from stored messages. A missing field (older client) is not admin. Create and cancel need it; `list` doesn't.
+- **Storage**: the task belongs to the GROUP (`user_id` = the group's row, created like a first message would; `address` = group JID; `client_id` = the requester's platform; `created_by_jid` / `created_by_name` = the requester), so the per-chat limit, daily cap and `GROUP_GATING=membership` creator rule apply to the group unchanged. `created_from_user_id` = the private requester's row (FK `ON DELETE SET NULL`; migration `docs/migrations/2026-11-24-scheduled-task-created-from.sql`).
+- **Private list / cancel**: `list` shows the chat's own tasks plus the active ones it scheduled into groups, prefixed with the group's name. `cancel` takes such a task's id (optionally narrowed by `group_name`) after a live admin re-check on the client the TASK runs on (`task.client_id`), not the current chat's (a linked user may be chatting on the other platform).
+- **Before every run** (`services/task_creator.creator_verdict`, in `scheduled_runner._process` before the LLM and in `scheduled_sender.send_run` before the send): requester row gone → task disabled `creator_unknown`; not a member → disabled `creator_not_in_group`; member but not admin → disabled `creator_not_admin`; lookup error, timeout (15 s) or missing field → run skipped `creator_check_failed`, the task stays active (a one-shot is re-armed with the one-shot retry, bounded) and the skip never counts toward auto-disable. `record_creator_verdict` settles it.
+- **Rows that go away**: SET NULL would turn the task into an ordinary group task with no re-check, so every path that deletes a `users` row must first re-point or disable these tasks. Today only the `/link`, `/linkphone` and web merges delete rows, and they call `repoint_created_from`; a future pure delete must call `disable_created_from` (`creator_unknown`).
+- **Known limit**: on Telegram the shared-group list comes from the requester's stored messages, so an admin who never wrote in the group can't target it from private (as with `send_group_message`).
+- **Deploy**: ship the chat clients and the AI API together; an older client lacks the admin field, which fails closed.
 
 ## `/admin/scheduled-tasks`
 
@@ -168,7 +182,7 @@ Each lane works in this order:
 
 ## Migrations
 
-Both tables are new, so `create_all()` creates them with all their columns and indexes, including `task_runs.message`, `scheduled_tasks.created_by_jid` and the partial index `ix_task_runs_open`. That holds only while they ship with the tables. A later column or index on either table needs a migration file like any other (`docs/migrations/README.md`).
+`scheduled_tasks.created_from_user_id` (+ FK + index) needs `docs/migrations/2026-11-24-scheduled-task-created-from.sql` on an existing database, applied before the new image. Otherwise both tables are new, so `create_all()` creates them with all their columns and indexes, including `task_runs.message`, `scheduled_tasks.created_by_jid` and the partial index `ix_task_runs_open`. That holds only while they ship with the tables. A later column or index on either table needs a migration file like any other (`docs/migrations/README.md`).
 
 ## Verified against real Postgres
 

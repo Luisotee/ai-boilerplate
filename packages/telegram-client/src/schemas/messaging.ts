@@ -57,6 +57,7 @@ export const GroupMemberSchema = z.object({
 
 export const GroupMemberResponseSchema = z.object({
   is_member: z.boolean(),
+  is_admin: z.boolean().describe('creator or administrator (additive; older clients omit it)'),
 });
 
 export type SendTextRequest = z.infer<typeof SendTextSchema>;

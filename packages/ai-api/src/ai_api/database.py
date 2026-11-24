@@ -619,6 +619,15 @@ class ScheduledTask(Base):
     # on Telegram). Under GROUP_GATING=membership a group task sends only while
     # this sender is still whitelisted.
     created_by_jid = Column(String, nullable=True)
+    # Set only for a task scheduled into a GROUP from a private chat: the private
+    # requester's row. Before every run the scheduler re-checks live that this
+    # person is still a member and an admin of the group (else the task is
+    # disabled). SET NULL keeps the task when a row is deleted, so every path
+    # that deletes a users row must first re-point (merges) or disable these
+    # tasks; a NULL here on a group-from-private task is never "unrestricted".
+    created_from_user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     kind = Column(String(16), nullable=False)  # 'reminder' | 'agent'
     text = Column(Text, nullable=False)  # reminder text, or the agent run's prompt
     schedule = Column(String(200), nullable=False)  # normalised human description

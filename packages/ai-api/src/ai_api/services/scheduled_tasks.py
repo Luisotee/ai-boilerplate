@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from typing import get_args
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import String, cast, func
+from sqlalchemy import String, cast, func, or_
 from sqlalchemy.orm import Session
 
 from ..broadcast_pacing import parse_timezone
@@ -139,6 +139,7 @@ def create_task(
     schedule_text: str,
     created_by_name: str | None = None,
     created_by_jid: str | None = None,
+    created_from_user_id=None,
     now: datetime | None = None,
 ) -> ScheduledTask:
     """Validate, create and commit a task. Raises ``TaskError`` with a user-facing reason."""
@@ -214,6 +215,7 @@ def create_task(
         address=address,
         created_by_name=(created_by_name or None),
         created_by_jid=(created_by_jid or None),
+        created_from_user_id=created_from_user_id,
         kind=kind,
         text=text,
         schedule=schedule.description,
@@ -245,7 +247,52 @@ def list_tasks(db: Session, user_id) -> list[ScheduledTask]:
     )
 
 
-def find_task(db: Session, user_id, ref: str) -> ScheduledTask:
+def list_tasks_created_from(db: Session, user_id) -> list[ScheduledTask]:
+    """Active tasks this person scheduled into groups from their private chat."""
+    return (
+        db.query(ScheduledTask)
+        .filter(
+            ScheduledTask.created_from_user_id == user_id,
+            ScheduledTask.status == "active",
+        )
+        .order_by(ScheduledTask.next_run_at.asc().nulls_last())
+        .all()
+    )
+
+
+def repoint_created_from(db: Session, from_user_id, to_user_id) -> int:
+    """A /link merge deletes ``from_user_id``: its group tasks follow the kept row.
+
+    Without this the FK's SET NULL would turn them into ordinary group tasks
+    that no longer re-check their creator. Not committed.
+    """
+    return (
+        db.query(ScheduledTask)
+        .filter(ScheduledTask.created_from_user_id == from_user_id)
+        .update({"created_from_user_id": to_user_id}, synchronize_session=False)
+    )
+
+
+def disable_created_from(db: Session, user_id) -> int:
+    """A users row is deleted outright: its group tasks stop (``creator_unknown``).
+
+    For any future path that deletes a row without a merge (none today: only
+    the /link merges delete rows, and they re-point). Not committed.
+    """
+    return (
+        db.query(ScheduledTask)
+        .filter(
+            ScheduledTask.created_from_user_id == user_id,
+            ScheduledTask.status == "active",
+        )
+        .update(
+            {"status": "disabled", "disabled_reason": "creator_unknown", "next_run_at": None},
+            synchronize_session=False,
+        )
+    )
+
+
+def find_task(db: Session, user_id, ref: str, *, created_from=None) -> ScheduledTask:
     """This chat's task whose id starts with ``ref`` (``#`` and dashes ignored).
 
     Raises ``TaskError`` when none or several match. Scoped to the chat, so a
@@ -255,10 +302,14 @@ def find_task(db: Session, user_id, ref: str) -> ScheduledTask:
     ref = (ref or "").strip().lstrip("#").replace("-", "").lower()
     if len(ref) < MIN_ID_PREFIX or any(c not in "0123456789abcdef" for c in ref):
         raise TaskError("Give the task id shown by the list action (like #ab12cd34).")
+    owner = ScheduledTask.user_id == user_id
+    if created_from is not None:
+        # A private chat also reaches the tasks it scheduled into groups.
+        owner = or_(owner, ScheduledTask.created_from_user_id == created_from)
     matches = (
         db.query(ScheduledTask)
         .filter(
-            ScheduledTask.user_id == user_id,
+            owner,
             ScheduledTask.status.in_(("active", "disabled")),
             func.replace(cast(ScheduledTask.id, String), "-", "").like(f"{ref}%"),
         )
@@ -281,11 +332,15 @@ def cancel_task(db: Session, user_id, ref: str) -> ScheduledTask:
 
 
 def cancel_chat_tasks(db: Session, user_id) -> int:
-    """Cancel every active or disabled task of a chat (``/clean all``); not committed."""
+    """Cancel every active or disabled task of a chat (``/clean all``); not committed.
+
+    Also the tasks this chat's person scheduled into groups from it
+    (``created_from_user_id``): a full reset takes back what they asked for.
+    """
     return (
         db.query(ScheduledTask)
         .filter(
-            ScheduledTask.user_id == user_id,
+            or_(ScheduledTask.user_id == user_id, ScheduledTask.created_from_user_id == user_id),
             ScheduledTask.status.in_(("active", "disabled")),
         )
         .update({"status": "cancelled", "next_run_at": None}, synchronize_session=False)

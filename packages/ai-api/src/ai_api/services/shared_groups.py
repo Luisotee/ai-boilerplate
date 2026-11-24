@@ -29,6 +29,8 @@ shared groups there.
 
 from __future__ import annotations
 
+import difflib
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -136,3 +138,76 @@ async def resolve_shared_groups(deps, user: User) -> list[SharedGroup]:
         lid=user.whatsapp_lid,
         phone=user.phone,
     )
+
+
+def match_shared_group(
+    groups: list[SharedGroup], group_name: str, *, strict: bool = False
+) -> SharedGroup | None:
+    """Resolve a free-text group name to one of the user's shared groups.
+
+    Matches exact -> substring -> fuzzy (difflib, 0.6 cutoff) against the shared
+    groups' subjects. Only ever returns a group from the provided (already
+    authorized) list, so it can't surface or target a group the user doesn't
+    share with the bot. Returns None when nothing matches or the name is empty.
+
+    ``strict`` (for irreversible actions like sending): no fuzzy matching, and a
+    substring that matches more than one group counts as no match — so the
+    caller asks the user to disambiguate instead of guessing the wrong group.
+    """
+    # An empty target makes ``target in subject`` true for every group, which
+    # would otherwise silently pick the first one — never match on it.
+    target = group_name.strip().lower()
+    if not target:
+        return None
+
+    exact = [g for g in groups if g.subject.lower() == target]
+    if exact:
+        # Two groups with the very same name are ambiguous for a send, too.
+        if strict and len(exact) > 1:
+            return None
+        return exact[0]
+
+    subs = [g for g in groups if target in g.subject.lower()]
+    if subs:
+        if strict:
+            return subs[0] if len(subs) == 1 else None
+        return subs[0]
+
+    if not strict:
+        close = difflib.get_close_matches(
+            target, [g.subject.lower() for g in groups], n=1, cutoff=0.6
+        )
+        if close:
+            return next(g for g in groups if g.subject.lower() == close[0])
+
+    return None
+
+
+async def requester_group_status(
+    client, platform: str, user: User, group_jid: str
+) -> tuple[bool, bool | None]:
+    """``(is_member, is_admin)`` of ``user`` in ``group_jid``, asked live of the chat client.
+
+    Baileys: the shared-groups lookup (membership resolved server-side) and
+    its ``isAdmin``. Telegram: ``getChatMember`` through ``group_membership``.
+    ``is_admin`` is None when the client didn't say (an older client): callers
+    treat that as "can't confirm", never as admin. Raises on a lookup error,
+    and ``ValueError`` where no live answer exists (Cloud API, no Telegram id).
+    """
+    if platform == "baileys":
+        groups = await client.get_shared_groups(
+            jid=user.whatsapp_jid, lid=user.whatsapp_lid, phone=user.phone
+        )
+        match = next((g for g in groups if g.group_jid == group_jid), None)
+        if match is None:
+            return False, False
+        return True, match.is_admin
+    if platform == "telegram":
+        identity = telegram_identity(user)
+        if not identity:
+            raise ValueError("no Telegram identity for this user")
+        membership = await client.group_membership(group_jid, identity)
+        if not membership.is_member:
+            return False, False
+        return True, membership.is_admin
+    raise ValueError(f"no live group membership on {platform}")

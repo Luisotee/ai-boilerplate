@@ -16,7 +16,12 @@ import { findSharedGroups, groupHasWhitelistedMember } from '../../src/services/
 import { clearGroupCache } from '../../src/services/group-cache.js';
 import { parseWhitelist } from '../../src/utils/whitelist.js';
 
-type Participant = { id: string; lid?: string; phoneNumber?: string };
+type Participant = {
+  id: string;
+  lid?: string;
+  phoneNumber?: string;
+  admin?: 'admin' | 'superadmin' | null;
+};
 type Groups = Record<string, { id?: string; subject: string; participants: Participant[] }>;
 
 function makeSock(groups: Groups, getPNForLID = vi.fn().mockResolvedValue(null)) {
@@ -55,9 +60,30 @@ describe('findSharedGroups', () => {
       },
     });
     expect(await findSharedGroups(sock, { jid: '5511777777777@s.whatsapp.net' })).toEqual([
-      { groupJid: G1, subject: 'Book Club' },
+      { groupJid: G1, subject: 'Book Club', isAdmin: false },
     ]);
   });
+
+  it.each([
+    ['admin', true],
+    ['superadmin', true],
+    [null, false],
+  ] as const)(
+    'reports the requester as admin when their participant is %s',
+    async (admin, expected) => {
+      const sock = makeSock({
+        [G1]: {
+          subject: 'Book Club',
+          participants: [
+            { id: '5511000000000@s.whatsapp.net', admin: 'admin' },
+            { id: '5511777777777@s.whatsapp.net', admin },
+          ],
+        },
+      });
+      const [group] = await findSharedGroups(sock, { jid: '5511777777777@s.whatsapp.net' });
+      expect(group.isAdmin).toBe(expected);
+    }
+  );
 
   it('matches by E.164 phone against participant.phoneNumber', async () => {
     const sock = makeSock({
