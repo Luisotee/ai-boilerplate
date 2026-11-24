@@ -47,7 +47,7 @@ scripts/
 - `conversation_messages`: Message history, role (`user`/`assistant`), token counts.
 - `conversation_preferences`: Per-user settings (TTS, STT, prompt overrides).
 - `core_memories`: Long-term user memory markdown injected into system prompt.
-- `bot_prompt`: Active dynamic system prompt (`PUT /admin/prompt`).
+- `bot_prompt_overrides`: operator overrides of the code prompt sections (`agent/prompt.py`), applied only while the code default is unchanged. `bot_prompt` is the legacy, unread whole-prompt row.
 - `runtime_settings`: Hot dynamic configuration (`REGISTRY`).
 - `broadcasts` & `broadcast_recipients`: Audience-targeted broadcasts.
 - `bug_reports`: User-submitted and automated bug reports.

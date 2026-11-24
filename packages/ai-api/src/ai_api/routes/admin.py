@@ -9,14 +9,27 @@ session; writes additionally call ``runtime_config.invalidate()`` so the agent
 (and stream worker) pick up changes promptly.
 """
 
+import asyncio
 import json
+import uuid
+from datetime import UTC, datetime
+from typing import Literal
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, nullslast, or_
 from sqlalchemy.orm import Session
 
-from ..agent.core import DEFAULT_SYSTEM_PROMPT, warn_on_removed_tools
+from ..agent.core import warn_on_removed_tools
+from ..agent.effective_prompt import build_effective_prompt, preview_deps, prompt_code_hash
+from ..agent.prompt import (
+    DEFAULT_PROMPT_HASH,
+    DEFAULT_SYSTEM_PROMPT,
+    SECTIONS_BY_KEY,
+    WHOLE_OVERRIDE_KEY,
+    load_resolved_prompt,
+    section_hash,
+)
 from ..broadcast_pacing import SETTING_MAXIMA, parse_send_window, parse_timezone
 from ..config import get_whatsapp_api_key, get_whatsapp_client_url, settings
 from ..database import (
@@ -24,94 +37,298 @@ from ..database import (
     ConversationMessage,
     ScheduledTask,
     User,
-    clear_active_prompt,
+    delete_prompt_override,
     delete_setting_override,
-    get_bot_prompt_row,
     get_db,
     get_setting_overrides,
     is_telegram_jid,
-    set_active_prompt,
+    set_prompt_override,
     set_setting_overrides_batch,
 )
 from ..deps import limiter
 from ..kb_models import KnowledgeBaseDocument
 from ..logger import logger
-from ..runtime_config import REGISTRY, REGISTRY_BY_KEY, coerce_value, runtime_config
+from ..process_heartbeat import read_processes
+from ..queue.connection import get_arq_redis
+from ..runtime_config import (
+    REGISTRY,
+    REGISTRY_BY_KEY,
+    coerce_value,
+    display_value,
+    runtime_config,
+)
 from ..schemas import (
+    EffectivePromptResponse,
     MessageItem,
     MessagesResponse,
     OverviewResponse,
+    ProcessesResponse,
+    ProcessInfo,
+    PromptBlock,
     PromptResponse,
+    PromptSectionItem,
+    PromptSectionsResponse,
     SettingItem,
+    SettingProcessValue,
     SettingsResponse,
     UpdatePromptRequest,
+    UpdatePromptSectionRequest,
     UpdateSettingsRequest,
     UsersResponse,
     UserSummary,
     WhatsAppLogoutResponse,
     WhatsAppStatusResponse,
+    WholeOverrideState,
 )
 from ..whatsapp import WhatsAppClientError, create_whatsapp_client
 from ..whitelist import parse_whitelist
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
-_MASK = "********"
-
-
 # --- System prompt ---
+#
+# The base prompt is code sections (agent/prompt.py) with the operator's
+# overrides applied while their code default is unchanged. GET /prompt/effective
+# renders every instructions hook the way a run does.
 
 
 def _prompt_payload(db: Session) -> PromptResponse:
-    row = get_bot_prompt_row(db)
-    is_overridden = bool(row and row.content)
+    resolved = load_resolved_prompt(db)
+    # is_overridden and sections_overridden come from this one list, so they agree.
+    applied = resolved.applied_sections
+    if resolved.whole.active:
+        updated_at = resolved.whole.updated_at
+    else:
+        times = [s.override.updated_at for s in applied if s.override.updated_at]
+        updated_at = max(times, default=None)
     return PromptResponse(
-        content=row.content if is_overridden else DEFAULT_SYSTEM_PROMPT,
-        is_overridden=is_overridden,
+        content=resolved.text,
+        is_overridden=resolved.whole.active or bool(applied),
         default_length=len(DEFAULT_SYSTEM_PROMPT),
-        updated_at=row.updated_at if row else None,
+        updated_at=updated_at,
+        stale=resolved.whole.stale,
+        sections_overridden=len(applied),
     )
+
+
+def _sections_payload(db: Session) -> PromptSectionsResponse:
+    resolved = load_resolved_prompt(db)
+    return PromptSectionsResponse(
+        sections=[
+            PromptSectionItem(
+                key=s.section.key,
+                title=s.section.title,
+                default=s.section.default,
+                default_hash=s.default_hash,
+                override=s.override.content if s.override is not None else None,
+                override_base_hash=s.override.base_hash if s.override is not None else None,
+                override_updated_at=s.override.updated_at if s.override is not None else None,
+                status=s.status,
+                effective=s.text,
+                applied=resolved.sections_applied,
+            )
+            for s in resolved.sections
+        ]
+        + [
+            PromptSectionItem(
+                key=row.key,
+                title=row.key,
+                default="",
+                default_hash="",
+                override=row.content,
+                override_base_hash=row.base_hash,
+                override_updated_at=row.updated_at,
+                status="stale",
+                effective="",
+                applied=False,
+                orphan=True,
+            )
+            for row in resolved.orphans
+        ],
+        whole_override=WholeOverrideState(
+            active=resolved.whole.active,
+            stale=resolved.whole.stale,
+            updated_at=resolved.whole.updated_at,
+        ),
+    )
+
+
+def _normalized(text: str) -> str:
+    """Text as compared for "unchanged": LF line ends, no trailing whitespace."""
+    return "\n".join(line.rstrip() for line in text.replace("\r\n", "\n").split("\n")).strip()
+
+
+def _write_override(db: Session, write) -> None:
+    try:
+        write()
+    except Exception as e:
+        logger.error(f"Error saving the prompt override: {e}", exc_info=True)
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Internal server error") from e
 
 
 @router.get("/prompt", response_model=PromptResponse)
 async def get_prompt(db: Session = Depends(get_db)):
-    """Return the active system prompt (override if set, else the default)."""
+    """Return the base prompt the model gets (code sections with fresh overrides)."""
     return _prompt_payload(db)
 
 
 @router.put("/prompt", response_model=PromptResponse)
 async def put_prompt(request: UpdatePromptRequest, db: Session = Depends(get_db)):
-    """Set the active system-prompt override. Takes effect on the next message."""
+    """Replace the whole base prompt while the code default stays unchanged.
+
+    It is ignored (stale) once the code default changes. Saving the text the
+    model gets from the sections as they are (compared without CRLF or trailing
+    whitespace) stores nothing and clears a fresh whole override (a stale one is
+    kept), so an unchanged save can never freeze the prompt.
+    """
     if not request.content.strip():
         raise HTTPException(status_code=400, detail="Prompt content cannot be blank")
-    try:
-        set_active_prompt(db, request.content)
-    except Exception as e:
-        logger.error(f"Error saving prompt: {e}", exc_info=True)
-        db.rollback()
-        raise HTTPException(status_code=500, detail="Internal server error") from e
-    logger.info("System prompt override updated (%d chars)", len(request.content))
-    warn_on_removed_tools(request.content)
+    resolved = load_resolved_prompt(db)
+    if _normalized(request.content) == _normalized(resolved.sections_text):
+        # A fresh whole override is cleared; a stale one is kept for FleetView
+        # to re-apply or discard (the legacy editor never shows its text).
+        if resolved.whole.active:
+            _write_override(db, lambda: delete_prompt_override(db, WHOLE_OVERRIDE_KEY))
+        logger.info("Whole-prompt save matched the current prompt; no override stored")
+    else:
+        _write_override(
+            db,
+            lambda: set_prompt_override(
+                db, WHOLE_OVERRIDE_KEY, request.content, DEFAULT_PROMPT_HASH
+            ),
+        )
+        logger.info("Whole-prompt override updated (%d chars)", len(request.content))
+        warn_on_removed_tools(request.content)
     return _prompt_payload(db)
 
 
 @router.delete("/prompt", response_model=PromptResponse)
 async def delete_prompt(db: Session = Depends(get_db)):
-    """Remove the override, reverting the agent to its hardcoded default."""
+    """Remove the whole-prompt override (section overrides stay)."""
+    _write_override(db, lambda: delete_prompt_override(db, WHOLE_OVERRIDE_KEY))
+    logger.info("Whole-prompt override cleared")
+    return _prompt_payload(db)
+
+
+@router.get("/prompt/effective", response_model=EffectivePromptResponse)
+async def get_effective_prompt(
+    chat: Literal["private", "group"] = "private",
+    surface: Literal["whatsapp", "telegram", "web"] = "whatsapp",
+    user_id: uuid.UUID | None = None,
+    jid: str | None = Query(None, max_length=200),
+    db: Session = Depends(get_db),
+):
+    """The instructions the model gets, built by the agent's own hooks.
+
+    For a sample chat (``chat`` + ``surface``), or with ``user_id`` or ``jid``
+    (any identity, as /admin/users lists it) for that user's own chat, core
+    memory included. Writes nothing.
+    """
+    user = None
+    if user_id is not None and jid is not None:
+        raise HTTPException(status_code=422, detail="Give user_id or jid, not both")
+    if user_id is not None:
+        user = db.get(User, user_id)
+    elif jid is not None:
+        user = _resolve_user(db, jid)
+    if (user_id is not None or jid is not None) and user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    elif user is None and surface == "web" and chat == "group":
+        raise HTTPException(status_code=422, detail="The web surface has no group chats")
     try:
-        clear_active_prompt(db)
+        effective = await build_effective_prompt(
+            preview_deps(db, chat, surface, user, chat_jid=jid)
+        )
     except Exception as e:
-        logger.error(f"Error clearing prompt: {e}", exc_info=True)
+        logger.error(f"Error building the effective prompt: {e}", exc_info=True)
         db.rollback()
         raise HTTPException(status_code=500, detail="Internal server error") from e
-    logger.info("System prompt override cleared (reverted to default)")
-    return _prompt_payload(db)
+    return EffectivePromptResponse(
+        content=effective.content,
+        length=len(effective.content),
+        chat=effective.chat,
+        surface=effective.surface,
+        user_id=str(user.id) if user is not None else None,
+        prompt_code_hash=prompt_code_hash(),
+        generated_at=datetime.now(UTC),
+        blocks=[PromptBlock(**vars(b)) for b in effective.blocks],
+    )
+
+
+@router.get("/prompt/sections", response_model=PromptSectionsResponse)
+async def get_prompt_sections(db: Session = Depends(get_db)):
+    """Every base-prompt section: code default, saved override and what applies."""
+    return _sections_payload(db)
+
+
+def _section_or_404(key: str):
+    section = SECTIONS_BY_KEY.get(key)
+    if section is None:
+        raise HTTPException(status_code=404, detail=f"Unknown prompt section: '{key}'")
+    return section
+
+
+@router.put("/prompt/sections/{key}", response_model=PromptSectionsResponse)
+async def put_prompt_section(
+    key: str, request: UpdatePromptSectionRequest, db: Session = Depends(get_db)
+):
+    """Override one section. 409 when the code default changed since the editor loaded it."""
+    section = _section_or_404(key)
+    default_hash = section_hash(section.default)
+    if request.base_hash != default_hash:
+        raise HTTPException(
+            status_code=409,
+            detail="This section's code default changed since it was loaded; reload it.",
+        )
+    if _normalized(request.content) == _normalized(section.default):
+        _write_override(db, lambda: delete_prompt_override(db, key))
+    else:
+        _write_override(db, lambda: set_prompt_override(db, key, request.content, default_hash))
+        logger.info("Prompt section '%s' overridden (%d chars)", key, len(request.content))
+        warn_on_removed_tools(request.content)
+    return _sections_payload(db)
+
+
+@router.delete("/prompt/sections/{key}", response_model=PromptSectionsResponse)
+async def delete_prompt_section(key: str, db: Session = Depends(get_db)):
+    """Back to the code default for this section; also removes an orphan (a key the code dropped)."""
+    orphan_keys = {row.key for row in load_resolved_prompt(db).orphans}
+    if key not in SECTIONS_BY_KEY and key not in orphan_keys:
+        raise HTTPException(status_code=404, detail=f"Unknown prompt section: '{key}'")
+    _write_override(db, lambda: delete_prompt_override(db, key))
+    logger.info("Prompt section '%s' override cleared", key)
+    return _sections_payload(db)
+
+
+@router.get("/processes", response_model=ProcessesResponse)
+async def get_processes():
+    """Live api/worker processes, from their heartbeats (empty when Redis is down)."""
+    processes = await _live_processes()
+    return ProcessesResponse(
+        processes=[ProcessInfo(**{k: p[k] for k in ProcessInfo.model_fields}) for p in processes],
+        prompt_code_mismatch=len({p["prompt_code_hash"] for p in processes}) > 1,
+    )
+
+
+#: A slow Redis must not stall /admin/settings: the heartbeats are extra detail.
+_HEARTBEAT_READ_TIMEOUT_SECONDS = 2.0
+
+
+async def _live_processes() -> list[dict]:
+    try:
+        async with asyncio.timeout(_HEARTBEAT_READ_TIMEOUT_SECONDS):
+            return await read_processes(await get_arq_redis())
+    except Exception:
+        logger.warning("Could not read process heartbeats", exc_info=True)
+        return []
 
 
 # --- Runtime settings ---
 
 
-def _settings_payload(db: Session) -> SettingsResponse:
+def _settings_payload(db: Session, processes: list[dict] | None = None) -> SettingsResponse:
+    processes = processes or []
     overrides = get_setting_overrides(db)  # key -> JSON string
     items: list[SettingItem] = []
     for spec in REGISTRY:
@@ -126,9 +343,19 @@ def _settings_payload(db: Session) -> SettingsResponse:
                 has_override = False
         else:
             value = default
-        if spec.secret:
-            value = _MASK if value else None
-            default = _MASK if default else None
+        value = display_value(spec, value)
+        default = display_value(spec, default)
+        per_process = [
+            SettingProcessValue(
+                process=p["process"],
+                instance=p["instance"],
+                value=p["settings"][spec.key],
+                started_at=p["started_at"],
+            )
+            for p in processes
+            if spec.key in p["settings"]
+        ]
+        distinct = {json.dumps(pv.value, sort_keys=True, default=str) for pv in per_process}
         items.append(
             SettingItem(
                 key=spec.key,
@@ -141,6 +368,8 @@ def _settings_payload(db: Session) -> SettingsResponse:
                 description=spec.description,
                 choices=list(spec.choices) if spec.choices else None,
                 secret=spec.secret,
+                processes=per_process,
+                restart_pending=not spec.hot and len(distinct) > 1,
             )
         )
     return SettingsResponse(settings=items)
@@ -306,7 +535,7 @@ def _validate_cross_constraints(coerced: dict[str, object]) -> None:
 @router.get("/settings", response_model=SettingsResponse)
 async def get_settings(db: Session = Depends(get_db)):
     """List every registered setting with its effective value and metadata."""
-    return _settings_payload(db)
+    return _settings_payload(db, await _live_processes())
 
 
 @router.patch("/settings", response_model=SettingsResponse)
@@ -357,7 +586,7 @@ async def patch_settings(request: UpdateSettingsRequest, db: Session = Depends(g
             len(wl.phones),
             len(wl.ids),
         )
-    return _settings_payload(db)
+    return _settings_payload(db, await _live_processes())
 
 
 def _check_delay_revert(key: str) -> None:
@@ -395,7 +624,7 @@ async def delete_setting(key: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail="Internal server error") from e
     runtime_config.invalidate()
     logger.info("Runtime setting override removed: %s", key)
-    return _settings_payload(db)
+    return _settings_payload(db, await _live_processes())
 
 
 # --- Conversation viewer (read-only) ---

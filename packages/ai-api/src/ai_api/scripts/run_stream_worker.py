@@ -2,7 +2,7 @@
 """
 Redis Streams worker entry point.
 
-Runs six tasks side by side in one process:
+Runs seven tasks side by side in one process:
 
 - the chat consumer (``streams/consumer.py``) — per-user sequential processing
   of chat messages, concurrent across users
@@ -18,6 +18,8 @@ Runs six tasks side by side in one process:
   scheduled messages: a paced Baileys lane and a Telegram/Cloud lane
 - the group-topics loop (``streams/group_topics.py``) — summarises finished
   group conversations into searchable topics when ``group_topics_enabled``
+- the process heartbeat (``process_heartbeat.py``) — what this worker loaded,
+  for ``GET /admin/processes`` and the per-process values in ``/admin/settings``
 
 If any task stops, the worker exits non-zero so the process supervisor
 (Docker ``restart: unless-stopped``) restarts it with every task healthy.
@@ -35,6 +37,7 @@ from ..config import settings
 from ..database import init_db
 from ..instrument import setup_instrumentation
 from ..logger import logger
+from ..process_heartbeat import run_heartbeat
 from ..streams.broadcast_consumer import run_broadcast_consumer
 from ..streams.consumer import run_stream_consumer
 from ..streams.group_topics import run_group_topics_loop
@@ -89,6 +92,8 @@ async def main() -> int:
         asyncio.create_task(run_scheduler(redis), name="scheduler"),
         asyncio.create_task(run_scheduled_sender(), name="scheduled-sender"),
         asyncio.create_task(run_group_topics_loop(redis), name="group-topics"),
+        # What this process loaded, for GET /admin/processes (never raises).
+        asyncio.create_task(run_heartbeat(redis, "worker"), name="heartbeat"),
     }
     try:
         done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)

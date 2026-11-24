@@ -541,3 +541,13 @@ class _RuntimeConfig:
 
 
 runtime_config = _RuntimeConfig()
+
+
+SECRET_MASK = "********"
+
+
+def display_value(spec: SettingSpec, value: Any) -> Any:
+    """``value`` as /admin shows it: a secret is masked (``None`` when unset)."""
+    if spec.secret:
+        return SECRET_MASK if value else None
+    return value

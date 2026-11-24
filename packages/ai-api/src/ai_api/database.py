@@ -19,6 +19,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, sessionmaker
 
@@ -180,16 +181,37 @@ class CoreMemory(Base):
 
 
 class BotPrompt(Base):
-    """Single active system-prompt override for this bot.
+    """Legacy whole-prompt override, no longer read by anything.
 
-    At most one row exists. When absent (or empty), the agent falls back to the
-    hardcoded ``DEFAULT_SYSTEM_PROMPT`` in ``agent/core.py``.
+    It replaced the code default wholesale, so a saved copy of the default hid
+    every later change to it. Kept as an archive (the API warns at startup when
+    it holds text); overrides now live in ``bot_prompt_overrides``
+    (``agent/prompt.py``).
     """
 
     __tablename__ = "bot_prompt"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     content = Column(Text, nullable=False, default="")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class BotPromptOverride(Base):
+    """An operator's override of one base-prompt section (``agent/prompt.py``).
+
+    ``key`` is a section key, or ``"all"`` for a whole-prompt override (the legacy
+    ``PUT /admin/prompt``). ``base_hash`` is the sha256 of the code default the
+    operator edited; once the code default changes the override is stale and the
+    code text applies again, so a code change can never be hidden by a DB copy.
+    A new table, so ``create_all()`` creates it.
+    """
+
+    __tablename__ = "bot_prompt_overrides"
+
+    key = Column(String, primary_key=True)
+    content = Column(Text, nullable=False, default="")
+    base_hash = Column(String(64), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -1024,37 +1046,48 @@ def get_or_create_core_memory(db, user_id: str) -> CoreMemory:
     return mem
 
 
-# --- Bot prompt (single active row) ---
+# --- Legacy bot_prompt (unread; see BotPrompt) ---
 
 
-def get_bot_prompt_row(db) -> BotPrompt | None:
-    """Return the single bot-prompt row, or None if no override is set."""
-    return db.query(BotPrompt).first()
+def custom_legacy_prompt_rows(db) -> list[BotPrompt]:
+    """``bot_prompt`` rows holding text: text nothing applies any more."""
+    return [row for row in db.query(BotPrompt).all() if (row.content or "").strip()]
 
 
-def get_active_prompt(db) -> str | None:
-    """Return the active prompt override content, or None to use the default."""
-    row = db.query(BotPrompt).first()
-    return row.content if row and row.content else None
+# --- Prompt section overrides (agent/prompt.py) ---
 
 
-def set_active_prompt(db, content: str) -> BotPrompt:
-    """Upsert the single bot-prompt row."""
-    row = db.query(BotPrompt).first()
-    if row is None:
-        row = BotPrompt(content=content)
-        db.add(row)
-    else:
-        row.content = content
+def get_prompt_overrides(db) -> dict[str, BotPromptOverride]:
+    """Every stored prompt override, by key."""
+    return {row.key: row for row in db.query(BotPromptOverride).all()}
+
+
+def set_prompt_override(db, key: str, content: str, base_hash: str) -> BotPromptOverride:
+    """Upsert the override of ``key``, based on the code default hashed as ``base_hash``."""
+    now = datetime.utcnow()
+    stmt = pg_insert(BotPromptOverride).values(
+        key=key, content=content, base_hash=base_hash, created_at=now, updated_at=now
+    )
+    # One statement, so two first saves of the same key can't race into an IntegrityError.
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[BotPromptOverride.key],
+        set_={"content": content, "base_hash": base_hash, "updated_at": now},
+    )
+    db.execute(stmt)
     db.commit()
-    db.refresh(row)
-    return row
+    return db.get(BotPromptOverride, key, populate_existing=True)
 
 
-def clear_active_prompt(db) -> None:
-    """Delete the prompt override, reverting the agent to its default."""
-    db.query(BotPrompt).delete()
+def delete_prompt_override(db, key: str) -> bool:
+    """Delete the override of ``key``; True when one existed."""
+    deleted = db.query(BotPromptOverride).filter(BotPromptOverride.key == key).delete()
     db.commit()
+    return bool(deleted)
+
+
+def get_core_memory(db, user_id: str) -> CoreMemory | None:
+    """The chat's core memory, without creating one (instructions and previews read only)."""
+    return db.query(CoreMemory).filter(CoreMemory.user_id == user_id).first()
 
 
 # --- Runtime settings overlay ---

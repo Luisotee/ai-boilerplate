@@ -17,10 +17,12 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from .agent.core import warn_on_removed_tools
+from .agent.prompt import load_resolved_prompt
 from .config import settings
-from .database import SessionLocal, get_active_prompt, init_db
+from .database import SessionLocal, custom_legacy_prompt_rows, init_db
 from .deps import limiter
 from .logger import logger
+from .process_heartbeat import run_heartbeat
 from .queue.connection import close_arq_redis, get_arq_redis
 from .routes import (
     access_router,
@@ -54,10 +56,17 @@ async def _cleanup_loop():
 
 
 def _warn_on_stale_prompt() -> None:
-    """Warn when the stored /admin prompt names tools that were removed."""
+    """Warn about stale prompt overrides, one naming removed tools, and a legacy row."""
     try:
         with SessionLocal() as db:
-            warn_on_removed_tools(get_active_prompt(db))
+            warn_on_removed_tools(load_resolved_prompt(db).text)  # also logs stale ones
+            for row in custom_legacy_prompt_rows(db):
+                logger.warning(
+                    f"⚠️ The legacy bot_prompt table holds a custom prompt ({len(row.content)} "
+                    f"chars, saved {row.updated_at:%Y-%m-%d}) that is no longer applied: the "
+                    "base prompt is the code sections plus bot_prompt_overrides. Move what is "
+                    "still wanted to a section in FleetView (PUT /admin/prompt/sections/operator)."
+                )
     except Exception as e:  # a startup check, never a reason not to start
         logger.warning(f"Could not check the stored system prompt: {e}")
 
@@ -81,6 +90,8 @@ async def lifespan(app: FastAPI):
 
     # Start periodic expired-document cleanup
     cleanup_task = asyncio.create_task(_cleanup_loop())
+    # What this process loaded, for GET /admin/processes (never raises).
+    heartbeat_task = asyncio.create_task(run_heartbeat(await get_arq_redis(), "api"))
 
     # Startup-only banner: shows the env value at boot. /admin can override it
     # at runtime — chat.py reads the effective value via runtime_config.
@@ -110,11 +121,12 @@ async def lifespan(app: FastAPI):
 
     # Cleanup on shutdown
     logger.info("Shutting down AI API service...")
-    cleanup_task.cancel()
-    try:
-        await cleanup_task
-    except asyncio.CancelledError:
-        pass
+    for task in (cleanup_task, heartbeat_task):
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
     await close_arq_redis()
     logger.info("✅ Redis connection pool closed")
 

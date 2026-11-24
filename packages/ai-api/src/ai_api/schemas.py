@@ -206,16 +206,95 @@ class UpdatePreferencesRequest(BaseModel):
 
 
 class PromptResponse(BaseModel):
-    """Active system prompt for this bot."""
+    """The base prompt the model gets: code sections with the fresh overrides applied."""
 
-    content: str = Field(..., description="Effective prompt (override if set, else the default)")
-    is_overridden: bool = Field(..., description="True if a DB override is active")
-    default_length: int = Field(..., description="Character length of the hardcoded default prompt")
-    updated_at: datetime | None = Field(None, description="When the override was last saved")
+    content: str = Field(..., description="The base prompt the model gets now")
+    is_overridden: bool = Field(
+        ..., description="True if a whole-prompt or section override is applied"
+    )
+    default_length: int = Field(..., description="Character length of the composed code default")
+    updated_at: datetime | None = Field(None, description="When an applied override was saved")
+    stale: bool = Field(
+        False,
+        description="A whole-prompt override exists but is ignored: the code default changed",
+    )
+    sections_overridden: int = Field(0, description="Section overrides currently applied")
+
+
+class PromptBlock(BaseModel):
+    """One block of the instructions, in the order the model gets them."""
+
+    key: str = Field(
+        ...,
+        description='"section:<key>", "hook:<function>", or "whole_override"',
+    )
+    kind: Literal["section", "hook"]
+    title: str
+    content: str = Field(..., description="Exactly this block's text ('' = nothing this chat)")
+    source: Literal["code", "override"]
+    editable: bool
+    stale_override: bool = Field(
+        ..., description="An override exists but the code default changed; the code text applies"
+    )
+
+
+class EffectivePromptResponse(BaseModel):
+    """The instructions the model gets, built by the agent's own hooks."""
+
+    content: str = Field(..., description="The whole instructions string the model receives")
+    length: int
+    chat: Literal["private", "group"]
+    surface: Literal["whatsapp", "telegram", "web"]
+    user_id: str | None = None
+    prompt_code_hash: str = Field(..., description="This api process's prompt-code fingerprint")
+    generated_at: datetime
+    blocks: list[PromptBlock]
+
+
+class PromptSectionItem(BaseModel):
+    """One editable section of the base prompt."""
+
+    key: str
+    title: str
+    default: str = Field(..., description="Code default in this deploy")
+    default_hash: str = Field(..., description="sha256 hex of default; send it back on PUT")
+    override: str | None = Field(None, description="Saved operator text, kept even when stale")
+    override_base_hash: str | None = None
+    override_updated_at: datetime | None = None
+    status: Literal["default", "override", "stale"]
+    effective: str = Field(
+        ..., description="This section's text now; the model gets it only when applied is true"
+    )
+    applied: bool = Field(
+        ..., description="False while a fresh whole override replaces every section, or orphan"
+    )
+    orphan: bool = Field(
+        False, description="A stored override for a key the code no longer has; never applied"
+    )
+
+
+class WholeOverrideState(BaseModel):
+    """The legacy whole-prompt override (PUT /admin/prompt)."""
+
+    active: bool
+    stale: bool
+    updated_at: datetime | None = None
+
+
+class PromptSectionsResponse(BaseModel):
+    sections: list[PromptSectionItem]
+    whole_override: WholeOverrideState
+
+
+class UpdatePromptSectionRequest(BaseModel):
+    """Override one section; base_hash is the default_hash the editor showed."""
+
+    content: str = Field(..., max_length=100_000, description="'' leaves the section out")
+    base_hash: str = Field(..., min_length=1, max_length=64)
 
 
 class UpdatePromptRequest(BaseModel):
-    """Request to set the active system-prompt override."""
+    """Request to set the whole-prompt override (applies while the code default is unchanged)."""
 
     content: str = Field(
         ...,
@@ -223,6 +302,13 @@ class UpdatePromptRequest(BaseModel):
         max_length=100_000,
         description="New system prompt (non-empty; capped at 100 KB)",
     )
+
+
+class SettingProcessValue(BaseModel):
+    process: str
+    instance: str
+    value: Any
+    started_at: datetime
 
 
 class SettingItem(BaseModel):
@@ -238,6 +324,30 @@ class SettingItem(BaseModel):
     description: str
     choices: list[str] | None = Field(None, description="Allowed values, if constrained")
     secret: bool = Field(False, description="True if the value is masked")
+    processes: list[SettingProcessValue] = Field(
+        default_factory=list,
+        description="The value each live process uses ([] without heartbeats)",
+    )
+    restart_pending: bool = Field(
+        False,
+        description="Restart-only setting whose live processes disagree (the older one is stale)",
+    )
+
+
+class ProcessInfo(BaseModel):
+    """A live api/worker process, from its Redis heartbeat."""
+
+    process: str = Field(..., description='"api" or "worker" today; an open string')
+    instance: str = Field(..., description="Hostname (the container id in Docker)")
+    pid: int
+    started_at: datetime
+    last_seen_at: datetime
+    prompt_code_hash: str
+
+
+class ProcessesResponse(BaseModel):
+    processes: list[ProcessInfo]
+    prompt_code_mismatch: bool = Field(..., description="Live processes run different prompt code")
 
 
 class SettingsResponse(BaseModel):

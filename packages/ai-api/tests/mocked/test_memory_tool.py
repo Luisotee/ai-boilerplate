@@ -403,7 +403,7 @@ async def test_core_memory_header_shows_the_size():
 
     ctx = MagicMock()
     with (
-        patch("ai_api.agent.core.get_or_create_core_memory", return_value=MagicMock(content=DOC)),
+        patch("ai_api.agent.core.get_core_memory", return_value=MagicMock(content=DOC)),
         patch("ai_api.agent.core.runtime_config") as mock_rc,
     ):
         mock_rc.get.return_value = 2000

@@ -1,6 +1,6 @@
 """Integration tests for /admin/* endpoints (management dashboard contract).
 
-Covers prompt GET/PUT/DELETE, settings GET/PATCH/DELETE (hot vs restart-only),
+Covers the prompt (whole, sections, effective), process heartbeats, settings GET/PATCH/DELETE (hot vs restart-only),
 the read-only conversation viewer, and auth enforcement.
 """
 
@@ -56,100 +56,446 @@ def _client(app):
 # ---------------------------------------------------------------------------
 
 
+def _row(content, base, updated_at=None, key=None):
+    from ai_api.agent.prompt import section_hash
+
+    return MagicMock(
+        key=key,
+        content=content,
+        base_hash=section_hash(base),
+        updated_at=updated_at or datetime(2026, 11, 20, tzinfo=UTC),
+    )
+
+
+async def _call(method, url, overrides=None, **kwargs):
+    """Call an /admin route with the stored prompt overrides ``overrides``."""
+    app = _app_with_db(_make_mock_db())
+    try:
+        with (
+            patch("ai_api.agent.prompt.get_prompt_overrides", return_value=overrides or {}),
+            patch("ai_api.routes.admin.set_prompt_override") as mock_set,
+            patch("ai_api.routes.admin.delete_prompt_override") as mock_delete,
+        ):
+            async with _client(app) as client:
+                resp = await client.request(method, url, headers=AUTH_HEADERS, **kwargs)
+        return resp, mock_set, mock_delete
+    finally:
+        _cleanup()
+
+
 class TestPrompt:
-    @patch("ai_api.main.init_db")
-    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
-    @patch("ai_api.main.cleanup_expired_documents")
-    async def test_get_prompt_default_when_no_override(self, *_):
-        from ai_api.agent.core import DEFAULT_SYSTEM_PROMPT
+    async def test_get_prompt_default_when_no_override(self):
+        from ai_api.agent.prompt import DEFAULT_SYSTEM_PROMPT
 
-        app = _app_with_db(_make_mock_db())
-        try:
-            with patch("ai_api.routes.admin.get_bot_prompt_row", return_value=None):
-                async with _client(app) as client:
-                    resp = await client.get("/admin/prompt", headers=AUTH_HEADERS)
-            assert resp.status_code == 200
-            data = resp.json()
-            assert data["is_overridden"] is False
-            assert data["content"] == DEFAULT_SYSTEM_PROMPT
-            assert data["default_length"] == len(DEFAULT_SYSTEM_PROMPT)
-            assert data["updated_at"] is None
-        finally:
-            _cleanup()
+        resp, _, _ = await _call("GET", "/admin/prompt")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["is_overridden"] is False
+        assert data["content"] == DEFAULT_SYSTEM_PROMPT
+        assert data["default_length"] == len(DEFAULT_SYSTEM_PROMPT)
+        assert data["stale"] is False
+        assert data["sections_overridden"] == 0
 
-    @patch("ai_api.main.init_db")
-    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
-    @patch("ai_api.main.cleanup_expired_documents")
-    async def test_get_prompt_returns_override(self, *_):
-        app = _app_with_db(_make_mock_db())
-        row = MagicMock(content="CUSTOM", updated_at=datetime(2026, 5, 25, tzinfo=UTC))
-        try:
-            with patch("ai_api.routes.admin.get_bot_prompt_row", return_value=row):
-                async with _client(app) as client:
-                    resp = await client.get("/admin/prompt", headers=AUTH_HEADERS)
-            assert resp.status_code == 200
-            data = resp.json()
-            assert data["is_overridden"] is True
-            assert data["content"] == "CUSTOM"
-            assert data["updated_at"] is not None
-        finally:
-            _cleanup()
+    async def test_get_prompt_returns_a_fresh_whole_override(self):
+        from ai_api.agent.prompt import DEFAULT_SYSTEM_PROMPT
 
-    @patch("ai_api.main.init_db")
-    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
-    @patch("ai_api.main.cleanup_expired_documents")
-    async def test_put_prompt_sets_override(self, *_):
-        app = _app_with_db(_make_mock_db())
-        row = MagicMock(content="NEW PROMPT", updated_at=datetime(2026, 5, 25, tzinfo=UTC))
-        try:
-            with (
-                patch("ai_api.routes.admin.set_active_prompt") as mock_set,
-                patch("ai_api.routes.admin.get_bot_prompt_row", return_value=row),
-            ):
-                async with _client(app) as client:
-                    resp = await client.put(
-                        "/admin/prompt", json={"content": "NEW PROMPT"}, headers=AUTH_HEADERS
-                    )
-            assert resp.status_code == 200
-            assert resp.json()["content"] == "NEW PROMPT"
-            mock_set.assert_called_once()
-        finally:
-            _cleanup()
+        rows = {"all": _row("CUSTOM", DEFAULT_SYSTEM_PROMPT)}
+        resp, _, _ = await _call("GET", "/admin/prompt", rows)
+        assert resp.json()["is_overridden"] is True
+        assert resp.json()["content"] == "CUSTOM"
 
-    @patch("ai_api.main.init_db")
-    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
-    @patch("ai_api.main.cleanup_expired_documents")
-    async def test_put_blank_prompt_rejected(self, *_):
-        app = _app_with_db(_make_mock_db())
+    async def test_a_stale_whole_override_is_ignored_and_flagged(self):
+        from ai_api.agent.prompt import DEFAULT_SYSTEM_PROMPT
+
+        rows = {"all": _row("OLD COPY", "the default of May")}
+        resp, _, _ = await _call("GET", "/admin/prompt", rows)
+        data = resp.json()
+        assert data["content"] == DEFAULT_SYSTEM_PROMPT
+        assert data["is_overridden"] is False
+        assert data["stale"] is True
+
+    async def test_section_overrides_show_in_the_base_prompt(self):
+        from ai_api.agent.prompt import SECTIONS_BY_KEY
+
+        rows = {"tone": _row("Tone: always cheerful.", SECTIONS_BY_KEY["tone"].default)}
+        resp, _, _ = await _call("GET", "/admin/prompt", rows)
+        data = resp.json()
+        assert "Tone: always cheerful." in data["content"]
+        assert data["is_overridden"] is True
+        assert data["sections_overridden"] == 1
+
+    async def test_put_prompt_stores_a_whole_override_on_the_current_default(self):
+        from ai_api.agent.prompt import DEFAULT_PROMPT_HASH
+
+        resp, mock_set, _ = await _call("PUT", "/admin/prompt", json={"content": "NEW PROMPT"})
+        assert resp.status_code == 200
+        mock_set.assert_called_once()
+        assert mock_set.call_args.args[1:] == ("all", "NEW PROMPT", DEFAULT_PROMPT_HASH)
+
+    async def test_saving_the_unchanged_default_stores_nothing(self):
+        """The June accident: an unchanged save must not freeze the prompt."""
+        from ai_api.agent.prompt import DEFAULT_SYSTEM_PROMPT
+
+        resp, mock_set, _ = await _call(
+            "PUT", "/admin/prompt", json={"content": DEFAULT_SYSTEM_PROMPT}
+        )
+        assert resp.status_code == 200
+        mock_set.assert_not_called()
+
+    async def test_an_empty_section_override_omits_it_and_counts_in_both_fields(self):
+        """ "" drops a non-empty default section: a real change, so it counts.
+
+        is_overridden and sections_overridden come from the same set (FleetView
+        derives "whole override active" from them).
+        """
+        from ai_api.agent.prompt import SECTIONS_BY_KEY
+
+        rows = {"tone": _row("", SECTIONS_BY_KEY["tone"].default)}
+        resp, _, _ = await _call("GET", "/admin/prompt", rows)
+        data = resp.json()
+        assert SECTIONS_BY_KEY["tone"].default not in data["content"]
+        assert data["sections_overridden"] == 1
+        assert data["is_overridden"] is True
+
+    async def test_section_overrides_under_a_whole_override_are_not_applied(self):
+        from ai_api.agent.prompt import DEFAULT_SYSTEM_PROMPT, SECTIONS_BY_KEY
+
+        rows = {
+            "all": _row("CUSTOM", DEFAULT_SYSTEM_PROMPT),
+            "tone": _row("Tone: cheerful.", SECTIONS_BY_KEY["tone"].default),
+        }
+        resp, _, _ = await _call("GET", "/admin/prompt", rows)
+        assert resp.json()["content"] == "CUSTOM"
+        assert resp.json()["sections_overridden"] == 0
+        resp, _, _ = await _call("GET", "/admin/prompt/sections", rows)
+        tone = next(s for s in resp.json()["sections"] if s["key"] == "tone")
+        assert tone["status"] == "override"  # the enum is unchanged
+        assert tone["applied"] is False
+        assert all(not s["applied"] for s in resp.json()["sections"])
+
+    async def test_putting_the_code_default_over_section_overrides_stores_it(self):
+        """With a section override the model gets other text, so the default is a change."""
+        from ai_api.agent.prompt import DEFAULT_SYSTEM_PROMPT, SECTIONS_BY_KEY
+
+        rows = {"tone": _row("Tone: cheerful.", SECTIONS_BY_KEY["tone"].default)}
+        resp, mock_set, _ = await _call(
+            "PUT", "/admin/prompt", rows, json={"content": DEFAULT_SYSTEM_PROMPT}
+        )
+        assert resp.status_code == 200
+        assert mock_set.call_args.args[1:3] == ("all", DEFAULT_SYSTEM_PROMPT)
+
+    async def test_resaving_the_current_text_with_crlf_and_trailing_spaces_stores_nothing(self):
+        from ai_api.agent.prompt import DEFAULT_SYSTEM_PROMPT
+
+        noisy = DEFAULT_SYSTEM_PROMPT.replace("\n", "  \r\n") + "\n\n"
+        resp, mock_set, mock_delete = await _call("PUT", "/admin/prompt", json={"content": noisy})
+        assert resp.status_code == 200
+        mock_set.assert_not_called()
+
+    async def test_an_unchanged_save_keeps_a_stale_whole_override(self):
+        from ai_api.agent.prompt import DEFAULT_SYSTEM_PROMPT
+
+        rows = {"all": _row("OLD COPY", "the default of May")}
+        resp, mock_set, mock_delete = await _call(
+            "PUT", "/admin/prompt", rows, json={"content": DEFAULT_SYSTEM_PROMPT}
+        )
+        assert resp.status_code == 200
+        mock_set.assert_not_called()
+        mock_delete.assert_not_called()
+
+    async def test_an_unchanged_save_clears_a_fresh_whole_override(self):
+        from ai_api.agent.prompt import DEFAULT_SYSTEM_PROMPT
+
+        rows = {"all": _row("CUSTOM", DEFAULT_SYSTEM_PROMPT)}
+        resp, mock_set, mock_delete = await _call(
+            "PUT", "/admin/prompt", rows, json={"content": DEFAULT_SYSTEM_PROMPT}
+        )
+        assert resp.status_code == 200
+        mock_set.assert_not_called()
+        assert mock_delete.call_args.args[1] == "all"
+
+    async def test_put_blank_prompt_rejected(self):
+        resp, _, _ = await _call("PUT", "/admin/prompt", json={"content": "   "})
+        assert resp.status_code == 400
+
+    async def test_delete_prompt_clears_the_whole_override(self):
+        from ai_api.agent.prompt import DEFAULT_SYSTEM_PROMPT
+
+        resp, _, mock_delete = await _call("DELETE", "/admin/prompt")
+        assert resp.status_code == 200
+        assert resp.json()["content"] == DEFAULT_SYSTEM_PROMPT
+        assert mock_delete.call_args.args[1] == "all"
+
+
+class TestPromptSections:
+    async def test_lists_every_section_in_prompt_order(self):
+        from ai_api.agent.prompt import PROMPT_SECTIONS, section_hash
+
+        resp, _, _ = await _call("GET", "/admin/prompt/sections")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert [s["key"] for s in data["sections"]] == [s.key for s in PROMPT_SECTIONS]
+        first = data["sections"][0]
+        assert first["status"] == "default"
+        assert first["default_hash"] == section_hash(PROMPT_SECTIONS[0].default)
+        assert first["effective"] == PROMPT_SECTIONS[0].default
+        assert data["whole_override"] == {"active": False, "stale": False, "updated_at": None}
+
+    async def test_a_stale_section_keeps_the_saved_text_but_applies_the_code(self):
+        from ai_api.agent.prompt import SECTIONS_BY_KEY
+
+        rows = {"tone": _row("Tone: old edit.", "an older tone default")}
+        resp, _, _ = await _call("GET", "/admin/prompt/sections", rows)
+        tone = next(s for s in resp.json()["sections"] if s["key"] == "tone")
+        assert tone["status"] == "stale"
+        assert tone["override"] == "Tone: old edit."
+        assert tone["effective"] == SECTIONS_BY_KEY["tone"].default
+
+    async def test_put_section_stores_it_with_the_default_hash(self):
+        from ai_api.agent.prompt import SECTIONS_BY_KEY, section_hash
+
+        base = section_hash(SECTIONS_BY_KEY["tone"].default)
+        resp, mock_set, _ = await _call(
+            "PUT",
+            "/admin/prompt/sections/tone",
+            json={"content": "Tone: brief.", "base_hash": base},
+        )
+        assert resp.status_code == 200
+        assert mock_set.call_args.args[1:] == ("tone", "Tone: brief.", base)
+
+    async def test_put_section_on_an_outdated_default_is_a_conflict(self):
+        resp, mock_set, _ = await _call(
+            "PUT", "/admin/prompt/sections/tone", json={"content": "x", "base_hash": "old"}
+        )
+        assert resp.status_code == 409
+        mock_set.assert_not_called()
+
+    async def test_put_section_equal_to_the_default_deletes_the_override(self):
+        from ai_api.agent.prompt import SECTIONS_BY_KEY, section_hash
+
+        default = SECTIONS_BY_KEY["tone"].default
+        resp, mock_set, mock_delete = await _call(
+            "PUT",
+            "/admin/prompt/sections/tone",
+            json={"content": default, "base_hash": section_hash(default)},
+        )
+        assert resp.status_code == 200
+        mock_set.assert_not_called()
+        assert mock_delete.call_args.args[1] == "tone"
+
+    async def test_unknown_section_is_404(self):
+        resp, _, _ = await _call("DELETE", "/admin/prompt/sections/nope")
+        assert resp.status_code == 404
+        resp, _, _ = await _call(
+            "PUT", "/admin/prompt/sections/nope", json={"content": "x", "base_hash": "y"}
+        )
+        assert resp.status_code == 404
+
+    async def test_an_orphan_override_is_listed_and_can_be_deleted(self):
+        rows = {"persona": _row("Old persona.", "gone", key="persona")}
+        resp, _, _ = await _call("GET", "/admin/prompt/sections", rows)
+        orphan = resp.json()["sections"][-1]
+        assert orphan["key"] == "persona"
+        assert orphan["orphan"] is True and orphan["applied"] is False
+        assert orphan["override"] == "Old persona."
+        assert all(not s["orphan"] for s in resp.json()["sections"][:-1])
+        resp, _, mock_delete = await _call("DELETE", "/admin/prompt/sections/persona", rows)
+        assert resp.status_code == 200
+        assert mock_delete.call_args.args[1] == "persona"
+
+    async def test_delete_section(self):
+        resp, _, mock_delete = await _call("DELETE", "/admin/prompt/sections/operator")
+        assert resp.status_code == 200
+        assert mock_delete.call_args.args[1] == "operator"
+
+
+class TestEffectivePrompt:
+    async def test_renders_every_hook_for_a_sample_private_chat(self):
+        from ai_api.agent.core import INSTRUCTION_HOOKS
+        from ai_api.agent.prompt import DEFAULT_SYSTEM_PROMPT
+
+        with patch("ai_api.agent.core.get_core_memory", return_value=None):
+            resp, _, _ = await _call("GET", "/admin/prompt/effective")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["chat"] == "private" and data["surface"] == "whatsapp"
+        assert data["content"].startswith(DEFAULT_SYSTEM_PROMPT)
+        assert data["length"] == len(data["content"])
+        hook_keys = [b["key"] for b in data["blocks"] if b["kind"] == "hook"]
+        assert hook_keys == [f"hook:{h.func.__name__}" for h in INSTRUCTION_HOOKS[1:]]
+        assert all(not b["editable"] for b in data["blocks"] if b["kind"] == "hook")
+        assert data["prompt_code_hash"]
+
+    async def test_web_group_is_rejected(self):
+        resp, _, _ = await _call("GET", "/admin/prompt/effective?chat=group&surface=web")
+        assert resp.status_code == 422
+
+    async def test_unknown_user_is_404(self):
+        app = _app_with_db(db := _make_mock_db())
+        db.get.return_value = None
         try:
             async with _client(app) as client:
-                resp = await client.put(
-                    "/admin/prompt", json={"content": "   "}, headers=AUTH_HEADERS
+                resp = await client.get(
+                    "/admin/prompt/effective?user_id=00000000-0000-0000-0000-000000000001",
+                    headers=AUTH_HEADERS,
                 )
-            assert resp.status_code == 400
+            assert resp.status_code == 404
         finally:
             _cleanup()
 
-    @patch("ai_api.main.init_db")
-    @patch("ai_api.main.get_arq_redis", new_callable=AsyncMock)
-    @patch("ai_api.main.cleanup_expired_documents")
-    async def test_delete_prompt_reverts_to_default(self, *_):
-        from ai_api.agent.core import DEFAULT_SYSTEM_PROMPT
 
+class TestEffectivePromptByJid:
+    async def test_renders_the_users_own_chat_by_jid(self):
+        user = MagicMock(
+            id="11111111-1111-1111-1111-111111111111", whatsapp_jid="5511@s.whatsapp.net"
+        )
         app = _app_with_db(_make_mock_db())
         try:
             with (
-                patch("ai_api.routes.admin.clear_active_prompt") as mock_clear,
-                patch("ai_api.routes.admin.get_bot_prompt_row", return_value=None),
+                patch("ai_api.routes.admin._resolve_user", return_value=user) as resolve,
+                patch("ai_api.agent.prompt.get_prompt_overrides", return_value={}),
+                patch("ai_api.agent.core.get_core_memory", return_value=MagicMock(content="- Ana")),
             ):
                 async with _client(app) as client:
-                    resp = await client.delete("/admin/prompt", headers=AUTH_HEADERS)
+                    resp = await client.get(
+                        "/admin/prompt/effective", params={"jid": "tg:42"}, headers=AUTH_HEADERS
+                    )
             assert resp.status_code == 200
-            assert resp.json()["is_overridden"] is False
-            assert resp.json()["content"] == DEFAULT_SYSTEM_PROMPT
-            mock_clear.assert_called_once()
+            data = resp.json()
+            assert resolve.call_args.args[1] == "tg:42"
+            assert data["user_id"] == user.id
+            assert data["surface"] == "telegram"  # the chat it was looked up by
+            assert "- Ana" in data["content"]
         finally:
             _cleanup()
+
+    async def test_unknown_jid_is_404(self):
+        app = _app_with_db(_make_mock_db())
+        try:
+            with patch("ai_api.routes.admin._resolve_user", return_value=None):
+                async with _client(app) as client:
+                    resp = await client.get(
+                        "/admin/prompt/effective", params={"jid": "nobody"}, headers=AUTH_HEADERS
+                    )
+            assert resp.status_code == 404
+        finally:
+            _cleanup()
+
+    async def test_a_user_with_the_web_group_sample_selectors_is_not_rejected(self):
+        """chat and surface only pick the sample chat; a user's own chat ignores them."""
+        user = MagicMock(
+            id="11111111-1111-1111-1111-111111111111", whatsapp_jid="5511@s.whatsapp.net"
+        )
+        app = _app_with_db(db := _make_mock_db())
+        db.get.return_value = user
+        try:
+            with (
+                patch("ai_api.agent.prompt.get_prompt_overrides", return_value={}),
+                patch("ai_api.agent.core.get_core_memory", return_value=None),
+            ):
+                async with _client(app) as client:
+                    resp = await client.get(
+                        "/admin/prompt/effective",
+                        params={"user_id": user.id, "surface": "web", "chat": "group"},
+                        headers=AUTH_HEADERS,
+                    )
+            assert resp.status_code == 200
+            assert resp.json()["chat"] == "private"
+        finally:
+            _cleanup()
+
+    async def test_user_id_and_jid_together_is_422(self):
+        resp, _, _ = await _call(
+            "GET",
+            "/admin/prompt/effective",
+            params={"jid": "x", "user_id": "11111111-1111-1111-1111-111111111111"},
+        )
+        assert resp.status_code == 422
+
+
+class TestSettingsPerProcess:
+    async def test_values_per_process_and_restart_pending(self):
+        old = datetime(2026, 11, 1, tzinfo=UTC)
+        new = datetime(2026, 11, 20, tzinfo=UTC)
+
+        def proc(name, started, timeout):
+            return {
+                "process": name,
+                "instance": f"{name}-host",
+                "pid": 1,
+                "started_at": started,
+                "last_seen_at": new,
+                "prompt_code_hash": "h",
+                "settings": {"deepseek_timeout_seconds": timeout, "history_limit_private": 10},
+            }
+
+        procs = [proc("api", new, 45.0), proc("worker", old, 30.0)]
+        app = _app_with_db(db := _make_mock_db())
+        db.query.return_value.all.return_value = []
+        try:
+            with (
+                patch("ai_api.routes.admin.read_processes", AsyncMock(return_value=procs)),
+                patch("ai_api.routes.admin.get_setting_overrides", return_value={}),
+            ):
+                async with _client(app) as client:
+                    resp = await client.get("/admin/settings", headers=AUTH_HEADERS)
+            assert resp.status_code == 200
+            items = resp.json()["settings"]
+            timeout = _find(items, "deepseek_timeout_seconds")
+            assert timeout["restart_pending"] is True
+            assert [(p["process"], p["value"]) for p in timeout["processes"]] == [
+                ("api", 45.0),
+                ("worker", 30.0),
+            ]
+            history = _find(items, "history_limit_private")
+            assert history["restart_pending"] is False  # hot settings never need a restart
+            whitelist = _find(items, "whitelist_phones")
+            assert whitelist["processes"] == []  # not in these heartbeats
+        finally:
+            _cleanup()
+
+
+class TestProcesses:
+    async def test_lists_live_processes_and_flags_a_prompt_code_mismatch(self):
+        now = datetime(2026, 11, 20, tzinfo=UTC)
+        procs = [
+            {
+                "process": "api",
+                "instance": "a1",
+                "pid": 1,
+                "started_at": now,
+                "last_seen_at": now,
+                "prompt_code_hash": "aaa",
+                "settings": {},
+            },
+            {
+                "process": "worker",
+                "instance": "w1",
+                "pid": 1,
+                "started_at": now,
+                "last_seen_at": now,
+                "prompt_code_hash": "bbb",
+                "settings": {},
+            },
+        ]
+        with patch("ai_api.routes.admin.read_processes", AsyncMock(return_value=procs)):
+            resp, _, _ = await _call("GET", "/admin/processes")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert [p["process"] for p in data["processes"]] == ["api", "worker"]
+        assert data["prompt_code_mismatch"] is True
+
+    async def test_redis_down_gives_an_empty_list(self):
+        with patch(
+            "ai_api.routes.admin.read_processes", AsyncMock(side_effect=ConnectionError("down"))
+        ):
+            resp, _, _ = await _call("GET", "/admin/processes")
+        assert resp.status_code == 200
+        assert resp.json() == {"processes": [], "prompt_code_mismatch": False}
+
+
+# ---------------------------------------------------------------------------
+# Settings
 
 
 # ---------------------------------------------------------------------------

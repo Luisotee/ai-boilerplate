@@ -38,4 +38,10 @@ Every model request (one per tool round trip) resends the instructions and every
 - **One tool per domain with an `action`** (`settings`) rather than one tool per verb
 - **Hide what can't work via `prepare`** (one hook per tool; to add a condition, extend the hook rather than replace it), but only on what is the same for the whole chat (chat kind, client, a flag), never on the sender or the message, which would change the tool list between turns or group members and break the provider's prompt cache. When an instructions hook describes hidden tools, share the predicate (`services/shared_groups.py` `shared_group_tools_available`)
 - **`tests/mocked/test_prompt_surface.py`** snapshots instructions + `tools[]` per surface with char totals in `tests/fixtures/prompt_surface/*.json`. After an intended change: `UPDATE_PROMPT_SURFACE=1 uv run pytest tests/mocked/test_prompt_surface.py` and commit the JSON; the diff shows the cost
-- **Forks**: a `bot_prompt` row replaces `DEFAULT_SYSTEM_PROMPT` wholesale, so a tool rename must also be edited into each deployment's stored prompt
+- **Prompt rules live in `agent/prompt.py`** (`PROMPT_SECTIONS["tools"]`). A section override saved through FleetView goes stale (and stops applying) once the code default of that section changes, so a tool rename in the code reaches the model; an override written against the current default that names a removed tool is logged by `warn_on_removed_tools`
+
+## Live prompt (`agent/prompt.py`, `agent/effective_prompt.py`)
+
+- The base prompt is `PROMPT_SECTIONS` (identity, tone, tools, bursts, and an empty `operator` section for the operator's own text), joined by a blank line. Overrides (`bot_prompt_overrides`) store the sha256 of the default they edited and apply only while it is unchanged; the legacy `bot_prompt` table is unread. Routes and rules: `packages/ai-api/docs/admin-api.md`
+- **Register every instructions function with `@instruction_hook(title)`** (`agent/core.py`), never a bare `agent.instructions`: `GET /admin/prompt/effective` renders `INSTRUCTION_HOOKS` with a real `RunContext`, and `tests/mocked/test_effective_prompt.py` compares that with what a real run sends
+- `inject_core_memory` reads with `get_core_memory` (never creates a row), so a preview writes nothing; the `memory` tool creates the row on its first write
