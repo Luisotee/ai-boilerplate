@@ -6,6 +6,7 @@ the requester's group tasks, and a /link merge re-points them instead of letting
 the FK's SET NULL turn them into ordinary group tasks.
 """
 
+import uuid
 from datetime import datetime, timedelta
 
 import pytest
@@ -146,6 +147,83 @@ class TestRecordCreatorVerdict:
         assert await task_creator.creator_verdict(task.id) is None
 
 
+def _next_run(db, task_id):
+    """A new claimed run of the task (the scheduler's next fire)."""
+    task = db.get(ScheduledTask, task_id)
+    last = max(r.scheduled_for for r in db.query(TaskRun).filter(TaskRun.task_id == task_id))
+    run = TaskRun(
+        task_id=task.id,
+        user_id=task.user_id,
+        scheduled_for=last + timedelta(minutes=1),
+        status=runner.RUNNING,
+        late_seconds=0,
+    )
+    db.add(run)
+    db.commit()
+    return run
+
+
+class TestGroupMissingFromSharedGroups:
+    """Baileys leaves a group out when it can't resolve a LID: disable on the 2nd miss only."""
+
+    @pytest.fixture
+    def missing(self, monkeypatch):
+        async def status(_client, _platform, _user, _group_jid):
+            return False, False
+
+        monkeypatch.setattr(task_creator, "requester_group_status", status)
+
+    async def _check(self, factory, task_id, run_id):
+        verdict = await task_creator.creator_verdict(task_id)
+        assert verdict is not None
+        assert runner.record_creator_verdict(run_id, runner.RUNNING, verdict)
+        return verdict
+
+    async def test_recurring_first_miss_skips_second_disables(self, factory, missing):
+        db = factory()
+        _r, _g, task, run = _setup(db)
+        assert await self._check(factory, task.id, run.id) == task_creator.CREATOR_NOT_SEEN
+        db.expire_all()
+        row = db.get(ScheduledTask, task.id)
+        assert (row.status, row.last_error, row.consecutive_failures) == (
+            "active",
+            "creator_not_seen",
+            0,
+        )
+        second = _next_run(db, task.id)
+        assert await self._check(factory, task.id, second.id) == task_creator.CREATOR_NOT_IN_GROUP
+        db.expire_all()
+        row = db.get(ScheduledTask, task.id)
+        assert (row.status, row.disabled_reason) == ("disabled", "creator_not_in_group")
+
+    async def test_a_run_in_between_resets_the_miss(self, factory, missing, monkeypatch):
+        db = factory()
+        _r, _g, task, run = _setup(db)
+        await self._check(factory, task.id, run.id)
+        db.expire_all()
+        ok = _next_run(db, task.id)
+        assert runner.record(ok.id, runner.RUNNING, runner.SENT)
+        third = _next_run(db, task.id)
+        assert await self._check(factory, task.id, third.id) == task_creator.CREATOR_NOT_SEEN
+        db.expire_all()
+        assert db.get(ScheduledTask, task.id).status == "active"
+
+    async def test_one_shot_is_re_armed_then_disabled(self, factory, missing):
+        db = factory()
+        _r, _g, task, run = _setup(db, one_shot=True)
+        before = datetime.utcnow()
+        assert await self._check(factory, task.id, run.id) == task_creator.CREATOR_NOT_SEEN
+        db.expire_all()
+        row = db.get(ScheduledTask, task.id)
+        assert row.status == "active"
+        assert row.next_run_at >= before + runner.ONE_SHOT_RETRY_DELAY - timedelta(seconds=5)
+        second = _next_run(db, task.id)
+        assert await self._check(factory, task.id, second.id) == task_creator.CREATOR_NOT_IN_GROUP
+        db.expire_all()
+        row = db.get(ScheduledTask, task.id)
+        assert (row.status, row.disabled_reason) == ("disabled", "creator_not_in_group")
+
+
 class TestRowLifecycle:
     def test_clean_all_cancels_the_requesters_group_tasks(self, factory):
         db = factory()
@@ -178,5 +256,32 @@ class TestRowLifecycle:
         assert [t.id for t in svc.list_tasks_created_from(db, requester.id)] == [task.id]
         ref = str(task.id).replace("-", "")[:8]
         assert svc.find_task(db, None, ref, created_from=requester.id).id == task.id
-        with pytest.raises(svc.TaskError):
+        with pytest.raises(svc.TaskNotFound):
             svc.find_task(db, requester.id, ref)  # not this chat's own task
+
+    def test_an_ambiguous_id_is_not_a_miss(self, factory):
+        """Two of the chat's own tasks share the prefix: TaskError, never TaskNotFound."""
+        db = factory()
+        requester, _g, task, _run = _setup(db)
+        ids = ["ab12cd34-0000-0000-0000-000000000001", "ab12cd34-0000-0000-0000-000000000002"]
+        for raw in ids:
+            db.add(
+                ScheduledTask(
+                    id=uuid.UUID(raw),
+                    user_id=requester.id,
+                    address=PRIVATE,
+                    kind="reminder",
+                    text="x",
+                    schedule="every day at 9:00",
+                    cron_expr="0 9 * * *",
+                    timezone="America/Sao_Paulo",
+                    status="active",
+                    next_run_at=datetime(2026, 11, 25, 12, 0),
+                    consecutive_failures=0,
+                    run_count=0,
+                )
+            )
+        db.commit()
+        with pytest.raises(svc.TaskError) as raised:
+            svc.cancel_task(db, requester.id, "ab12")
+        assert not isinstance(raised.value, svc.TaskNotFound)

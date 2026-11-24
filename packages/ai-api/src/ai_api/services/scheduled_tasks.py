@@ -52,6 +52,10 @@ class TaskError(ValueError):
     """The request can't be honoured; the message is safe to show the user."""
 
 
+class TaskNotFound(TaskError):
+    """No task matches the id (as opposed to an invalid or ambiguous id)."""
+
+
 def utcnow() -> datetime:
     """Naive UTC, matching the DB's ``datetime.utcnow`` columns."""
     return datetime.now(UTC).replace(tzinfo=None)
@@ -295,7 +299,7 @@ def disable_created_from(db: Session, user_id) -> int:
 def find_task(db: Session, user_id, ref: str, *, created_from=None) -> ScheduledTask:
     """This chat's task whose id starts with ``ref`` (``#`` and dashes ignored).
 
-    Raises ``TaskError`` when none or several match. Scoped to the chat, so a
+    Raises ``TaskNotFound`` when none match, ``TaskError`` when several do. Scoped to the chat, so a
     guessed id can never touch another chat's task; only active and disabled
     tasks match (a finished one can't make a prefix ambiguous).
     """
@@ -317,7 +321,7 @@ def find_task(db: Session, user_id, ref: str, *, created_from=None) -> Scheduled
         .all()
     )
     if not matches:
-        raise TaskError(f"No scheduled task #{ref} in this chat.")
+        raise TaskNotFound(f"No scheduled task #{ref} in this chat.")
     if len(matches) > 1:
         raise TaskError(f"Several tasks start with #{ref}; give more of the id.")
     return matches[0]

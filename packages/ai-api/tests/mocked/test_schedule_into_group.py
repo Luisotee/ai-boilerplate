@@ -216,10 +216,10 @@ class TestInAGroup:
 
 class TestCancelFromPrivate:
     def _patches(self, task):
-        from ai_api.services.scheduled_tasks import TaskError
+        from ai_api.services.scheduled_tasks import TaskNotFound
 
         return (
-            patch(f"{MOD}.cancel_task", side_effect=TaskError("none here")),
+            patch(f"{MOD}.cancel_task", side_effect=TaskNotFound("none here")),
             patch(f"{MOD}.find_task", return_value=task),
         )
 
@@ -249,6 +249,20 @@ class TestCancelFromPrivate:
             reply = await manage_scheduled_tasks(_ctx(), "cancel", task_id="ab12cd34")
         assert task.status == "active" and "couldn't confirm" in reply
 
+    async def test_an_ambiguous_id_never_falls_through_to_a_group_task(self):
+        """Two private reminders and one group task share the prefix: refuse, cancel nothing."""
+        from ai_api.services.scheduled_tasks import TaskError
+
+        task = _task()
+        with (
+            patch(f"{MOD}.cancel_task", side_effect=TaskError("Several tasks start with #ab12")),
+            patch(f"{MOD}.find_task", return_value=task) as find,
+            patch(f"{MOD}._admin_status", AsyncMock(return_value=(True, True))),
+        ):
+            reply = await manage_scheduled_tasks(_ctx(), "cancel", task_id="ab12")
+        find.assert_not_called()
+        assert task.status == "active" and "Several tasks" in reply
+
     async def test_list_shows_the_group_tasks_with_their_group(self):
         ctx = _ctx()
         with (
@@ -262,13 +276,15 @@ class TestCancelFromPrivate:
 # --- The live re-check before every run ----------------------------------------------
 
 
-def _loaded(user, platform="baileys"):
-    return patch.object(task_creator, "_load", return_value=(True, user, platform, GROUP))
+def _loaded(user, platform="baileys", missed_before=False):
+    return patch.object(
+        task_creator, "_load", return_value=(True, user, platform, GROUP, missed_before)
+    )
 
 
 class TestCreatorVerdict:
     async def test_an_ordinary_task_is_not_checked(self):
-        with patch.object(task_creator, "_load", return_value=(False, None, "", "")):
+        with patch.object(task_creator, "_load", return_value=(False, None, "", "", False)):
             assert await task_creator.creator_verdict(uuid.uuid4()) is None
 
     async def test_a_deleted_creator_disables(self):
@@ -280,7 +296,7 @@ class TestCreatorVerdict:
         "answer,expected",
         [
             ((True, True), None),
-            ((False, False), task_creator.CREATOR_NOT_IN_GROUP),
+            ((False, False), task_creator.CREATOR_NOT_SEEN),  # a first Baileys miss
             ((True, False), task_creator.CREATOR_NOT_ADMIN),
             ((True, None), task_creator.CREATOR_CHECK_FAILED),  # older client: no field
         ],
@@ -291,6 +307,26 @@ class TestCreatorVerdict:
             patch.object(task_creator, "requester_group_status", AsyncMock(return_value=answer)),
         ):
             assert await task_creator.creator_verdict(uuid.uuid4()) == expected
+
+    @pytest.mark.parametrize(
+        "platform,missed_before,expected",
+        [
+            # Baileys omits a group it can't resolve a LID for: one miss is no proof.
+            ("baileys", False, task_creator.CREATOR_NOT_SEEN),
+            ("baileys", True, task_creator.CREATOR_NOT_IN_GROUP),
+            # Telegram's getChatMember left/kicked is authoritative.
+            ("telegram", False, task_creator.CREATOR_NOT_IN_GROUP),
+        ],
+    )
+    async def test_a_missing_group(self, platform, missed_before, expected):
+        with (
+            _loaded(_requester(), platform, missed_before),
+            patch.object(
+                task_creator, "requester_group_status", AsyncMock(return_value=(False, False))
+            ),
+        ):
+            assert await task_creator.creator_verdict(uuid.uuid4()) == expected
+        assert task_creator.CREATOR_NOT_SEEN not in task_creator.DISABLING
 
     async def test_a_lookup_error_only_skips_the_run(self):
         with (

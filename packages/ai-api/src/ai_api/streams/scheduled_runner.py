@@ -304,8 +304,9 @@ def record_creator_verdict(run_id: uuid.UUID, expected: str, verdict: str) -> bo
         if run is None:
             return False
         task = db.get(ScheduledTask, run.task_id)
-        # A transient lookup failure re-arms a one-shot (bounded attempts)
-        # instead of ending it: nothing was sent and the creator may be fine.
+        # A transient verdict (lookup failure, a first shared-groups miss)
+        # re-arms a one-shot (bounded attempts) instead of ending it: nothing
+        # was sent and the creator may be fine.
         retry_at = (
             _one_shot_retry_at(db, task, now)
             if task is not None and verdict not in DISABLING

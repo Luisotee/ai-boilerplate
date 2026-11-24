@@ -29,6 +29,7 @@ from ...runtime_config import runtime_config
 from ...services.schedule import format_local
 from ...services.scheduled_tasks import (
     TaskError,
+    TaskNotFound,
     cancel_task,
     create_task,
     describe_task,
@@ -304,7 +305,9 @@ async def _cancel(deps: AgentDeps, ref: str, group_name: str | None, in_group: b
             task = cancel_task(deps.db, deps.user_id, ref)
             deps.db.commit()
             return f"Cancelled #{short_id(task)} ({task.schedule})."
-        except TaskError:
+        except TaskNotFound:
+            # Only "none of this chat's": an invalid or ambiguous id is never
+            # resolved by cancelling a task scheduled into a group instead.
             if in_group:
                 raise
             deps.db.rollback()
